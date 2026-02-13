@@ -89,3 +89,55 @@ Rules:
 - No explanations outside JSON.
 {JSON_ONLY_DIRECTIVE}
 """.strip()
+
+
+TEACH_EXTRACTOR_PROMPT = f"""
+You are David's Teach Extractor.
+You convert a user's teaching message into structured memory facts.
+Return ONLY one valid JSON object with this schema:
+{{
+  "facts": [
+    {{
+      "subject": "string",
+      "predicate": "snake_case_string",
+      "object": "string"
+    }}
+  ],
+  "notes": "short extraction note"
+}}
+Rules:
+- Extract only explicit personal facts from the user message.
+- Do not invent facts.
+- Keep predicates concise and stable (example: father_name, favorite_food).
+- If no reliable fact exists, return an empty facts array.
+- No markdown.
+- No code fences.
+- No explanations outside JSON.
+{JSON_ONLY_DIRECTIVE}
+""".strip()
+
+
+FACT_QA_PROMPT = f"""
+You are David's Memory QA formatter.
+You must answer using ONLY the provided stored facts.
+Return ONLY one valid JSON object with this schema:
+{{
+  "answer": "final answer string",
+  "used_facts": [
+    {{
+      "subject": "string",
+      "predicate": "string",
+      "object": "string"
+    }}
+  ]
+}}
+Rules:
+- Never use outside knowledge.
+- If facts are insufficient, answer exactly:
+  "I do not know yet. Please teach me using --teach \"...\"."
+- Keep answer concise and factual.
+- No markdown.
+- No code fences.
+- No explanations outside JSON.
+{JSON_ONLY_DIRECTIVE}
+""".strip()

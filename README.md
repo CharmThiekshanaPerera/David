@@ -44,6 +44,7 @@ David enforces:
 - `agent/safety.py`: path/size/command policy enforcement
 - `agent/executor.py`: restricted command runner with timeouts
 - `agent/memory.py`: long-term lessons store/retrieval
+- `agent/qa.py`: explicit teach/ask fact memory pathway
 - `agent/telemetry.py`: structured telemetry and performance metrics
 - `workspace/`: protected coding area for generated files
 - `memory/long_term.json`: persistent lessons
@@ -113,11 +114,58 @@ Or run diagnostics only:
 python -m agent.main --self-diagnostics
 ```
 
+### 7. Teach David Facts (Explicit Memory Write)
+
+David writes personal facts to long-term memory only when you use `--teach`.
+Normal `--goal` runs do not save personal facts.
+
+```powershell
+python -m agent.main --teach "Hi David I am your dad. My Name is Charm Thiekshana."
+```
+
+Expected teaching confirmation includes stored facts such as:
+
+```text
+- David.father_name = Charm Thiekshana
+```
+
+Ask later using memory-only retrieval:
+
+```powershell
+python -m agent.main --ask "Who is your father?"
+```
+
+Expected answer:
+
+```text
+My father is Charm Thiekshana.
+```
+
+Memory file schema (`memory/long_term.json`) now includes explicit factual memory:
+
+```json
+{
+  "facts": [
+    {
+      "subject": "David",
+      "predicate": "father_name",
+      "object": "Charm Thiekshana",
+      "source": "user_teach",
+      "confidence": 1.0,
+      "timestamp": "2026-01-01T00:00:00+00:00"
+    }
+  ],
+  "lessons": [],
+  "preferences": []
+}
+```
+
 ## How David Learns
 
 - Each iteration can add reusable lessons to `memory/long_term.json`.
 - Future goals load relevant lessons to avoid repeating mistakes.
 - Telemetry logs each major step for debugging and auditability.
+- Personal facts are stored only through the explicit `--teach` pathway.
 
 ## Tests
 
@@ -127,7 +175,7 @@ Run:
 pytest -q
 ```
 
-Current tests validate safety boundaries and executor timeout behavior.
+Current tests validate safety boundaries, executor timeout behavior, and teach/ask memory flow.
 
 ## Suggested Evolution Roadmap
 

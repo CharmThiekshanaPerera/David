@@ -102,7 +102,7 @@ def load_config() -> AgentConfig:
     memory_dir.mkdir(parents=True, exist_ok=True)
     logs_dir.mkdir(parents=True, exist_ok=True)
     if not memory_file.exists():
-        memory_file.write_text('{"lessons": []}\n', encoding="utf-8")
+        memory_file.write_text('{"facts": [], "lessons": [], "preferences": []}\n', encoding="utf-8")
 
     return AgentConfig(
         project_root=project_root,
