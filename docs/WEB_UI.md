@@ -146,9 +146,33 @@ python -m web.server --host 127.0.0.1 --port 8787
 - Memory conflict writes from `/teach` require explicit approve/reject.
 - User input is treated as untrusted data.
 
-## 7. How To Test the Web UI
+## 7. How To Test the Web UI (Step-by-Step + Samples)
 
-## A) Automated tests
+This section gives a full test flow that covers all tabs and safety controls.
+
+## A) Pre-checks
+
+1. Start Ollama:
+
+```bash
+ollama serve
+```
+
+2. Start web server:
+
+```bash
+python -m web.server --host 127.0.0.1 --port 8787
+```
+
+3. Open browser:
+
+```text
+http://127.0.0.1:8787
+```
+
+4. Open a second terminal for API tests.
+
+## B) Automated tests
 
 Run web tests only:
 
@@ -156,69 +180,127 @@ Run web tests only:
 pytest -q tests/test_web_api.py tests/test_web_safety.py
 ```
 
-Run all project tests:
+Run full suite:
 
 ```bash
 pytest -q
 ```
 
-Coverage of web tests:
+What this validates:
 
-- API route behavior using Flask test client.
-- invalid command rejection.
-- run detail retrieval.
-- memory endpoint response.
-- safety helper validation for run ID + workspace path traversal.
+- API route behavior (status, run, run details, memory).
+- rejection of invalid commands.
+- workspace/path safety checks.
 
-## B) API smoke tests (manual)
+## C) API smoke tests with sample payloads
 
-Start server, then in another terminal:
+1. Health/status:
 
 ```bash
 curl -s http://127.0.0.1:8787/healthz
 curl -s http://127.0.0.1:8787/api/status
-curl -s -X POST http://127.0.0.1:8787/api/run -H 'Content-Type: application/json' -d '{"command":"/ask Who is your father?"}'
-curl -s http://127.0.0.1:8787/api/runs
+```
+
+2. Ask run sample:
+
+```bash
+curl -s -X POST http://127.0.0.1:8787/api/run \
+  -H 'Content-Type: application/json' \
+  -d '{"command":"/ask Who is your father?"}'
+```
+
+3. Goal preview sample:
+
+```bash
+curl -s -X POST http://127.0.0.1:8787/api/run \
+  -H 'Content-Type: application/json' \
+  -d '{"command":"/goal Create hello.py and test_hello.py", "preview": true}'
+```
+
+4. Invalid command sample (must fail):
+
+```bash
+curl -s -X POST http://127.0.0.1:8787/api/run \
+  -H 'Content-Type: application/json' \
+  -d '{"command":"ls -la"}'
 ```
 
 Expected:
 
-- `healthz` returns `{"ok": true, "status": "up"}`.
-- status endpoint returns `ok: true`.
-- run endpoint accepts `/ask`, `/goal`, `/teach` and rejects others.
+- valid commands return `ok: true`.
+- invalid command returns `ok: false`.
 
-## C) Manual UI test checklist
+## D) Full UI test flow (all tabs)
 
-1. Dashboard load:
-   - page opens at `http://127.0.0.1:8787` with 8 tabs visible.
-2. Start preview run:
-   - run `/goal ...` with `Run preview` enabled.
-   - verify run status becomes `preview_ready`.
-   - verify diff visible in Diff Viewer.
-3. Run real goal:
-   - disable preview and start `/goal ...`.
-   - verify progress bar and iteration updates.
-   - check Runs timeline events update.
-4. Approval gate:
-   - in Settings, temporarily lower thresholds (example: `risky_multi_file_threshold=2`).
-   - run a goal likely to touch multiple files.
-   - verify Pending Approvals shows request.
-   - verify Approve and Reject both work.
-5. Memory conflict gate:
-   - use CLI Mirror:
-     - `/teach My name is Alice`
-     - `/teach My name is Bob`
-   - verify conflict/approval behavior and Memory conflict warnings.
-6. Logs and telemetry:
-   - verify Telemetry values update after runs.
-   - verify Logs tab shows recent entries.
-7. Retry and bundle:
-   - select run in Runs tab.
-   - click `Retry`, verify new run appears.
-   - click `Bundle`, verify zip download.
-8. Safe mode:
-   - set `safe_mode=true` in Settings.
-   - verify write attempts are blocked or require preview.
+1. Dashboard tab:
+   - enter goal: `Create a simple calculator module with pytest tests`.
+   - enable `Run preview`.
+   - click `Start Goal`.
+   - expected: status changes to `preview_ready` and progress reaches `100`.
+
+2. Runs tab:
+   - click `Refresh`.
+   - expected: new run row appears with mode `goal`.
+   - click `View` on the run.
+   - expected: timeline shows `plan_created`, `coder_output`, and preview/result events.
+
+3. Diff Viewer tab:
+   - use the same run ID.
+   - click `Load Diffs`.
+   - expected: patch text appears for one or more files.
+
+4. CLI Mirror tab:
+   - send `/teach My name is Alice`.
+   - send `/ask What is my name?`
+   - expected: runs queue successfully and result output appears.
+
+5. Memory tab:
+   - expected: facts list includes the new taught fact.
+   - conflict sample:
+     - send `/teach My name is Bob`.
+   - expected: conflict warning appears or approval request is created before overwrite.
+
+6. Settings tab:
+   - set:
+     - `risky_multi_file_threshold = 2`
+     - `risky_large_edit_bytes = 3000`
+   - click `Save Settings`.
+   - expected: success message and values persist on refresh.
+
+7. Approval flow (Dashboard):
+   - start a non-preview goal likely to touch multiple files:
+     - `Create two files: app.py and test_app.py with passing pytest tests`.
+   - expected: `Pending Approvals` shows a risky-edit request.
+   - click `Reject` first, verify run becomes `rejected`.
+   - run again and click `Approve`, verify run continues.
+
+8. Telemetry tab:
+   - expected: total iterations and chart values increase after each run.
+   - expected: regression warning count remains `0` unless tests start failing after passing.
+
+9. Logs tab:
+   - click `Refresh logs`.
+   - expected: entries visible for `web_control_center.log` and `telemetry.jsonl`.
+
+10. Safe mode test:
+   - in Settings set `safe_mode=true` and save.
+   - from Dashboard start non-preview `/goal`.
+   - expected: run blocked with read-only/safe mode error.
+   - start preview goal with safe mode on.
+   - expected: preview run allowed.
+
+11. Retry + Bundle test (Runs):
+   - pick a failed/rejected run.
+   - click `Retry`, expected new run created.
+   - click `Bundle`, expected zip download of run artifacts.
+
+## E) Test sample commands for quick copy/paste
+
+- `/goal Create hello.py and test_hello.py with one passing pytest test`
+- `/goal Refactor hello.py and keep tests passing`
+- `/ask Who is your father?`
+- `/teach My favorite language is Python`
+- `/teach My favorite language is Go` (conflict sample)
 
 ## 8. Troubleshooting
 
