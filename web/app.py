@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
+import time
 from pathlib import Path
 from typing import Any
 
-from flask import Flask, jsonify, request, send_file, send_from_directory
+from flask import Flask, Response, jsonify, request, send_file, send_from_directory, stream_with_context
 
 from agent.config import AgentConfig, load_config
 from web.control_center import DavidControlCenter, create_control_center
@@ -27,9 +29,43 @@ def create_app(
         cfg = load_config()
     center = control_center or create_control_center(config=cfg, data_root=data_root)
     app.config["DAVID_CENTER"] = center
+    app.config["MAX_CONTENT_LENGTH"] = 128 * 1024
+    state_change_hits: dict[str, float] = {}
+
+    def _is_local_request() -> bool:
+        remote = request.remote_addr or ""
+        return remote in {"127.0.0.1", "::1", "localhost"}
+
+    @app.before_request
+    def _security_guards():
+        if not _is_local_request():
+            return _json_error("Local-only server.", status=403)
+
+        if request.method == "POST" and not app.testing:
+            protected = {
+                "/api/run",
+                "/api/stop",
+                "/api/settings",
+            }
+            if request.path.startswith("/api/approval/") or request.path.startswith("/api/run/"):
+                protected.add(request.path)
+            if request.path in protected or request.path.startswith("/api/approval/"):
+                token = request.headers.get("X-CSRF-Token", "").strip()
+                if token != center.get_csrf_token():
+                    return _json_error("CSRF token missing or invalid.", status=403)
+
+            key = f"{request.remote_addr}:{request.path}"
+            now = time.monotonic()
+            last = state_change_hits.get(key, 0.0)
+            if now - last < 0.2:
+                return _json_error("Too many state changes. Slow down.", status=429)
+            state_change_hits[key] = now
 
     def _json_error(message: str, status: int = 400):
         return jsonify({"ok": False, "error": message}), status
+
+    def _sse(event_name: str, payload: dict[str, Any]) -> str:
+        return f"event: {event_name}\ndata: {json.dumps(payload)}\n\n"
 
     @app.get("/")
     def index():
@@ -87,6 +123,39 @@ def create_app(
     @app.get("/api/run/<run_id>/files")
     def api_run_files(run_id: str):
         payload = center.get_run_files(run_id)
+        if payload is None:
+            return _json_error("Run not found.", status=404)
+        return jsonify({"ok": True, "data": payload})
+
+    @app.get("/api/run/<run_id>/audit")
+    def api_run_audit(run_id: str):
+        try:
+            limit = int(request.args.get("limit", "1000"))
+        except ValueError:
+            limit = 1000
+        payload = center.get_run_audit(run_id, limit=limit)
+        if payload is None:
+            return _json_error("Run not found.", status=404)
+        return jsonify({"ok": True, "data": payload})
+
+    @app.get("/api/run/<run_id>/replay")
+    def api_run_replay(run_id: str):
+        try:
+            iteration = int(request.args.get("iteration", "1"))
+        except ValueError:
+            iteration = 1
+        payload = center.get_run_replay(run_id, iteration=iteration)
+        if payload is None:
+            return _json_error("Run not found.", status=404)
+        return jsonify({"ok": True, "data": payload})
+
+    @app.get("/api/run/<run_id>/compare")
+    def api_run_compare(run_id: str):
+        try:
+            iteration = int(request.args.get("iteration", "1"))
+        except ValueError:
+            iteration = 1
+        payload = center.compare_iterations(run_id, iteration=iteration)
         if payload is None:
             return _json_error("Run not found.", status=404)
         return jsonify({"ok": True, "data": payload})
@@ -153,10 +222,75 @@ def create_app(
             return _json_error("JSON body must be an object.")
         decision = str(payload.get("decision", "")).strip()
         note = str(payload.get("note", "")).strip()
-        ok, data = center.submit_approval(approval_id, decision=decision, note=note)
+        actor = str(payload.get("actor", "local_user")).strip() or "local_user"
+        confirmation = str(payload.get("confirmation", "")).strip()
+        ok, data = center.submit_approval(
+            approval_id,
+            decision=decision,
+            note=note,
+            actor=actor,
+            confirmation=confirmation,
+        )
         if not ok:
             return _json_error(str(data.get("error", "Approval update failed.")), status=409)
         return jsonify({"ok": True, "data": data})
+
+    @app.get("/api/stream/status")
+    def api_stream_status():
+        def generate():
+            q = center.subscribe("status")
+            try:
+                yield _sse("connected", {"stream": "status", "csrf_token": center.get_csrf_token()})
+                while True:
+                    try:
+                        event = q.get(timeout=15)
+                        yield _sse("status", event)
+                    except Exception:
+                        yield _sse("heartbeat", {"stream": "status", "ts": time.time()})
+            finally:
+                center.unsubscribe("status", q)
+
+        return Response(stream_with_context(generate()), mimetype="text/event-stream")
+
+    @app.get("/api/stream/logs")
+    def api_stream_logs():
+        def generate():
+            q = center.subscribe("logs")
+            try:
+                yield _sse("connected", {"stream": "logs"})
+                while True:
+                    try:
+                        event = q.get(timeout=15)
+                        yield _sse("logs", event)
+                    except Exception:
+                        snapshot = center.logs_tail(limit=20)
+                        yield _sse("logs_snapshot", {"stream": "logs", "snapshot": snapshot})
+            finally:
+                center.unsubscribe("logs", q)
+
+        return Response(stream_with_context(generate()), mimetype="text/event-stream")
+
+    @app.get("/api/stream/run/<run_id>")
+    def api_stream_run(run_id: str):
+        if center.get_run_timeline(run_id, limit=1) is None:
+            return _json_error("Run not found.", status=404)
+        channel = f"run:{run_id}"
+
+        def generate():
+            q = center.subscribe(channel)
+            try:
+                yield _sse("connected", {"stream": channel, "run_id": run_id})
+                while True:
+                    try:
+                        event = q.get(timeout=15)
+                        yield _sse("run", event)
+                    except Exception:
+                        tail = center.get_run_timeline(run_id, limit=10) or []
+                        yield _sse("run_tail", {"run_id": run_id, "timeline": tail})
+            finally:
+                center.unsubscribe(channel, q)
+
+        return Response(stream_with_context(generate()), mimetype="text/event-stream")
 
     @app.get("/healthz")
     def healthz():

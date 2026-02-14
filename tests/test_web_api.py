@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import queue
 
 import pytest
 
@@ -11,6 +12,7 @@ from web.app import create_app
 
 class FakeCenter:
     def __init__(self) -> None:
+        self._subscribers = {}
         self._settings = {
             "safe_mode": False,
             "rate_limit_seconds": 3,
@@ -40,7 +42,22 @@ class FakeCenter:
             "rate_limit_seconds": 3,
             "allowed_commands": ["python", "pytest"],
             "metrics": {},
+            "csrf_token": "test-token",
         }
+
+    def get_csrf_token(self):
+        return "test-token"
+
+    def subscribe(self, channel):
+        q = queue.Queue()
+        q.put({"type": "connected", "channel": channel})
+        self._subscribers.setdefault(channel, []).append(q)
+        return q
+
+    def unsubscribe(self, channel, q):
+        rows = self._subscribers.get(channel, [])
+        if q in rows:
+            rows.remove(q)
 
     def start_run(self, payload):
         command = str(payload.get("command", ""))
@@ -94,6 +111,38 @@ class FakeCenter:
             "modified": [],
         }
 
+    def get_run_audit(self, run_id, limit=1000):
+        if run_id != "run_test_1":
+            return None
+        return [{"action": "approval_requested", "timestamp_utc": "2026-01-01T00:00:00+00:00", "payload": {}}]
+
+    def get_run_replay(self, run_id, iteration):
+        if run_id != "run_test_1":
+            return None
+        return {
+            "run_id": run_id,
+            "iteration": 1,
+            "total_iterations": 1,
+            "has_prev": False,
+            "has_next": False,
+            "current": {"coder": {}, "execution": [], "critic": {}, "diffs": []},
+            "comparison": {"likely_failure_cause": None},
+        }
+
+    def compare_iterations(self, run_id, iteration):
+        if run_id != "run_test_1":
+            return None
+        return {
+            "iteration": 1,
+            "previous_iteration": None,
+            "changed_files_current": [],
+            "changed_files_previous": [],
+            "newly_changed_files": [],
+            "passed_previous": False,
+            "passed_current": True,
+            "likely_failure_cause": None,
+        }
+
     def retry_run(self, run_id):
         if run_id == "run_test_1":
             return True, {"run_id": "run_test_retry", "status": "queued"}
@@ -124,6 +173,8 @@ class FakeCenter:
         return []
 
     def submit_approval(self, approval_id, decision, note=""):
+        if decision == "approve":
+            return True, {"approval_id": approval_id, "decision": "approve"}
         return False, {"error": "Approval request not found."}
 
 
@@ -177,3 +228,34 @@ def test_run_files_and_timeline_endpoints(client):
     assert timeline_response.status_code == 200
     timeline_data = timeline_response.get_json()["data"]
     assert timeline_data[0]["step"] == "run_started"
+
+
+def test_replay_compare_and_audit_endpoints(client):
+    replay = client.get("/api/run/run_test_1/replay?iteration=1")
+    assert replay.status_code == 200
+
+    compare = client.get("/api/run/run_test_1/compare?iteration=1")
+    assert compare.status_code == 200
+
+    audit = client.get("/api/run/run_test_1/audit")
+    assert audit.status_code == 200
+
+
+def test_sse_endpoints_available(client):
+    status_stream = client.get("/api/stream/status", buffered=False)
+    assert status_stream.status_code == 200
+    assert status_stream.mimetype == "text/event-stream"
+
+    logs_stream = client.get("/api/stream/logs", buffered=False)
+    assert logs_stream.status_code == 200
+    assert logs_stream.mimetype == "text/event-stream"
+
+    run_stream = client.get("/api/stream/run/run_test_1", buffered=False)
+    assert run_stream.status_code == 200
+    assert run_stream.mimetype == "text/event-stream"
+
+
+def test_approval_endpoint(client):
+    response = client.post("/api/approval/approval_1", json={"decision": "approve"})
+    assert response.status_code == 200
+    assert response.get_json()["ok"] is True

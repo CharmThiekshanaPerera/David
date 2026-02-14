@@ -114,7 +114,7 @@ h1 {
 
 .tabs {
   display: grid;
-  grid-template-columns: repeat(8, minmax(0, 1fr));
+  grid-template-columns: repeat(9, minmax(0, 1fr));
   gap: 0.4rem;
   margin-bottom: 0.8rem;
 }
@@ -400,6 +400,11 @@ code {
   background: #fff1eb;
   border-radius: 0.55rem;
   padding: 0.55rem;
+}
+
+.approval input {
+  width: 100%;
+  margin: 0.2rem 0;
 }
 
 .table {

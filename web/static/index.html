@@ -15,7 +15,10 @@
         <h1>David Control Center</h1>
         <p>Beginner-friendly local monitor for David</p>
       </div>
-      <div class="status-pill" id="globalStatus">idle</div>
+      <div class="row">
+        <div class="status-pill" id="globalStatus">idle</div>
+        <div class="status-pill" id="streamStatus">stream: connecting</div>
+      </div>
     </header>
 
     <section id="runningBanner" class="banner hidden" aria-live="polite">
@@ -41,6 +44,7 @@
     <nav class="tabs" id="tabs">
       <button data-tab="dashboard" class="active">Dashboard</button>
       <button data-tab="runs">Runs</button>
+      <button data-tab="approvals">Approvals</button>
       <button data-tab="diff">Diff Viewer</button>
       <button data-tab="memory">Memory</button>
       <button data-tab="telemetry">Telemetry</button>
@@ -91,11 +95,6 @@
             <pre id="filePreview" class="code">Select a file from the list.</pre>
           </article>
         </div>
-
-        <article class="card">
-          <h2>Pending Approvals</h2>
-          <div id="approvalList" class="stack"></div>
-        </article>
       </section>
 
       <section id="tab-runs" class="tab-panel">
@@ -124,8 +123,32 @@
           <div id="timelineView" class="timeline"></div>
           <h3>Execution Results</h3>
           <div id="executionPanels" class="stack"></div>
-          <h3>Explain Failure</h3>
+          <h3>Failure Explanation</h3>
+          <div id="failureDetails" class="stack"></div>
           <pre id="failureExplain" class="code">Select a run.</pre>
+        </article>
+
+        <article class="card">
+          <h2>Run Replay</h2>
+          <div class="row">
+            <button id="replayPrevBtn" class="ghost">Prev iteration</button>
+            <span id="replayIterationLabel" class="muted">Iteration -</span>
+            <button id="replayNextBtn" class="ghost">Next iteration</button>
+          </div>
+          <pre id="replayPanel" class="code">Select a run to replay iterations.</pre>
+          <h3>Compare Iterations</h3>
+          <pre id="comparePanel" class="code">Comparison will appear here.</pre>
+        </article>
+      </section>
+
+      <section id="tab-approvals" class="tab-panel">
+        <article class="card">
+          <h2>Approvals Queue</h2>
+          <div id="approvalList" class="stack"></div>
+        </article>
+        <article class="card">
+          <h2>Approval Audit</h2>
+          <pre id="approvalAudit" class="code">Select a run to view audit log.</pre>
         </article>
       </section>
 

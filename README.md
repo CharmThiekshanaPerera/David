@@ -298,6 +298,10 @@ http://127.0.0.1:8787
 - Success banner with quick actions: open run details, download run bundle, view changed files.
 - Dashboard activity feed with recent run events and approvals.
 - Logs tab filtering/search for `info` / `warn` / `error`.
+- Real-time Server-Sent Events (SSE) streaming with polling fallback and connection-state indicator.
+- Approvals tab with high-risk typed confirmation and per-run audit log.
+- Run Replay mode (`Prev/Next`) and iteration comparison view.
+- Failure explainer with category, top error lines, related files, and copyable VS Code open commands.
 
 ### API endpoints
 
@@ -308,15 +312,24 @@ http://127.0.0.1:8787
 - `GET /api/run/<run_id>`
 - `GET /api/run/<run_id>/timeline`
 - `GET /api/run/<run_id>/files`
+- `GET /api/run/<run_id>/audit`
+- `GET /api/run/<run_id>/replay`
+- `GET /api/run/<run_id>/compare`
 - `POST /api/run/<run_id>/retry`
 - `GET /api/run/<run_id>/bundle`
 - `GET /api/memory`
 - `GET /api/telemetry/tail`
 - `GET /api/logs/tail`
+- `GET /api/stream/status`
+- `GET /api/stream/logs`
+- `GET /api/stream/run/<run_id>`
 
 ### Safety behavior in web mode
 
 - Local-only by default (`127.0.0.1` bind).
+- State-changing endpoints protected with CSRF token checks.
+- Request body size limit enforced server-side.
+- Server-side state-change throttling to reduce abuse/spam loops.
 - No arbitrary shell endpoint; only `/goal`, `/ask`, `/teach`.
 - File writes remain restricted to `workspace/` by existing safety guard.
 - Risk approval gate for large edits and multi-file rewrites.
@@ -330,6 +343,13 @@ http://127.0.0.1:8787
 2. Start a `/goal` run.
 3. Use `Preview & Changed Files` and `Diff Viewer` to inspect proposed changes.
 4. Start again with preview disabled to apply changes after review.
+
+### Streaming + Replay quick usage
+
+1. Open the UI and check `stream: connected` in the header.
+2. Start a run and watch live stage/status/timeline updates.
+3. In `Runs`, choose a run and use `Prev iteration` / `Next iteration` to replay steps.
+4. Use `Compare Iterations` to inspect change deltas and likely failure-causing edits.
 
 ## How David Learns
 

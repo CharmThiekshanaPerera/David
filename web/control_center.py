@@ -4,6 +4,7 @@ import difflib
 import io
 import json
 import logging
+import queue
 import re
 import threading
 import time
@@ -82,6 +83,8 @@ class DavidControlCenter:
         self._active_cancel: threading.Event | None = None
         self._pending_approvals: dict[str, dict[str, Any]] = {}
         self._last_run_started_at: float = 0.0
+        self._subscribers: dict[str, list[queue.Queue[dict[str, Any]]]] = {"status": [], "logs": []}
+        self._csrf_token = uuid.uuid4().hex
 
         self._logger = logging.getLogger("david.control_center")
         self._logger.setLevel(logging.INFO)
@@ -120,7 +123,39 @@ class DavidControlCenter:
             "rate_limit_seconds": self.settings.rate_limit_seconds,
             "allowed_commands": list(self.config.allowed_commands),
             "metrics": metrics,
+            "csrf_token": self._csrf_token,
         }
+
+    def get_csrf_token(self) -> str:
+        return self._csrf_token
+
+    def subscribe(self, channel: str) -> queue.Queue[dict[str, Any]]:
+        q: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=500)
+        with self._lock:
+            self._subscribers.setdefault(channel, []).append(q)
+        return q
+
+    def unsubscribe(self, channel: str, q: queue.Queue[dict[str, Any]]) -> None:
+        with self._lock:
+            rows = self._subscribers.get(channel, [])
+            if q in rows:
+                rows.remove(q)
+
+    def publish_event(self, channel: str, event: dict[str, Any]) -> None:
+        with self._lock:
+            queues = list(self._subscribers.get(channel, []))
+        for q in queues:
+            try:
+                q.put_nowait(event)
+            except queue.Full:
+                try:
+                    q.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    q.put_nowait(event)
+                except queue.Full:
+                    continue
 
     def get_settings(self) -> dict[str, Any]:
         return {
@@ -254,7 +289,14 @@ class DavidControlCenter:
         self._update_run_meta(run_id, status="stopping", message="Stop requested by user.", current_stage="executor")
         return {"stopped": True, "run_id": run_id}
 
-    def submit_approval(self, approval_id: str, decision: str, note: str = "") -> tuple[bool, dict[str, Any]]:
+    def submit_approval(
+        self,
+        approval_id: str,
+        decision: str,
+        note: str = "",
+        actor: str = "local_user",
+        confirmation: str = "",
+    ) -> tuple[bool, dict[str, Any]]:
         choice = decision.strip().lower()
         if choice not in {"approve", "reject"}:
             return False, {"error": "Decision must be approve or reject."}
@@ -265,12 +307,36 @@ class DavidControlCenter:
                 return False, {"error": "Approval request not found."}
             if approval.get("status") != "pending":
                 return False, {"error": "Approval is already resolved."}
+            if choice == "approve" and bool(approval.get("requires_typed_confirmation")):
+                expected = f"approve {approval.get('run_id')}"
+                if confirmation.strip().lower() != expected.lower():
+                    return False, {"error": f"Typed confirmation required: `{expected}`"}
 
             approval["status"] = "approved" if choice == "approve" else "rejected"
             approval["decision"] = choice
             approval["decision_note"] = note.strip()
             approval["decided_at"] = self._now_iso()
+            approval["actor"] = actor.strip() or "local_user"
+            run_id = str(approval.get("run_id", ""))
 
+        self._append_audit(
+            run_id=run_id,
+            action="approval_decision",
+            payload={
+                "approval_id": approval_id,
+                "decision": choice,
+                "actor": actor.strip() or "local_user",
+                "note": note.strip(),
+            },
+        )
+        self.publish_event(
+            f"run:{run_id}",
+            {"type": "approval_decision", "run_id": run_id, "approval_id": approval_id, "decision": choice},
+        )
+        self.publish_event(
+            "status",
+            {"type": "approval_decision", "run_id": run_id, "approval_id": approval_id, "decision": choice},
+        )
         return True, {"approval_id": approval_id, "decision": choice}
 
     def list_approvals(self) -> list[dict[str, Any]]:
@@ -365,6 +431,14 @@ class DavidControlCenter:
             return None
         return self._read_jsonl(run_dir / "timeline.jsonl", limit=max(1, min(limit, 2000)))
 
+    def get_run_audit(self, run_id: str, limit: int = 1000) -> list[dict[str, Any]] | None:
+        if not self._is_safe_run_id(run_id):
+            return None
+        run_dir = self._run_dir(run_id)
+        if not run_dir.exists():
+            return None
+        return self._read_jsonl(run_dir / "audit.jsonl", limit=max(1, min(limit, 2000)))
+
     def get_run_files(self, run_id: str) -> dict[str, Any] | None:
         if not self._is_safe_run_id(run_id):
             return None
@@ -409,6 +483,86 @@ class DavidControlCenter:
             "workspace_dir": str(self.config.workspace_dir),
             "created": sorted(created.values(), key=lambda row: row["path"]),
             "modified": sorted(modified.values(), key=lambda row: row["path"]),
+        }
+
+    def get_run_replay(self, run_id: str, iteration: int) -> dict[str, Any] | None:
+        if not self._is_safe_run_id(run_id):
+            return None
+        run_dir = self._run_dir(run_id)
+        iterations_dir = run_dir / "iterations"
+        if not iterations_dir.exists():
+            return None
+
+        all_items = sorted([item for item in iterations_dir.iterdir() if item.is_dir()])
+        if not all_items:
+            return None
+        idx = max(0, min(iteration - 1, len(all_items) - 1))
+        item = all_items[idx]
+        chosen = int(item.name)
+
+        current = {
+            "iteration": chosen,
+            "coder": self._read_json(item / "coder.json", default={}),
+            "execution": self._read_json(item / "execution.json", default=[]),
+            "critic": self._read_json(item / "critic.json", default={}),
+            "diffs": self._read_json(item / "diffs.json", default=[]),
+        }
+        compare = self.compare_iterations(run_id, chosen)
+
+        return {
+            "run_id": run_id,
+            "iteration": chosen,
+            "total_iterations": len(all_items),
+            "has_prev": idx > 0,
+            "has_next": idx < len(all_items) - 1,
+            "prev_iteration": int(all_items[idx - 1].name) if idx > 0 else None,
+            "next_iteration": int(all_items[idx + 1].name) if idx < len(all_items) - 1 else None,
+            "current": current,
+            "comparison": compare,
+        }
+
+    def compare_iterations(self, run_id: str, iteration: int) -> dict[str, Any] | None:
+        if not self._is_safe_run_id(run_id):
+            return None
+        run_dir = self._run_dir(run_id)
+        iterations_dir = run_dir / "iterations"
+        if not iterations_dir.exists():
+            return None
+        curr_dir = iterations_dir / f"{iteration:03d}"
+        prev_dir = iterations_dir / f"{iteration - 1:03d}"
+        if not curr_dir.exists():
+            return None
+
+        curr_exec = self._read_json(curr_dir / "execution.json", default=[])
+        prev_exec = self._read_json(prev_dir / "execution.json", default=[]) if prev_dir.exists() else []
+        curr_diffs = self._read_json(curr_dir / "diffs.json", default=[])
+        prev_diffs = self._read_json(prev_dir / "diffs.json", default=[]) if prev_dir.exists() else []
+
+        def _passed(rows: list[dict[str, Any]]) -> bool:
+            if not rows:
+                return False
+            return all(int(item.get("returncode", 1)) == 0 and not bool(item.get("timed_out")) for item in rows if isinstance(item, dict))
+
+        changed_now = sorted({str(item.get("path", "")).strip() for item in curr_diffs if isinstance(item, dict) and str(item.get("path", "")).strip()})
+        changed_prev = sorted({str(item.get("path", "")).strip() for item in prev_diffs if isinstance(item, dict) and str(item.get("path", "")).strip()})
+        new_changes = [path for path in changed_now if path not in changed_prev]
+
+        likely_cause = None
+        if _passed(prev_exec) and not _passed(curr_exec):
+            likely_cause = {
+                "reason": "First failing iteration after a passing iteration.",
+                "files": new_changes or changed_now,
+            }
+
+        return {
+            "iteration": iteration,
+            "previous_iteration": iteration - 1 if prev_dir.exists() else None,
+            "changed_files_current": changed_now,
+            "changed_files_previous": changed_prev,
+            "newly_changed_files": new_changes,
+            "passed_previous": _passed(prev_exec),
+            "passed_current": _passed(curr_exec),
+            "likely_failure_cause": likely_cause,
         }
 
     def retry_run(self, run_id: str) -> tuple[bool, dict[str, Any]]:
@@ -725,6 +879,17 @@ class DavidControlCenter:
                 continue
 
             self._write_json(iter_dir / "diffs.json", [asdict(item) for item in diffs])
+            self.publish_event(
+                f"run:{run_id}",
+                {
+                    "type": "diff_summary",
+                    "run_id": run_id,
+                    "iteration": iteration,
+                    "diff_count": len(diffs),
+                    "created": sum(1 for d in diffs if d.change_type == "new"),
+                    "edited": sum(1 for d in diffs if d.change_type != "new"),
+                },
+            )
 
             risk_reasons = self._detect_risky_edit_reasons(validated_edits)
             self._write_json(iter_dir / "risk.json", {"reasons": risk_reasons})
@@ -815,6 +980,15 @@ class DavidControlCenter:
             self._update_run_meta(run_id, last_command=command_values[-1], iteration=iteration, current_stage="executor")
             execution_results = executor.run(command_specs)
             self._write_json(iter_dir / "execution.json", [item.to_dict() for item in execution_results])
+            self.publish_event(
+                f"run:{run_id}",
+                {
+                    "type": "execution_update",
+                    "run_id": run_id,
+                    "iteration": iteration,
+                    "results": [item.to_dict() for item in execution_results],
+                },
+            )
 
             for result in execution_results:
                 if "pytest" in result.command:
@@ -1011,6 +1185,18 @@ class DavidControlCenter:
         payload: dict[str, Any],
     ) -> str:
         approval_id = f"{run_id}-{iteration}-{uuid.uuid4().hex[:6]}"
+        diff_count = 0
+        file_count = 0
+        if isinstance(payload.get("diffs"), list):
+            diff_count = len(payload.get("diffs", []))
+            file_count = len(
+                {
+                    str(item.get("path", "")).strip()
+                    for item in payload.get("diffs", [])
+                    if isinstance(item, dict) and str(item.get("path", "")).strip()
+                }
+            )
+        high_risk = approval_type == "risky_edit"
         record = {
             "id": approval_id,
             "run_id": run_id,
@@ -1018,6 +1204,9 @@ class DavidControlCenter:
             "type": approval_type,
             "reasons": reasons,
             "payload": payload,
+            "diff_count": diff_count,
+            "file_count": file_count,
+            "requires_typed_confirmation": high_risk,
             "status": "pending",
             "decision": None,
             "decision_note": "",
@@ -1026,6 +1215,13 @@ class DavidControlCenter:
         with self._lock:
             self._pending_approvals[approval_id] = record
         self._append_timeline(run_id, "approval_requested", record)
+        self._append_audit(
+            run_id=run_id,
+            action="approval_requested",
+            payload={"approval_id": approval_id, "type": approval_type, "reasons": reasons, "file_count": file_count},
+        )
+        self.publish_event("status", {"type": "approval_needed", "run_id": run_id, "approval": record})
+        self.publish_event(f"run:{run_id}", {"type": "approval_needed", "run_id": run_id, "approval": record})
         return approval_id
 
     def _wait_for_approval(self, approval_id: str, timeout_sec: int = 1800) -> str:
@@ -1070,6 +1266,8 @@ class DavidControlCenter:
             tests_passed=tests_passed,
             current_stage="memory",
         )
+        self.publish_event("status", {"type": "run_success", "run_id": run_id, "iteration": iteration, "message": message})
+        self.publish_event(f"run:{run_id}", {"type": "run_success", "run_id": run_id, "iteration": iteration, "message": message})
 
     def _finalize_failure(
         self,
@@ -1080,7 +1278,10 @@ class DavidControlCenter:
         tests_ran: bool,
         tests_passed: bool | None,
     ) -> None:
-        explanation = self._explain_failure(execution_results)
+        iter_dir = self._run_dir(run_id) / "iterations" / f"{iteration:03d}"
+        diffs = self._read_json(iter_dir / "diffs.json", default=[])
+        failure = self._build_failure_details(execution_results, diffs if isinstance(diffs, list) else [])
+        explanation = failure["summary"]
         self._write_json(
             self._run_dir(run_id) / "result.json",
             {
@@ -1088,6 +1289,7 @@ class DavidControlCenter:
                 "analysis": message,
                 "iteration": iteration,
                 "explain_failure": explanation,
+                "failure_details": failure,
             },
         )
         self._update_run_meta(
@@ -1096,6 +1298,7 @@ class DavidControlCenter:
             success=False,
             message=message,
             failure_explanation=explanation,
+            failure_details=failure,
             ended_at=self._now_iso(),
             iteration=iteration,
             progress_percent=100,
@@ -1103,6 +1306,8 @@ class DavidControlCenter:
             tests_passed=tests_passed,
             current_stage="critic",
         )
+        self.publish_event("status", {"type": "run_failed", "run_id": run_id, "iteration": iteration, "failure": failure})
+        self.publish_event(f"run:{run_id}", {"type": "run_failed", "run_id": run_id, "iteration": iteration, "failure": failure})
 
     def _finalize_stopped(
         self,
@@ -1122,6 +1327,8 @@ class DavidControlCenter:
             tests_passed=tests_passed,
             current_stage="executor",
         )
+        self.publish_event("status", {"type": "run_stopped", "run_id": run_id, "message": message})
+        self.publish_event(f"run:{run_id}", {"type": "run_stopped", "run_id": run_id, "message": message})
 
     def _finalize_rejected(
         self,
@@ -1141,34 +1348,85 @@ class DavidControlCenter:
             tests_passed=tests_passed,
             current_stage="safety",
         )
+        self.publish_event("status", {"type": "run_rejected", "run_id": run_id, "message": message})
+        self.publish_event(f"run:{run_id}", {"type": "run_rejected", "run_id": run_id, "message": message})
 
-    @staticmethod
-    def _explain_failure(results: list[ExecutionResult]) -> str:
+    def _build_failure_details(self, results: list[ExecutionResult], diffs: list[dict[str, Any]]) -> dict[str, Any]:
         if not results:
-            return "No execution results available."
+            return {
+                "category": "unknown",
+                "summary": "No execution results available.",
+                "top_errors": [],
+                "related_files": [],
+                "suggested_actions": ["retry", "open run details"],
+            }
         failing = [row for row in results if row.returncode != 0 or row.timed_out]
         if not failing:
-            return "Commands passed; failure likely came from critic abort or iteration cap."
+            return {
+                "category": "unknown",
+                "summary": "Commands passed; failure likely came from critic abort or iteration cap.",
+                "top_errors": [],
+                "related_files": self._related_files(diffs),
+                "suggested_actions": ["retry", "review critic output"],
+            }
 
         first = failing[0]
         if first.timed_out:
-            return f"Command timed out: {first.command} after {first.duration_sec}s."
-
-        snippets: list[str] = []
-        for source in (first.stderr, first.stdout):
-            for line in source.splitlines():
+            category = "timeout"
+            top_errors = [f"Command timed out: {first.command} after {first.duration_sec}s."]
+        else:
+            snippets: list[str] = []
+            raw_lines = (first.stderr + "\n" + first.stdout).splitlines()
+            for line in raw_lines:
                 clean = line.strip()
                 if not clean:
                     continue
-                if "error" in clean.lower() or clean.startswith("E ") or "failed" in clean.lower():
+                if any(marker in clean.lower() for marker in ["error", "failed", "exception", "traceback"]) or clean.startswith("E "):
                     snippets.append(clean)
-                if len(snippets) >= 3:
+                if len(snippets) >= 5:
                     break
-            if len(snippets) >= 3:
-                break
+            top_errors = snippets[:3]
+            category = self._categorize_failure(first.stderr + "\n" + first.stdout)
 
-        detail = "; ".join(snippets) if snippets else "No clear error snippet in output."
-        return f"First failing command: {first.command} (rc={first.returncode}). {detail}"
+        detail = "; ".join(top_errors) if top_errors else "No clear error snippet in output."
+        related_files = self._related_files(diffs)
+        summary = f"First failing command: {first.command} (rc={first.returncode}). {detail}"
+        return {
+            "category": category,
+            "summary": summary,
+            "top_errors": top_errors,
+            "related_files": related_files,
+            "suggested_actions": ["retry", "rollback", "open file", "approve patch"],
+        }
+
+    @staticmethod
+    def _categorize_failure(text: str) -> str:
+        lowered = text.lower()
+        if "syntaxerror" in lowered:
+            return "syntax"
+        if "modulenotfounderror" in lowered or "importerror" in lowered:
+            return "import"
+        if "assert" in lowered or "assertionerror" in lowered:
+            return "test_assertion"
+        if "timeout" in lowered:
+            return "timeout"
+        return "runtime"
+
+    def _related_files(self, diffs: list[dict[str, Any]]) -> list[dict[str, str]]:
+        rows: list[dict[str, str]] = []
+        for item in diffs[:8]:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path", "")).strip()
+            if not path:
+                continue
+            rows.append(
+                {
+                    "path": path,
+                    "vscode_command": f"code -g {self.config.workspace_dir.joinpath(path).as_posix()}:1",
+                }
+            )
+        return rows
 
     @staticmethod
     def _render_feedback(critic: CriticOutput, results: list[ExecutionResult]) -> str:
@@ -1230,6 +1488,9 @@ class DavidControlCenter:
             meta = {}
         meta.update(patch)
         self._write_json(path, meta)
+        event = {"type": "status_update", "run_id": run_id, "meta": meta}
+        self.publish_event("status", event)
+        self.publish_event(f"run:{run_id}", event)
 
     def _append_timeline(self, run_id: str, step: str, payload: dict[str, Any]) -> None:
         record = {
@@ -1238,6 +1499,19 @@ class DavidControlCenter:
             "payload": payload,
         }
         path = self._run_dir(run_id) / "timeline.jsonl"
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record) + "\n")
+        self.publish_event("status", {"type": "timeline", "run_id": run_id, "record": record})
+        self.publish_event(f"run:{run_id}", {"type": "timeline", "run_id": run_id, "record": record})
+        self.publish_event("logs", {"type": "timeline", "run_id": run_id, "record": record})
+
+    def _append_audit(self, run_id: str, action: str, payload: dict[str, Any]) -> None:
+        record = {
+            "timestamp_utc": self._now_iso(),
+            "action": action,
+            "payload": payload,
+        }
+        path = self._run_dir(run_id) / "audit.jsonl"
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record) + "\n")
 

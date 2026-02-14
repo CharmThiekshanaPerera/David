@@ -192,7 +192,7 @@ What this validates:
 - rejection of invalid commands.
 - workspace/path safety checks.
 
-## C) API smoke tests with sample payloads
+## C) API smoke tests with sample payloads (with CSRF)
 
 1. Health/status:
 
@@ -201,27 +201,37 @@ curl -s http://127.0.0.1:8787/healthz
 curl -s http://127.0.0.1:8787/api/status
 ```
 
-2. Ask run sample:
+2. Capture CSRF token for POST calls:
+
+```bash
+TOKEN=$(curl -s http://127.0.0.1:8787/api/status | python3 -c "import sys, json; print(json.load(sys.stdin)['data']['csrf_token'])")
+echo "$TOKEN"
+```
+
+3. Ask run sample:
 
 ```bash
 curl -s -X POST http://127.0.0.1:8787/api/run \
   -H 'Content-Type: application/json' \
+  -H "X-CSRF-Token: $TOKEN" \
   -d '{"command":"/ask Who is your father?"}'
 ```
 
-3. Goal preview sample:
+4. Goal preview sample:
 
 ```bash
 curl -s -X POST http://127.0.0.1:8787/api/run \
   -H 'Content-Type: application/json' \
+  -H "X-CSRF-Token: $TOKEN" \
   -d '{"command":"/goal Create hello.py and test_hello.py", "preview": true}'
 ```
 
-4. Invalid command sample (must fail):
+5. Invalid command sample (must fail):
 
 ```bash
 curl -s -X POST http://127.0.0.1:8787/api/run \
   -H 'Content-Type: application/json' \
+  -H "X-CSRF-Token: $TOKEN" \
   -d '{"command":"ls -la"}'
 ```
 
@@ -301,6 +311,118 @@ Expected:
 - `/ask Who is your father?`
 - `/teach My favorite language is Python`
 - `/teach My favorite language is Go` (conflict sample)
+
+## F) Dummy data full test script (end-to-end)
+
+Use this exact flow to populate realistic demo data and validate all major features.
+
+1. Start streams in separate terminals (optional but recommended):
+
+```bash
+curl -N http://127.0.0.1:8787/api/stream/status
+curl -N http://127.0.0.1:8787/api/stream/logs
+```
+
+2. Get CSRF token and run dummy teach/ask:
+
+```bash
+TOKEN=$(curl -s http://127.0.0.1:8787/api/status | python3 -c "import sys, json; print(json.load(sys.stdin)['data']['csrf_token'])")
+
+curl -s -X POST http://127.0.0.1:8787/api/run \
+  -H 'Content-Type: application/json' \
+  -H "X-CSRF-Token: $TOKEN" \
+  -d '{"command":"/teach My name is Alice and I like Python."}'
+
+curl -s -X POST http://127.0.0.1:8787/api/run \
+  -H 'Content-Type: application/json' \
+  -H "X-CSRF-Token: $TOKEN" \
+  -d '{"command":"/ask What is my name?"}'
+```
+
+Expected:
+
+- new runs appear in `Runs`.
+- `Memory` shows new fact entries.
+
+3. Run a preview-first goal (safe review mode):
+
+```bash
+curl -s -X POST http://127.0.0.1:8787/api/run \
+  -H 'Content-Type: application/json' \
+  -H "X-CSRF-Token: $TOKEN" \
+  -d '{"command":"/goal Create calculator.py and test_calculator.py with pytest cases", "preview": true}'
+```
+
+Expected:
+
+- run ends with `preview_ready`.
+- `Diff Viewer` shows file diffs.
+- `Created/Updated Files` list is populated.
+
+4. Trigger approval flow using risky thresholds:
+
+```bash
+curl -s -X POST http://127.0.0.1:8787/api/settings \
+  -H 'Content-Type: application/json' \
+  -H "X-CSRF-Token: $TOKEN" \
+  -d '{"risky_multi_file_threshold":2,"risky_large_edit_bytes":3000}'
+
+curl -s -X POST http://127.0.0.1:8787/api/run \
+  -H 'Content-Type: application/json' \
+  -H "X-CSRF-Token: $TOKEN" \
+  -d '{"command":"/goal Create app.py and test_app.py and run pytest", "preview": false}'
+```
+
+Then:
+
+- open `Approvals` tab,
+- find pending item and approve using typed confirmation:
+  - `approve <run_id>`
+
+API alternative:
+
+```bash
+curl -s http://127.0.0.1:8787/api/approvals
+# copy approval id + run id, then:
+curl -s -X POST http://127.0.0.1:8787/api/approval/<approval_id> \
+  -H 'Content-Type: application/json' \
+  -H "X-CSRF-Token: $TOKEN" \
+  -d '{"decision":"approve","actor":"local_user","confirmation":"approve <run_id>"}'
+```
+
+5. Validate replay, compare, files, timeline, and audit:
+
+```bash
+curl -s http://127.0.0.1:8787/api/runs
+
+# replace RUN_ID
+curl -s "http://127.0.0.1:8787/api/run/RUN_ID/replay?iteration=1"
+curl -s "http://127.0.0.1:8787/api/run/RUN_ID/compare?iteration=1"
+curl -s "http://127.0.0.1:8787/api/run/RUN_ID/files"
+curl -s "http://127.0.0.1:8787/api/run/RUN_ID/timeline"
+curl -s "http://127.0.0.1:8787/api/run/RUN_ID/audit"
+```
+
+Expected:
+
+- replay returns current iteration payload,
+- compare returns changed files and likely-cause heuristic when applicable,
+- audit contains approval decision records.
+
+6. UI checklist with this dummy dataset:
+
+- Dashboard:
+  - running banner + stage tracker update in real time.
+- Runs:
+  - execution panels show stdout/stderr/meta.
+- Approvals:
+  - typed confirmation enforced on high-risk approvals.
+- Diff Viewer:
+  - new vs edited badges visible.
+- Telemetry/Logs:
+  - activity and logs stream live.
+- Runs Replay:
+  - Prev/Next iteration navigation works.
 
 ## 8. Troubleshooting
 
