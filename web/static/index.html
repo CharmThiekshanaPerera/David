@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -7,19 +7,30 @@
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
-    <div class="bg-shape bg-a"></div>
-    <div class="bg-shape bg-b"></div>
+    <div class="bg-vignette" aria-hidden="true"></div>
 
     <header class="topbar">
       <div>
         <h1>David Control Center</h1>
-        <p>Beginner-friendly local monitor for David</p>
+        <p>Local, safety-first monitor for David autonomy</p>
       </div>
       <div class="row">
         <div class="status-pill" id="globalStatus">idle</div>
-        <div class="status-pill" id="streamStatus">stream: connecting</div>
+        <div class="status-pill stream-pill fallback" id="streamStatus">
+          <span class="dot" aria-hidden="true"></span>
+          <span id="streamStatusText">polling fallback</span>
+        </div>
       </div>
     </header>
+
+    <section class="hero" id="heroHeader">
+      <div class="hero-overlay" aria-hidden="true"></div>
+      <div class="hero-particles" id="heroParticles" aria-hidden="true"></div>
+      <div class="hero-content">
+        <h2 class="hero-title">David AI</h2>
+        <p class="hero-subtitle">Autonomous Engineering Control Center</p>
+      </div>
+    </section>
 
     <section id="runningBanner" class="banner hidden" aria-live="polite">
       <div class="spinner" aria-hidden="true"></div>
@@ -55,6 +66,11 @@
 
     <main>
       <section id="tab-dashboard" class="tab-panel active">
+        <article class="card dashboard-head">
+          <h2>Dashboard</h2>
+          <p class="muted">Monitor run state, approvals, and workspace artifacts in one place.</p>
+        </article>
+
         <div class="grid two">
           <article class="card">
             <h2>Quick Actions</h2>
@@ -202,13 +218,33 @@
             </select>
             <input id="logsSearch" type="text" placeholder="Search logs" />
           </div>
-          <pre id="logsView" class="code"></pre>
+          <pre id="logsView" class="code logs-view"></pre>
         </article>
       </section>
 
       <section id="tab-settings" class="tab-panel">
         <article class="card">
           <h2>Settings</h2>
+          <section class="appearance-panel">
+            <h3>Appearance</h3>
+            <div class="appearance-row">
+              <div class="segmented" role="group" aria-label="Theme selection">
+                <button id="themeDarkBtn" type="button" class="segment-btn active" aria-pressed="true">
+                  Dark
+                </button>
+                <button id="themeLightBtn" type="button" class="segment-btn" aria-pressed="false">
+                  Light
+                </button>
+              </div>
+              <label class="check">
+                <input id="bgToggleInput" type="checkbox" checked />
+                Cinematic Background On
+              </label>
+            </div>
+            <div class="appearance-actions">
+              <button id="resetAppearanceBtn" type="button" class="btn-subtle">Reset Appearance</button>
+            </div>
+          </section>
           <div class="grid two">
             <label class="field">
               Safe mode (read-only)

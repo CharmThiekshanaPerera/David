@@ -303,6 +303,25 @@ http://127.0.0.1:8787
 - Run Replay mode (`Prev/Next`) and iteration comparison view.
 - Failure explainer with category, top error lines, related files, and copyable VS Code open commands.
 
+### AI Cinematic Theme
+
+- The web UI ships with a cinematic dark mode by default (`html[data-theme="dark"]`):
+  - matte black background,
+  - metallic typography accents,
+  - electric-blue active states and stream indicators.
+- Hero and dashboard header use a local background image:
+  - `web/static/assets/ai-bg.jpg`
+  - You can replace this file with your preferred local cinematic image (same path/filename).
+- Use `Settings -> Appearance` to control:
+  - `Dark` / `Light` theme,
+  - `Cinematic Background On` toggle,
+  - `Reset Appearance` (restores defaults: dark + background enabled).
+- Preferences are saved to localStorage:
+  - `dcc_theme = "dark" | "light"`
+  - `dcc_bg_disabled = "1"` when cinematic background is disabled (unset means enabled).
+- Reduced-motion users are respected via `prefers-reduced-motion`:
+  - shimmer/particles/pulsing/glow-heavy animations are disabled automatically.
+
 ### API endpoints
 
 - `GET /api/status`

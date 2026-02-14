@@ -21,12 +21,16 @@ const state = {
     run: null,
     connected: false,
   },
+  theme: localStorage.getItem("dcc_theme") === "light" ? "light" : "dark",
+  bgDisabled: localStorage.getItem("dcc_bg_disabled") === "1",
+  reducedMotion: window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches,
 };
 
 const el = {
   tabs: document.getElementById("tabs"),
   globalStatus: document.getElementById("globalStatus"),
   streamStatus: document.getElementById("streamStatus"),
+  streamStatusText: document.getElementById("streamStatusText"),
   runningBanner: document.getElementById("runningBanner"),
   runningBannerText: document.getElementById("runningBannerText"),
   successBanner: document.getElementById("successBanner"),
@@ -84,11 +88,16 @@ const el = {
   settingPreviewDefault: document.getElementById("settingPreviewDefault"),
   saveSettingsBtn: document.getElementById("saveSettingsBtn"),
   settingsInfo: document.getElementById("settingsInfo"),
+  themeDarkBtn: document.getElementById("themeDarkBtn"),
+  themeLightBtn: document.getElementById("themeLightBtn"),
+  bgToggleInput: document.getElementById("bgToggleInput"),
+  resetAppearanceBtn: document.getElementById("resetAppearanceBtn"),
   cliInput: document.getElementById("cliInput"),
   cliSendBtn: document.getElementById("cliSendBtn"),
   cliOutput: document.getElementById("cliOutput"),
   cliExecPanel: document.getElementById("cliExecPanel"),
   toastContainer: document.getElementById("toastContainer"),
+  heroParticles: document.getElementById("heroParticles"),
 };
 
 function escapeHtml(value) {
@@ -150,14 +159,83 @@ function showToast(text) {
   setTimeout(() => node.remove(), 4500);
 }
 
+function applyTheme(theme, persist = true) {
+  const normalized = theme === "light" ? "light" : "dark";
+  state.theme = normalized;
+  document.documentElement.setAttribute("data-theme", normalized);
+  if (persist) {
+    localStorage.setItem("dcc_theme", normalized);
+  }
+  if (el.themeDarkBtn && el.themeLightBtn) {
+    el.themeDarkBtn.classList.toggle("active", normalized === "dark");
+    el.themeLightBtn.classList.toggle("active", normalized === "light");
+    el.themeDarkBtn.setAttribute("aria-pressed", normalized === "dark" ? "true" : "false");
+    el.themeLightBtn.setAttribute("aria-pressed", normalized === "light" ? "true" : "false");
+  }
+}
+
+function applyBackgroundPreference() {
+  const disabled = localStorage.getItem("dcc_bg_disabled") === "1";
+  state.bgDisabled = disabled;
+  document.body.classList.toggle("no-bg", disabled);
+  if (el.bgToggleInput) {
+    el.bgToggleInput.checked = !disabled;
+  }
+}
+
+function setBackgroundEnabled(enabled) {
+  if (enabled) {
+    localStorage.removeItem("dcc_bg_disabled");
+  } else {
+    localStorage.setItem("dcc_bg_disabled", "1");
+  }
+  applyBackgroundPreference();
+}
+
+function resetAppearance() {
+  localStorage.removeItem("dcc_theme");
+  localStorage.removeItem("dcc_bg_disabled");
+  applyTheme("dark", false);
+  applyBackgroundPreference();
+  showToast("Appearance reset to defaults.");
+}
+
 function setStreamState(label) {
-  el.streamStatus.textContent = `stream: ${label}`;
+  const normalized = String(label || "polling fallback").toLowerCase();
+  el.streamStatus.classList.remove("connected", "reconnecting", "fallback");
+  if (normalized === "connected") {
+    el.streamStatus.classList.add("connected");
+  } else if (normalized.includes("reconnect") || normalized.includes("connecting")) {
+    el.streamStatus.classList.add("reconnecting");
+  } else {
+    el.streamStatus.classList.add("fallback");
+  }
+  if (el.streamStatusText) {
+    el.streamStatusText.textContent = normalized;
+  } else {
+    el.streamStatus.textContent = `stream: ${normalized}`;
+  }
 }
 
 function renderStageTracker(currentStage) {
-  el.stageTracker.innerHTML = STAGES.map((stage) => {
-    const active = stage === currentStage ? "active" : "";
-    return `<div class="stage ${active}">${escapeHtml(stage)}</div>`;
+  const runStatus = state.status?.status || "idle";
+  const activeIndex = STAGES.indexOf(currentStage);
+  const runningStates = new Set(["running", "queued", "stopping", "awaiting_approval"]);
+  const failedStates = new Set(["failed", "rejected"]);
+  const successStates = new Set(["success", "preview_ready"]);
+
+  el.stageTracker.innerHTML = STAGES.map((stage, idx) => {
+    let klass = "";
+    if (failedStates.has(runStatus)) {
+      if (idx < activeIndex) klass = "done";
+      else if (idx === activeIndex || (activeIndex < 0 && idx === 0)) klass = "failed";
+    } else if (successStates.has(runStatus)) {
+      klass = "done";
+    } else if (runningStates.has(runStatus)) {
+      if (idx < activeIndex) klass = "done";
+      else if (idx === activeIndex || (activeIndex < 0 && idx === 0)) klass = "active";
+    }
+    return `<div class="stage ${klass}">${escapeHtml(stage)}</div>`;
   }).join("");
 }
 
@@ -373,7 +451,7 @@ function renderExecutionPanels(container, iterations) {
             <span>Duration: <strong>${escapeHtml(result.duration_sec || 0)}s</strong></span>
           </div>
           <div class="exec-tabs">
-            <button data-exec-tab="stdout" data-exec-key="${key}">stdout</button>
+            <button data-exec-tab="stdout" data-exec-key="${key}" class="active">stdout</button>
             <button data-exec-tab="stderr" data-exec-key="${key}">stderr</button>
             <button data-exec-tab="meta" data-exec-key="${key}">meta</button>
           </div>
@@ -390,12 +468,26 @@ function renderExecutionPanels(container, iterations) {
     button.addEventListener("click", () => {
       const key = button.getAttribute("data-exec-key");
       const tab = button.getAttribute("data-exec-tab");
+      const siblingButtons = container.querySelectorAll(`button[data-exec-key="${key}"]`);
+      siblingButtons.forEach((node) => node.classList.toggle("active", node.getAttribute("data-exec-tab") === tab));
       ["stdout", "stderr", "meta"].forEach((name) => {
         const node = document.getElementById(`${key}_${name}`);
         if (node) node.classList.toggle("hidden", name !== tab);
       });
     });
   });
+}
+
+function formatDiffPatch(patchText) {
+  return String(patchText || "")
+    .split("\n")
+    .map((line) => {
+      let klass = "neutral";
+      if (line.startsWith("+") && !line.startsWith("+++")) klass = "add";
+      if (line.startsWith("-") && !line.startsWith("---")) klass = "remove";
+      return `<span class="diff-line ${klass}">${escapeHtml(line)}</span>`;
+    })
+    .join("");
 }
 
 function renderDiffs(details) {
@@ -411,7 +503,7 @@ function renderDiffs(details) {
       changedCount += 1;
       if (diff.change_type === "new") createdCount += 1;
       else modifiedCount += 1;
-      blocks.push(`<div class="diff-block"><div class="diff-title">Iteration ${escapeHtml(iter.iteration)} · ${escapeHtml(diff.path)} (+${escapeHtml(diff.added)} / -${escapeHtml(diff.removed)}) <span class="badge ${escapeHtml(diff.change_type || "edited")}">${escapeHtml(diff.change_type || "edited")}</span></div><pre class="code">${escapeHtml(diff.patch)}</pre></div>`);
+      blocks.push(`<div class="diff-block"><div class="diff-title">Iteration ${escapeHtml(iter.iteration)} · ${escapeHtml(diff.path)} (+${escapeHtml(diff.added)} / -${escapeHtml(diff.removed)}) <span class="badge ${escapeHtml(diff.change_type || "edited")}">${escapeHtml(diff.change_type || "edited")}</span></div><pre class="code">${formatDiffPatch(diff.patch)}</pre></div>`);
     }
   }
 
@@ -474,10 +566,16 @@ function renderMemory(data) {
 function drawDurationChart(metrics) {
   const ctx = el.durationChart.getContext("2d");
   const canvas = el.durationChart;
+  const vars = getComputedStyle(document.documentElement);
+  const panel = vars.getPropertyValue("--panel-soft").trim() || "#10141c";
+  const accent = vars.getPropertyValue("--blue").trim() || "#4da3ff";
+  const text = vars.getPropertyValue("--text").trim() || "#dde0e5";
+  const muted = vars.getPropertyValue("--text-muted").trim() || "#9da3ae";
+
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   const values = metrics.slice(-40).map((item) => Number(item.duration_sec || 0));
   if (!values.length) {
-    ctx.fillStyle = "#6d757a";
+    ctx.fillStyle = muted;
     ctx.fillText("No metrics yet", 12, 22);
     return;
   }
@@ -488,17 +586,17 @@ function drawDurationChart(metrics) {
   const plotW = w - pad * 2;
   const plotH = h - pad * 2;
   const barW = Math.max(4, plotW / values.length - 2);
-  ctx.fillStyle = "#f0e5cf";
+  ctx.fillStyle = panel;
   ctx.fillRect(pad, pad, plotW, plotH);
   values.forEach((v, idx) => {
     const x = pad + idx * (barW + 2);
     const bh = (v / max) * plotH;
     const y = pad + plotH - bh;
-    ctx.fillStyle = "#157a6e";
+    ctx.fillStyle = accent;
     ctx.fillRect(x, y, barW, bh);
   });
-  ctx.fillStyle = "#1c2b31";
-  ctx.font = "12px IBM Plex Mono, monospace";
+  ctx.fillStyle = text;
+  ctx.font = "12px JetBrains Mono, IBM Plex Mono, monospace";
   ctx.fillText(`max ${max.toFixed(2)}s`, 10, 12);
 }
 
@@ -539,18 +637,18 @@ function renderLogs(data) {
   const parts = [];
 
   Object.entries(data || {}).forEach(([name, rows]) => {
-    parts.push(`=== ${name} ===`);
+    parts.push(`<span class="log-line muted">=== ${escapeHtml(name)} ===</span>`);
     (rows || []).forEach((row) => {
       const line = String(row);
       const lineLevel = detectLogLevel(line);
       if (level !== "all" && level !== lineLevel) return;
       if (search && !line.toLowerCase().includes(search)) return;
-      parts.push(line);
+      parts.push(`<span class="log-line log-${lineLevel}">${escapeHtml(line)}</span>`);
     });
-    parts.push("");
+    parts.push('<span class="log-line">&nbsp;</span>');
   });
 
-  el.logsView.textContent = parts.join("\n");
+  el.logsView.innerHTML = parts.length ? parts.join("") : '<span class="log-line muted">No logs yet.</span>';
 }
 
 function renderSettings(data) {
@@ -780,7 +878,43 @@ function wireTabs() {
   });
 }
 
+function initHeroParticles() {
+  if (!el.heroParticles) return;
+  el.heroParticles.innerHTML = "";
+  if (state.reducedMotion) return;
+  const count = 18;
+  for (let i = 0; i < count; i += 1) {
+    const node = document.createElement("span");
+    node.className = "particle";
+    node.style.setProperty("--x", `${Math.random() * 100}%`);
+    node.style.setProperty("--y", `${Math.random() * 100}%`);
+    node.style.setProperty("--size", `${2 + Math.random() * 4}px`);
+    node.style.setProperty("--opacity", `${0.08 + Math.random() * 0.24}`);
+    node.style.setProperty("--dur", `${12 + Math.random() * 16}s`);
+    el.heroParticles.appendChild(node);
+  }
+}
+
 function wireActions() {
+  el.themeDarkBtn?.addEventListener("click", () => {
+    applyTheme("dark");
+    showToast("Theme set to Dark");
+  });
+
+  el.themeLightBtn?.addEventListener("click", () => {
+    applyTheme("light");
+    showToast("Theme set to Light");
+  });
+
+  el.bgToggleInput?.addEventListener("change", () => {
+    setBackgroundEnabled(!!el.bgToggleInput.checked);
+    showToast(el.bgToggleInput.checked ? "Cinematic background enabled" : "Cinematic background disabled");
+  });
+
+  el.resetAppearanceBtn?.addEventListener("click", () => {
+    resetAppearance();
+  });
+
   el.startGoalBtn.addEventListener("click", async () => {
     const goal = el.goalInput.value.trim();
     if (!goal) return setMessage("Enter a goal first.");
@@ -872,6 +1006,24 @@ function wireActions() {
 }
 
 async function bootstrap() {
+  applyTheme(state.theme, false);
+  applyBackgroundPreference();
+  setStreamState("polling fallback");
+  initHeroParticles();
+
+  if (window.matchMedia) {
+    const motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const onMotionChange = (event) => {
+      state.reducedMotion = !!event.matches;
+      initHeroParticles();
+    };
+    if (motionQuery.addEventListener) {
+      motionQuery.addEventListener("change", onMotionChange);
+    } else if (motionQuery.addListener) {
+      motionQuery.addListener(onMotionChange);
+    }
+  }
+
   wireTabs();
   wireActions();
 
