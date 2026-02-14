@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>David Control Center</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="bg-shape bg-a"></div>
+    <div class="bg-shape bg-b"></div>
+
+    <header class="topbar">
+      <div>
+        <h1>David Control Center</h1>
+        <p>Local-only safety-first monitor for David</p>
+      </div>
+      <div class="status-pill" id="globalStatus">idle</div>
+    </header>
+
+    <nav class="tabs" id="tabs">
+      <button data-tab="dashboard" class="active">Dashboard</button>
+      <button data-tab="runs">Runs</button>
+      <button data-tab="diff">Diff Viewer</button>
+      <button data-tab="memory">Memory</button>
+      <button data-tab="telemetry">Telemetry</button>
+      <button data-tab="logs">Logs</button>
+      <button data-tab="settings">Settings</button>
+      <button data-tab="cli">CLI Mirror</button>
+    </nav>
+
+    <main>
+      <section id="tab-dashboard" class="tab-panel active">
+        <div class="grid two">
+          <article class="card">
+            <h2>Quick Actions</h2>
+            <label class="field">
+              Goal
+              <input id="goalInput" type="text" placeholder="Create a Python TODO app with tests" />
+            </label>
+            <label class="check"><input id="previewMode" type="checkbox" /> Run preview (no file writes)</label>
+            <div class="row">
+              <button id="startGoalBtn">Start Goal</button>
+              <button id="stopRunBtn" class="danger">Stop Active</button>
+            </div>
+            <div class="progress-wrap">
+              <div class="progress-bar" id="runProgress"></div>
+            </div>
+            <p id="dashboardMessage" class="muted">No active run.</p>
+          </article>
+
+          <article class="card">
+            <h2>Status</h2>
+            <ul class="kv" id="statusList"></ul>
+          </article>
+        </div>
+
+        <article class="card">
+          <h2>Pending Approvals</h2>
+          <div id="approvalList" class="stack"></div>
+        </article>
+      </section>
+
+      <section id="tab-runs" class="tab-panel">
+        <article class="card">
+          <h2>Run History</h2>
+          <div class="row">
+            <input id="runSearch" type="text" placeholder="Search by run id / command / message" />
+            <select id="runStatusFilter">
+              <option value="">All statuses</option>
+              <option value="running">running</option>
+              <option value="success">success</option>
+              <option value="failed">failed</option>
+              <option value="rejected">rejected</option>
+              <option value="preview_ready">preview_ready</option>
+              <option value="stopped">stopped</option>
+            </select>
+            <button id="refreshRunsBtn">Refresh</button>
+          </div>
+          <div id="runTableWrap"></div>
+        </article>
+
+        <article class="card">
+          <h2>Selected Run Timeline</h2>
+          <div id="timelineView" class="timeline"></div>
+          <h3>Explain Failure</h3>
+          <pre id="failureExplain" class="code">Select a run.</pre>
+        </article>
+      </section>
+
+      <section id="tab-diff" class="tab-panel">
+        <article class="card">
+          <h2>Diff Viewer</h2>
+          <div class="row">
+            <input id="diffRunId" type="text" placeholder="run_..." />
+            <button id="loadDiffBtn">Load Diffs</button>
+          </div>
+          <div id="diffView"></div>
+        </article>
+      </section>
+
+      <section id="tab-memory" class="tab-panel">
+        <div class="grid two">
+          <article class="card">
+            <h2>Facts</h2>
+            <div id="factsView" class="scroll"></div>
+          </article>
+          <article class="card">
+            <h2>Lessons</h2>
+            <div id="lessonsView" class="scroll"></div>
+          </article>
+        </div>
+        <article class="card">
+          <h2>Conflict Detector</h2>
+          <div id="memoryConflicts"></div>
+        </article>
+      </section>
+
+      <section id="tab-telemetry" class="tab-panel">
+        <article class="card">
+          <h2>Telemetry Summary</h2>
+          <ul class="kv" id="telemetrySummary"></ul>
+          <canvas id="durationChart" width="1000" height="240"></canvas>
+        </article>
+      </section>
+
+      <section id="tab-logs" class="tab-panel">
+        <article class="card">
+          <h2>Tail Logs</h2>
+          <div class="row">
+            <button id="refreshLogsBtn">Refresh logs</button>
+          </div>
+          <pre id="logsView" class="code"></pre>
+        </article>
+      </section>
+
+      <section id="tab-settings" class="tab-panel">
+        <article class="card">
+          <h2>Settings</h2>
+          <div class="grid two">
+            <label class="field">
+              Safe mode (read-only)
+              <select id="settingSafeMode">
+                <option value="false">false</option>
+                <option value="true">true</option>
+              </select>
+            </label>
+            <label class="field">
+              Rate limit seconds
+              <input id="settingRateLimit" type="number" min="0" step="1" />
+            </label>
+            <label class="field">
+              Max iterations override (0 = default)
+              <input id="settingMaxIterations" type="number" min="0" step="1" />
+            </label>
+            <label class="field">
+              Risky large edit bytes
+              <input id="settingLargeEdit" type="number" min="1000" step="1000" />
+            </label>
+            <label class="field">
+              Risky multi-file threshold
+              <input id="settingMultiFile" type="number" min="2" step="1" />
+            </label>
+            <label class="check"><input id="settingPreviewDefault" type="checkbox" /> Preview mode default</label>
+          </div>
+          <button id="saveSettingsBtn">Save Settings</button>
+          <ul class="kv" id="settingsInfo"></ul>
+        </article>
+      </section>
+
+      <section id="tab-cli" class="tab-panel">
+        <article class="card">
+          <h2>CLI Mirror</h2>
+          <p class="muted">Allowed: <code>/goal ...</code>, <code>/ask ...</code>, <code>/teach ...</code></p>
+          <div class="row">
+            <input id="cliInput" type="text" placeholder="/goal Create a TODO app" />
+            <button id="cliSendBtn">Send</button>
+          </div>
+          <pre id="cliOutput" class="code"></pre>
+        </article>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
