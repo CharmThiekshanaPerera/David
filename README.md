@@ -44,6 +44,7 @@ David enforces:
 - `agent/safety.py`: path/size/command policy enforcement
 - `agent/executor.py`: restricted command runner with timeouts
 - `agent/memory.py`: long-term lessons store/retrieval
+- `agent/qa.py`: explicit teach/ask fact memory pathway
 - `agent/telemetry.py`: structured telemetry and performance metrics
 - `workspace/`: protected coding area for generated files
 - `memory/long_term.json`: persistent lessons
@@ -113,21 +114,165 @@ Or run diagnostics only:
 python -m agent.main --self-diagnostics
 ```
 
+### 7. Teach David Facts (Explicit Memory Write)
+
+David writes personal facts to long-term memory only when you use `--teach`.
+Normal `--goal` runs do not save personal facts.
+
+```powershell
+python -m agent.main --teach "Hi David I am your dad. My Name is Charm Thiekshana."
+```
+
+Expected teaching confirmation includes stored facts such as:
+
+```text
+- David.father_name = Charm Thiekshana
+```
+
+Ask later using memory-only retrieval:
+
+```powershell
+python -m agent.main --ask "Who is your father?"
+```
+
+Expected answer:
+
+```text
+My father is Charm Thiekshana.
+```
+
+Memory file schema (`memory/long_term.json`) now includes explicit factual memory:
+
+```json
+{
+  "facts": [
+    {
+      "subject": "David",
+      "predicate": "father_name",
+      "object": "Charm Thiekshana",
+      "source": "user_teach",
+      "confidence": 1.0,
+      "timestamp": "2026-01-01T00:00:00+00:00"
+    }
+  ],
+  "lessons": [],
+  "preferences": []
+}
+```
+
+## Quick Start (WSL)
+
+> If you already created `.venv` in Windows, create a separate WSL virtual environment because Windows and Linux venvs are not interchangeable.
+
+### 1. Open project directory in WSL
+
+```bash
+cd "/mnt/d/Tech Agent Labs/David"
+```
+
+### 2. Create and activate virtual environment
+
+```bash
+python3 -m venv .venv-linux
+source .venv-linux/bin/activate
+```
+
+### 3. Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### 4. Configure environment
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` if needed (model name, limits, paths).
+
+### 5. Start Ollama locally
+
+In terminal A:
+
+```bash
+ollama serve
+```
+
+If you see `bind: address already in use`, Ollama is already running on `127.0.0.1:11434` and you can continue.
+
+In terminal B (first time only):
+
+```bash
+ollama pull qwen2.5-coder:1.5b
+```
+
+Check model availability:
+
+```bash
+ollama list
+```
+
+You should see `qwen2.5-coder:1.5b` in `ollama list`.
+
+### 6. Run David
+
+```bash
+python -m agent.main --goal "Create a Python TODO app with tests"
+```
+
+Run without task (diagnostics only):
+
+```bash
+python -m agent.main --self-diagnostics
+```
+
+Run in interactive mode:
+
+```text
+(.venv-linux) charm@CHARMZ:/mnt/d/Tech Agent Labs/David$ python -m agent.main
+=== David Interactive Mode ===
+Use commands: /goal <task>, /ask <question>, /teach <fact>. Type 'bye' to exit.
+you>
+```
+
+### 7. Teach David Facts (Explicit Memory Write)
+
+David writes personal facts to long-term memory only when you use `--teach`.
+Normal `--goal` runs do not save personal facts.
+
+```bash
+python -m agent.main --teach "Hi David I am your dad. My Name is Charm Thiekshana."
+```
+
+Expected teaching confirmation includes stored facts such as:
+
+```text
+- David.father_name = Charm Thiekshana
+```
+
+Ask later using memory-only retrieval:
+
+```bash
+python -m agent.main --ask "Who is your father?"
+```
+
 ## How David Learns
 
 - Each iteration can add reusable lessons to `memory/long_term.json`.
 - Future goals load relevant lessons to avoid repeating mistakes.
 - Telemetry logs each major step for debugging and auditability.
+- Personal facts are stored only through the explicit `--teach` pathway.
 
 ## Tests
 
 Run:
 
-```powershell
+```bash
 pytest -q
 ```
 
-Current tests validate safety boundaries and executor timeout behavior.
+Current tests validate safety boundaries, executor timeout behavior, and teach/ask memory flow.
 
 ## Suggested Evolution Roadmap
 
