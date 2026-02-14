@@ -59,6 +59,10 @@ class DiffEntry:
     added: int
     removed: int
     patch: str
+    change_type: str
+    workspace_path: str
+    before_preview: str
+    after_preview: str
 
 
 class DavidControlCenter:
@@ -103,6 +107,8 @@ class DavidControlCenter:
             "status": current_meta.get("status") if current_meta else "idle",
             "active_run_id": active,
             "selected_model": self.config.model,
+            "current_stage": current_meta.get("current_stage", "idle") if current_meta else "idle",
+            "stages": ["planner", "coder", "safety", "executor", "critic", "memory"],
             "iteration": current_meta.get("iteration", 0) if current_meta else 0,
             "max_iterations": current_meta.get("max_iterations", self.effective_max_iterations()) if current_meta else self.effective_max_iterations(),
             "progress_percent": current_meta.get("progress_percent", 0) if current_meta else 0,
@@ -192,6 +198,7 @@ class DavidControlCenter:
                 "payload": content,
                 "preview": preview,
                 "status": "queued",
+                "current_stage": "queued",
                 "started_at": self._now_iso(),
                 "ended_at": None,
                 "model": self.config.model,
@@ -206,6 +213,8 @@ class DavidControlCenter:
                 "tests_passed": None,
                 "safe_mode": self.settings.safe_mode,
                 "rate_limit_seconds": self.settings.rate_limit_seconds,
+                "artifacts_dir": str(run_dir),
+                "workspace_dir": str(self.config.workspace_dir),
             }
             self._write_json(run_dir / "meta.json", meta)
 
@@ -242,7 +251,7 @@ class DavidControlCenter:
                     approval["decided_at"] = self._now_iso()
             self._logger.info("stop requested run_id=%s", run_id)
 
-        self._update_run_meta(run_id, status="stopping", message="Stop requested by user.")
+        self._update_run_meta(run_id, status="stopping", message="Stop requested by user.", current_stage="executor")
         return {"stopped": True, "run_id": run_id}
 
     def submit_approval(self, approval_id: str, decision: str, note: str = "") -> tuple[bool, dict[str, Any]]:
@@ -343,6 +352,63 @@ class DavidControlCenter:
             "timeline": timeline,
             "iterations": iteration_rows,
             "approvals": [a for a in self.list_approvals() if a.get("run_id") == run_id],
+            "artifacts_dir": str(run_dir),
+            "workspace_dir": str(self.config.workspace_dir),
+            "file_summary": self.get_run_files(run_id),
+        }
+
+    def get_run_timeline(self, run_id: str, limit: int = 1000) -> list[dict[str, Any]] | None:
+        if not self._is_safe_run_id(run_id):
+            return None
+        run_dir = self._run_dir(run_id)
+        if not run_dir.exists():
+            return None
+        return self._read_jsonl(run_dir / "timeline.jsonl", limit=max(1, min(limit, 2000)))
+
+    def get_run_files(self, run_id: str) -> dict[str, Any] | None:
+        if not self._is_safe_run_id(run_id):
+            return None
+
+        run_dir = self._run_dir(run_id)
+        if not run_dir.exists():
+            return None
+
+        created: dict[str, dict[str, Any]] = {}
+        modified: dict[str, dict[str, Any]] = {}
+
+        iterations_dir = run_dir / "iterations"
+        if iterations_dir.exists():
+            for iter_dir in sorted(iterations_dir.iterdir()):
+                if not iter_dir.is_dir():
+                    continue
+                diffs = self._read_json(iter_dir / "diffs.json", default=[])
+                if not isinstance(diffs, list):
+                    continue
+                for diff in diffs:
+                    if not isinstance(diff, dict):
+                        continue
+                    path = str(diff.get("path", "")).strip()
+                    if not path:
+                        continue
+                    record = {
+                        "path": path,
+                        "change_type": str(diff.get("change_type", "edited")),
+                        "workspace_path": str(diff.get("workspace_path", path)),
+                        "added": int(diff.get("added", 0)),
+                        "removed": int(diff.get("removed", 0)),
+                        "after_preview": str(diff.get("after_preview", "")),
+                    }
+                    if record["change_type"] == "new":
+                        created[path] = record
+                        modified.pop(path, None)
+                    elif path not in created:
+                        modified[path] = record
+
+        return {
+            "artifacts_dir": str(run_dir),
+            "workspace_dir": str(self.config.workspace_dir),
+            "created": sorted(created.values(), key=lambda row: row["path"]),
+            "modified": sorted(modified.values(), key=lambda row: row["path"]),
         }
 
     def retry_run(self, run_id: str) -> tuple[bool, dict[str, Any]]:
@@ -432,6 +498,15 @@ class DavidControlCenter:
         payload: dict[str, Any] = {}
         for path in files:
             payload[path.name] = self._tail_lines(path, max(1, min(limit, 2000)))
+
+        runs = self.get_runs(limit=1)
+        if runs:
+            run_id = str(runs[0].get("id", "")).strip()
+            if run_id and self._is_safe_run_id(run_id):
+                timeline_path = self._run_dir(run_id) / "timeline.jsonl"
+                payload[f"run_{run_id}_timeline.jsonl"] = self._tail_lines(
+                    timeline_path, max(1, min(limit, 2000))
+                )
         return payload
 
     def metrics_summary(self) -> dict[str, Any]:
@@ -466,7 +541,7 @@ class DavidControlCenter:
 
     def _execute_run(self, run_id: str, mode: str, payload: str, preview: bool, cancel_event: threading.Event) -> None:
         try:
-            self._update_run_meta(run_id, status="running")
+            self._update_run_meta(run_id, status="running", current_stage="planner")
             self._append_timeline(run_id, "run_started", {"mode": mode, "preview": preview})
 
             if mode == "ask":
@@ -495,6 +570,7 @@ class DavidControlCenter:
                     self._active_thread = None
 
     def _execute_ask(self, run_id: str, question: str) -> None:
+        self._update_run_meta(run_id, current_stage="memory")
         llm = OllamaClient(self.config)
         memory = LongTermMemory(self.config.memory_file)
         teacher = MemoryTeacherQA(llm=llm, memory=memory)
@@ -510,9 +586,11 @@ class DavidControlCenter:
             message=answer,
             ended_at=self._now_iso(),
             progress_percent=100,
+            current_stage="memory",
         )
 
     def _execute_teach(self, run_id: str, message: str) -> None:
+        self._update_run_meta(run_id, current_stage="memory")
         llm = OllamaClient(self.config)
         memory = LongTermMemory(self.config.memory_file)
         teacher = MemoryTeacherQA(llm=llm, memory=memory)
@@ -547,6 +625,7 @@ class DavidControlCenter:
             message=f"Stored {len(result.stored_facts)} facts.",
             ended_at=self._now_iso(),
             progress_percent=100,
+            current_stage="memory",
         )
 
     def _execute_goal(self, run_id: str, goal: str, preview: bool, cancel_event: threading.Event) -> None:
@@ -571,6 +650,7 @@ class DavidControlCenter:
 
         iteration_limit = self.effective_max_iterations()
 
+        self._update_run_meta(run_id, current_stage="planner")
         initial_snapshot = workspace.snapshot()
         memory_context = memory.render_context(goal)
         plan = planner.create_plan(goal=goal, workspace_snapshot=initial_snapshot, memory_context=memory_context)
@@ -593,6 +673,7 @@ class DavidControlCenter:
                 iteration=iteration,
                 status="running",
                 progress_percent=int(((iteration - 1) / max(1, iteration_limit)) * 100),
+                current_stage="coder",
             )
 
             workspace_snapshot = workspace.snapshot()
@@ -622,6 +703,7 @@ class DavidControlCenter:
             )
 
             try:
+                self._update_run_meta(run_id, current_stage="safety")
                 validated_edits = safety.validate_edits(coder_output.edits)
                 diffs = self._build_diff_entries(validated_edits)
             except SafetyError as exc:
@@ -691,6 +773,7 @@ class DavidControlCenter:
             written_paths = safety.apply_edits(validated_edits)
 
             try:
+                self._update_run_meta(run_id, current_stage="safety")
                 command_specs = safety.validate_commands(coder_output.commands)
             except SafetyError as exc:
                 reason = f"Safety guard rejected commands: {exc}"
@@ -729,7 +812,7 @@ class DavidControlCenter:
                 continue
 
             command_values = [spec.raw for spec in command_specs]
-            self._update_run_meta(run_id, last_command=command_values[-1], iteration=iteration)
+            self._update_run_meta(run_id, last_command=command_values[-1], iteration=iteration, current_stage="executor")
             execution_results = executor.run(command_specs)
             self._write_json(iter_dir / "execution.json", [item.to_dict() for item in execution_results])
 
@@ -741,6 +824,7 @@ class DavidControlCenter:
             if tests_ran:
                 tests_passed = all_ok
 
+            self._update_run_meta(run_id, current_stage="critic")
             critic_output = critic.review(
                 goal=goal,
                 plan_json=plan.to_dict(),
@@ -749,6 +833,7 @@ class DavidControlCenter:
             )
             self._write_json(iter_dir / "critic.json", critic_output.to_dict())
 
+            self._update_run_meta(run_id, current_stage="memory")
             memory.append_lessons(goal=goal, lessons=critic_output.lessons, context=critic_output.analysis)
 
             commands_passed = self._count_passed_commands(execution_results)
@@ -878,8 +963,9 @@ class DavidControlCenter:
     def _build_diff_entries(self, edits: list[ValidatedEdit]) -> list[DiffEntry]:
         rows: list[DiffEntry] = []
         for edit in edits:
+            existed_before = edit.absolute_path.exists()
             before = ""
-            if edit.absolute_path.exists():
+            if existed_before:
                 try:
                     before = edit.absolute_path.read_text(encoding="utf-8")
                 except UnicodeDecodeError:
@@ -902,9 +988,19 @@ class DavidControlCenter:
                     added=added,
                     removed=removed,
                     patch="\n".join(diff_lines),
+                    change_type="edited" if existed_before else "new",
+                    workspace_path=str(edit.absolute_path),
+                    before_preview=self._clip_preview(before),
+                    after_preview=self._clip_preview(after),
                 )
             )
         return rows
+
+    @staticmethod
+    def _clip_preview(text: str, max_chars: int = 1800) -> str:
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars] + "\n...[truncated preview]"
 
     def _register_approval(
         self,
@@ -972,6 +1068,7 @@ class DavidControlCenter:
             progress_percent=100,
             tests_ran=tests_ran,
             tests_passed=tests_passed,
+            current_stage="memory",
         )
 
     def _finalize_failure(
@@ -1004,6 +1101,7 @@ class DavidControlCenter:
             progress_percent=100,
             tests_ran=tests_ran,
             tests_passed=tests_passed,
+            current_stage="critic",
         )
 
     def _finalize_stopped(
@@ -1022,6 +1120,7 @@ class DavidControlCenter:
             ended_at=self._now_iso(),
             tests_ran=tests_ran,
             tests_passed=tests_passed,
+            current_stage="executor",
         )
 
     def _finalize_rejected(
@@ -1040,6 +1139,7 @@ class DavidControlCenter:
             ended_at=self._now_iso(),
             tests_ran=tests_ran,
             tests_passed=tests_passed,
+            current_stage="safety",
         )
 
     @staticmethod

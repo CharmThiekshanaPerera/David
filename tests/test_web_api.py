@@ -79,6 +79,21 @@ class FakeCenter:
             "approvals": [],
         }
 
+    def get_run_timeline(self, run_id, limit=1000):
+        if run_id != "run_test_1":
+            return None
+        return [{"step": "run_started", "timestamp_utc": "2026-01-01T00:00:00+00:00", "payload": {}}]
+
+    def get_run_files(self, run_id):
+        if run_id != "run_test_1":
+            return None
+        return {
+            "artifacts_dir": "/tmp/data/runs/run_test_1",
+            "workspace_dir": "/tmp/workspace",
+            "created": [{"path": "hello.py", "change_type": "new", "after_preview": "print('hi')"}],
+            "modified": [],
+        }
+
     def retry_run(self, run_id):
         if run_id == "run_test_1":
             return True, {"run_id": "run_test_retry", "status": "queued"}
@@ -150,3 +165,15 @@ def test_memory_endpoint(client):
     assert response.status_code == 200
     data = response.get_json()["data"]
     assert data["conflict_count"] == 0
+
+
+def test_run_files_and_timeline_endpoints(client):
+    files_response = client.get("/api/run/run_test_1/files")
+    assert files_response.status_code == 200
+    files_data = files_response.get_json()["data"]
+    assert files_data["created"][0]["path"] == "hello.py"
+
+    timeline_response = client.get("/api/run/run_test_1/timeline")
+    assert timeline_response.status_code == 200
+    timeline_data = timeline_response.get_json()["data"]
+    assert timeline_data[0]["step"] == "run_started"

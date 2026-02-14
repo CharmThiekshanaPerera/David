@@ -13,10 +13,30 @@
     <header class="topbar">
       <div>
         <h1>David Control Center</h1>
-        <p>Local-only safety-first monitor for David</p>
+        <p>Beginner-friendly local monitor for David</p>
       </div>
       <div class="status-pill" id="globalStatus">idle</div>
     </header>
+
+    <section id="runningBanner" class="banner hidden" aria-live="polite">
+      <div class="spinner" aria-hidden="true"></div>
+      <div>
+        <strong>Running...</strong>
+        <span id="runningBannerText">David is processing your request.</span>
+      </div>
+    </section>
+
+    <section id="successBanner" class="banner success hidden" aria-live="polite">
+      <div>
+        <strong id="successBannerTitle">Run completed</strong>
+        <span id="successBannerText">Tests passed.</span>
+      </div>
+      <div class="row">
+        <button id="successOpenDetailsBtn">Open run details</button>
+        <button id="successViewFilesBtn" class="ghost">View changed files</button>
+        <button id="successDownloadBundleBtn" class="ghost">Download bundle</button>
+      </div>
+    </section>
 
     <nav class="tabs" id="tabs">
       <button data-tab="dashboard" class="active">Dashboard</button>
@@ -47,11 +67,28 @@
               <div class="progress-bar" id="runProgress"></div>
             </div>
             <p id="dashboardMessage" class="muted">No active run.</p>
+            <div class="stage-tracker" id="stageTracker"></div>
           </article>
 
           <article class="card">
             <h2>Status</h2>
             <ul class="kv" id="statusList"></ul>
+            <h3>Artifacts</h3>
+            <ul class="kv" id="artifactList"></ul>
+          </article>
+        </div>
+
+        <div class="grid two">
+          <article class="card">
+            <h2>Activity Feed</h2>
+            <div id="activityFeed" class="timeline compact"></div>
+          </article>
+          <article class="card">
+            <h2>Preview & Changed Files</h2>
+            <div id="previewSummary" class="muted">No preview data yet.</div>
+            <div id="fileTree" class="file-tree"></div>
+            <h3>File Preview (Read-only)</h3>
+            <pre id="filePreview" class="code">Select a file from the list.</pre>
           </article>
         </div>
 
@@ -68,7 +105,9 @@
             <input id="runSearch" type="text" placeholder="Search by run id / command / message" />
             <select id="runStatusFilter">
               <option value="">All statuses</option>
+              <option value="queued">queued</option>
               <option value="running">running</option>
+              <option value="awaiting_approval">awaiting_approval</option>
               <option value="success">success</option>
               <option value="failed">failed</option>
               <option value="rejected">rejected</option>
@@ -83,6 +122,8 @@
         <article class="card">
           <h2>Selected Run Timeline</h2>
           <div id="timelineView" class="timeline"></div>
+          <h3>Execution Results</h3>
+          <div id="executionPanels" class="stack"></div>
           <h3>Explain Failure</h3>
           <pre id="failureExplain" class="code">Select a run.</pre>
         </article>
@@ -95,6 +136,7 @@
             <input id="diffRunId" type="text" placeholder="run_..." />
             <button id="loadDiffBtn">Load Diffs</button>
           </div>
+          <div id="diffSummary" class="muted"></div>
           <div id="diffView"></div>
         </article>
       </section>
@@ -129,6 +171,13 @@
           <h2>Tail Logs</h2>
           <div class="row">
             <button id="refreshLogsBtn">Refresh logs</button>
+            <select id="logsLevelFilter">
+              <option value="all">all levels</option>
+              <option value="info">info</option>
+              <option value="warn">warn</option>
+              <option value="error">error</option>
+            </select>
+            <input id="logsSearch" type="text" placeholder="Search logs" />
           </div>
           <pre id="logsView" class="code"></pre>
         </article>
@@ -177,9 +226,13 @@
             <button id="cliSendBtn">Send</button>
           </div>
           <pre id="cliOutput" class="code"></pre>
+          <h3>Last Execution Output</h3>
+          <div id="cliExecPanel" class="stack"></div>
         </article>
       </section>
     </main>
+
+    <div id="toastContainer" class="toast-container" aria-live="polite"></div>
 
     <script src="/static/app.js"></script>
   </body>

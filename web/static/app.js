@@ -1,30 +1,53 @@
+const STAGES = ["planner", "coder", "safety", "executor", "critic", "memory"];
+
 const state = {
   status: null,
   runs: [],
   selectedRunId: "",
+  selectedRunDetails: null,
+  selectedRunFiles: null,
   telemetry: null,
   settings: null,
+  logs: null,
+  lastCliRunId: "",
+  lastNotifiedRunId: "",
 };
 
 const el = {
   tabs: document.getElementById("tabs"),
   globalStatus: document.getElementById("globalStatus"),
+  runningBanner: document.getElementById("runningBanner"),
+  runningBannerText: document.getElementById("runningBannerText"),
+  successBanner: document.getElementById("successBanner"),
+  successBannerTitle: document.getElementById("successBannerTitle"),
+  successBannerText: document.getElementById("successBannerText"),
+  successOpenDetailsBtn: document.getElementById("successOpenDetailsBtn"),
+  successViewFilesBtn: document.getElementById("successViewFilesBtn"),
+  successDownloadBundleBtn: document.getElementById("successDownloadBundleBtn"),
   goalInput: document.getElementById("goalInput"),
   previewMode: document.getElementById("previewMode"),
   startGoalBtn: document.getElementById("startGoalBtn"),
   stopRunBtn: document.getElementById("stopRunBtn"),
   runProgress: document.getElementById("runProgress"),
   dashboardMessage: document.getElementById("dashboardMessage"),
+  stageTracker: document.getElementById("stageTracker"),
   statusList: document.getElementById("statusList"),
+  artifactList: document.getElementById("artifactList"),
+  activityFeed: document.getElementById("activityFeed"),
+  previewSummary: document.getElementById("previewSummary"),
+  fileTree: document.getElementById("fileTree"),
+  filePreview: document.getElementById("filePreview"),
   approvalList: document.getElementById("approvalList"),
   runSearch: document.getElementById("runSearch"),
   runStatusFilter: document.getElementById("runStatusFilter"),
   refreshRunsBtn: document.getElementById("refreshRunsBtn"),
   runTableWrap: document.getElementById("runTableWrap"),
   timelineView: document.getElementById("timelineView"),
+  executionPanels: document.getElementById("executionPanels"),
   failureExplain: document.getElementById("failureExplain"),
   diffRunId: document.getElementById("diffRunId"),
   loadDiffBtn: document.getElementById("loadDiffBtn"),
+  diffSummary: document.getElementById("diffSummary"),
   diffView: document.getElementById("diffView"),
   factsView: document.getElementById("factsView"),
   lessonsView: document.getElementById("lessonsView"),
@@ -32,6 +55,8 @@ const el = {
   telemetrySummary: document.getElementById("telemetrySummary"),
   durationChart: document.getElementById("durationChart"),
   refreshLogsBtn: document.getElementById("refreshLogsBtn"),
+  logsLevelFilter: document.getElementById("logsLevelFilter"),
+  logsSearch: document.getElementById("logsSearch"),
   logsView: document.getElementById("logsView"),
   settingSafeMode: document.getElementById("settingSafeMode"),
   settingRateLimit: document.getElementById("settingRateLimit"),
@@ -44,6 +69,8 @@ const el = {
   cliInput: document.getElementById("cliInput"),
   cliSendBtn: document.getElementById("cliSendBtn"),
   cliOutput: document.getElementById("cliOutput"),
+  cliExecPanel: document.getElementById("cliExecPanel"),
+  toastContainer: document.getElementById("toastContainer"),
 };
 
 function escapeHtml(value) {
@@ -62,8 +89,7 @@ async function api(path, options = {}) {
   });
   const json = await response.json().catch(() => ({}));
   if (!response.ok || !json.ok) {
-    const msg = json?.error || json?.data?.error || `Request failed (${response.status})`;
-    throw new Error(msg);
+    throw new Error(json?.error || json?.data?.error || `Request failed (${response.status})`);
   }
   return json.data;
 }
@@ -74,12 +100,6 @@ function setMessage(text) {
 
 function setCliOutput(text) {
   el.cliOutput.textContent = text;
-}
-
-function kvList(target, entries) {
-  target.innerHTML = entries
-    .map(([k, v]) => `<li><span class="k">${escapeHtml(k)}</span><span>${escapeHtml(v)}</span></li>`)
-    .join("");
 }
 
 function fmtDate(value) {
@@ -95,12 +115,53 @@ function fmtBool(value) {
   return "-";
 }
 
+function kvList(target, entries) {
+  target.innerHTML = entries
+    .map(([k, v]) => `<li><span class="k">${escapeHtml(k)}</span><span>${escapeHtml(v)}</span></li>`)
+    .join("");
+}
+
+function showToast(text) {
+  const node = document.createElement("div");
+  node.className = "toast";
+  node.textContent = text;
+  el.toastContainer.appendChild(node);
+  setTimeout(() => {
+    node.remove();
+  }, 4000);
+}
+
+function renderStageTracker(currentStage) {
+  el.stageTracker.innerHTML = STAGES.map((stage) => {
+    const active = stage === currentStage ? "active" : "";
+    return `<div class="stage ${active}">${escapeHtml(stage)}</div>`;
+  }).join("");
+}
+
+function toggleRunningBanner(status) {
+  const runningStates = new Set(["running", "queued", "stopping", "awaiting_approval"]);
+  const isRunning = runningStates.has(status?.status);
+  el.runningBanner.classList.toggle("hidden", !isRunning);
+  if (isRunning) {
+    el.runningBannerText.textContent = `Run ${status.active_run_id || ""} is ${status.status} (${status.current_stage || "idle"}).`;
+  }
+}
+
+function updateButtonState() {
+  const s = state.status || {};
+  const activeState = new Set(["running", "queued", "stopping", "awaiting_approval"]).has(s.status);
+  el.startGoalBtn.disabled = activeState;
+  el.stopRunBtn.disabled = !s.active_run_id;
+  el.refreshRunsBtn.disabled = activeState;
+}
+
 function renderStatus() {
   const s = state.status || {};
   el.globalStatus.textContent = s.status || "idle";
   el.runProgress.style.width = `${s.progress_percent || 0}%`;
   kvList(el.statusList, [
     ["State", s.status || "idle"],
+    ["Current stage", s.current_stage || "idle"],
     ["Model", s.selected_model || "-"],
     ["Active run", s.active_run_id || "-"],
     ["Iteration", `${s.iteration || 0} / ${s.max_iterations || 0}`],
@@ -109,10 +170,24 @@ function renderStatus() {
     ["Pending approvals", s.pending_approvals || 0],
     ["Safe mode", fmtBool(s.safe_mode)],
   ]);
+  renderStageTracker(s.current_stage || "idle");
+  toggleRunningBanner(s);
+  updateButtonState();
 
   if (s.latest_message) {
     setMessage(s.latest_message);
   }
+}
+
+function renderArtifacts(details) {
+  if (!details || !details.meta) {
+    kvList(el.artifactList, [["Artifacts", "-"], ["Workspace", "-"]]);
+    return;
+  }
+  kvList(el.artifactList, [
+    ["Artifacts", details.artifacts_dir || details.meta.artifacts_dir || "-"],
+    ["Workspace", details.workspace_dir || details.meta.workspace_dir || "-"],
+  ]);
 }
 
 function renderApprovals(rows) {
@@ -162,6 +237,7 @@ function renderRuns() {
     return;
   }
 
+  const hasActive = !!state.status?.active_run_id;
   const html = `
     <table class="table">
       <thead>
@@ -185,7 +261,7 @@ function renderRuns() {
               <td>${escapeHtml(row.regression_warning || row.message || "-")}</td>
               <td>
                 <button data-run-action="view" data-run-id="${escapeHtml(row.id)}">View</button>
-                <button data-run-action="retry" data-run-id="${escapeHtml(row.id)}" class="ghost">Retry</button>
+                <button data-run-action="retry" data-run-id="${escapeHtml(row.id)}" class="ghost" ${hasActive ? "disabled" : ""}>Retry</button>
                 <button data-run-action="bundle" data-run-id="${escapeHtml(row.id)}" class="ghost">Bundle</button>
               </td>
             </tr>`;
@@ -208,6 +284,7 @@ function renderRuns() {
         try {
           const result = await api(`/api/run/${encodeURIComponent(runId)}/retry`, { method: "POST" });
           setMessage(`Retry started: ${result.run_id}`);
+          showToast(`Retry started: ${result.run_id}`);
           await refreshRuns();
         } catch (err) {
           setMessage(err.message);
@@ -240,21 +317,102 @@ function renderTimeline(details) {
   el.failureExplain.textContent = meta.failure_explanation || "No failure explanation for this run.";
 }
 
+function renderExecutionPanels(container, iterations) {
+  const blocks = [];
+  (iterations || []).forEach((iter) => {
+    const exec = iter.execution || [];
+    exec.forEach((result, idx) => {
+      const key = `exec_${iter.iteration}_${idx}`;
+      blocks.push(`
+        <details class="exec-card" open>
+          <summary><strong>Iteration ${escapeHtml(iter.iteration)}</strong> · ${escapeHtml(result.command || "command")}</summary>
+          <div class="exec-meta">
+            <span>Return code: <strong>${escapeHtml(result.returncode)}</strong></span>
+            <span>Timeout: <strong>${escapeHtml(result.timed_out)}</strong></span>
+            <span>Duration: <strong>${escapeHtml(result.duration_sec || 0)}s</strong></span>
+          </div>
+          <div class="exec-tabs">
+            <button data-exec-tab="stdout" data-exec-key="${key}">stdout</button>
+            <button data-exec-tab="stderr" data-exec-key="${key}">stderr</button>
+            <button data-exec-tab="meta" data-exec-key="${key}">meta</button>
+          </div>
+          <pre id="${key}_stdout" class="code">${escapeHtml(result.stdout || "")}</pre>
+          <pre id="${key}_stderr" class="code hidden">${escapeHtml(result.stderr || "")}</pre>
+          <pre id="${key}_meta" class="code hidden">${escapeHtml(JSON.stringify({ returncode: result.returncode, timed_out: result.timed_out, duration_sec: result.duration_sec }, null, 2))}</pre>
+        </details>
+      `);
+    });
+  });
+
+  container.innerHTML = blocks.length ? blocks.join("") : '<p class="muted">No execution output for this run.</p>';
+
+  container.querySelectorAll("button[data-exec-tab]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const key = button.getAttribute("data-exec-key");
+      const tab = button.getAttribute("data-exec-tab");
+      ["stdout", "stderr", "meta"].forEach((name) => {
+        const node = document.getElementById(`${key}_${name}`);
+        if (node) node.classList.toggle("hidden", name !== tab);
+      });
+    });
+  });
+}
+
 function renderDiffs(details) {
   const iterations = details.iterations || [];
+  let changedCount = 0;
+  let createdCount = 0;
+  let modifiedCount = 0;
   const blocks = [];
+
   for (const iter of iterations) {
     for (const diff of iter.diffs || []) {
       if (!diff.patch) continue;
+      changedCount += 1;
+      if (diff.change_type === "new") createdCount += 1;
+      else modifiedCount += 1;
       blocks.push(`
         <div class="diff-block">
-          <div class="diff-title">Iteration ${escapeHtml(iter.iteration)} · ${escapeHtml(diff.path)} (+${escapeHtml(diff.added)} / -${escapeHtml(diff.removed)})</div>
+          <div class="diff-title">Iteration ${escapeHtml(iter.iteration)} · ${escapeHtml(diff.path)} (+${escapeHtml(diff.added)} / -${escapeHtml(diff.removed)}) <span class="badge ${escapeHtml(diff.change_type || "edited")}">${escapeHtml(diff.change_type || "edited")}</span></div>
           <pre class="code">${escapeHtml(diff.patch)}</pre>
         </div>
       `);
     }
   }
+
+  el.diffSummary.textContent = `${changedCount} file diffs · ${createdCount} new · ${modifiedCount} edited`;
   el.diffView.innerHTML = blocks.length ? blocks.join("") : '<p class="muted">No diff artifacts found.</p>';
+}
+
+function renderFileTree(summary) {
+  if (!summary) {
+    el.previewSummary.textContent = "No preview data yet.";
+    el.fileTree.innerHTML = "";
+    return;
+  }
+
+  const created = summary.created || [];
+  const modified = summary.modified || [];
+  el.previewSummary.textContent = `${created.length + modified.length} changed files. Artifacts: ${summary.artifacts_dir}`;
+
+  const rows = [];
+  created.forEach((file) => {
+    rows.push(`<button class="file-item" data-file-preview="${escapeHtml(file.path)}"><span>${escapeHtml(file.path)}</span><span class="badge new">new file</span></button>`);
+  });
+  modified.forEach((file) => {
+    rows.push(`<button class="file-item" data-file-preview="${escapeHtml(file.path)}"><span>${escapeHtml(file.path)}</span><span class="badge edited">edited file</span></button>`);
+  });
+  el.fileTree.innerHTML = rows.length ? rows.join("") : '<p class="muted">No created/updated files in this run.</p>';
+
+  el.fileTree.querySelectorAll("button[data-file-preview]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const path = button.getAttribute("data-file-preview");
+      const allFiles = [...created, ...modified];
+      const match = allFiles.find((item) => item.path === path);
+      const preview = match?.after_preview || "";
+      el.filePreview.textContent = `${path}\n\n${preview}`;
+    });
+  });
 }
 
 function renderMemory(data) {
@@ -266,8 +424,7 @@ function renderMemory(data) {
     .slice(-120)
     .reverse()
     .map(
-      (f) =>
-        `<div><code>${escapeHtml(f.subject)}.${escapeHtml(f.predicate)}</code> = ${escapeHtml(f.object)} <span class="muted">(${escapeHtml(f.timestamp || "")})</span></div>`
+      (f) => `<div><code>${escapeHtml(f.subject)}.${escapeHtml(f.predicate)}</code> = ${escapeHtml(f.object)} <span class="muted">(${escapeHtml(f.timestamp || "")})</span></div>`
     )
     .join("");
 
@@ -275,8 +432,7 @@ function renderMemory(data) {
     .slice(-120)
     .reverse()
     .map(
-      (l) =>
-        `<div><strong>${escapeHtml(l.lesson || "")}</strong><br/><span class="muted">goal=${escapeHtml(l.goal || "")}</span></div>`
+      (l) => `<div><strong>${escapeHtml(l.lesson || "")}</strong><br/><span class="muted">goal=${escapeHtml(l.goal || "")}</span></div>`
     )
     .join("");
 
@@ -285,11 +441,7 @@ function renderMemory(data) {
   } else {
     el.memoryConflicts.innerHTML = conflicts
       .map(
-        (c) => `<div class="approval">
-            <strong>${escapeHtml(c.subject)}.${escapeHtml(c.predicate)}</strong>
-            <div>Values: ${escapeHtml((c.values || []).join(" | "))}</div>
-            <div class="muted">${escapeHtml(c.warning || "")}</div>
-          </div>`
+        (c) => `<div class="approval"><strong>${escapeHtml(c.subject)}.${escapeHtml(c.predicate)}</strong><div>Values: ${escapeHtml((c.values || []).join(" | "))}</div></div>`
       )
       .join("");
   }
@@ -331,6 +483,22 @@ function drawDurationChart(metrics) {
   ctx.fillText(`max ${max.toFixed(2)}s`, 10, 12);
 }
 
+function renderActivityFeed(events) {
+  const filtered = (events || [])
+    .filter((item) => item && item.event_type)
+    .slice(-20)
+    .reverse();
+  if (!filtered.length) {
+    el.activityFeed.innerHTML = '<p class="muted">No activity yet.</p>';
+    return;
+  }
+  el.activityFeed.innerHTML = filtered
+    .map((event) => {
+      return `<div class="timeline-item"><strong>${escapeHtml(event.event_type)}</strong><div class="muted">${escapeHtml(fmtDate(event.timestamp_utc))}</div></div>`;
+    })
+    .join("");
+}
+
 function renderTelemetry(data) {
   state.telemetry = data;
   const summary = data.summary || {};
@@ -343,13 +511,31 @@ function renderTelemetry(data) {
   ]);
 
   drawDurationChart(data.metrics || []);
+  renderActivityFeed(data.events || []);
+}
+
+function detectLogLevel(line) {
+  const text = String(line || "").toLowerCase();
+  if (text.includes("error") || text.includes("traceback")) return "error";
+  if (text.includes("warn")) return "warn";
+  return "info";
 }
 
 function renderLogs(data) {
+  state.logs = data;
+  const level = (el.logsLevelFilter.value || "all").toLowerCase();
+  const search = (el.logsSearch.value || "").toLowerCase();
+
   const parts = [];
   Object.entries(data || {}).forEach(([name, rows]) => {
     parts.push(`=== ${name} ===`);
-    for (const row of rows || []) parts.push(row);
+    (rows || []).forEach((row) => {
+      const line = String(row);
+      const lineLevel = detectLogLevel(line);
+      if (level !== "all" && level !== lineLevel) return;
+      if (search && !line.toLowerCase().includes(search)) return;
+      parts.push(line);
+    });
     parts.push("");
   });
   el.logsView.textContent = parts.join("\n");
@@ -372,15 +558,70 @@ function renderSettings(data) {
   ]);
 }
 
+function handleRunCompletionNotification() {
+  const newest = state.runs[0];
+  if (!newest) return;
+  const terminalStatuses = new Set(["success", "preview_ready", "failed", "rejected", "stopped"]);
+  if (!terminalStatuses.has(newest.status)) return;
+  if (state.lastNotifiedRunId === newest.id) return;
+
+  state.lastNotifiedRunId = newest.id;
+  const success = newest.status === "success" || newest.status === "preview_ready";
+  if (success) {
+    el.successBanner.classList.remove("hidden");
+    el.successBannerTitle.textContent = newest.status === "preview_ready" ? "Successful Preview" : "✅ Run completed";
+    el.successBannerText.textContent = newest.status === "preview_ready" ? "Preview generated successfully." : "✅ Run completed: tests passed.";
+    showToast(`Run completed: ${newest.id}`);
+  } else {
+    el.successBanner.classList.add("hidden");
+    showToast(`Run ended: ${newest.status} (${newest.id})`);
+  }
+
+  el.successOpenDetailsBtn.onclick = async () => {
+    state.selectedRunId = newest.id;
+    await openRunTab(newest.id);
+  };
+  el.successViewFilesBtn.onclick = async () => {
+    state.selectedRunId = newest.id;
+    await openDiffTab(newest.id);
+  };
+  el.successDownloadBundleBtn.onclick = () => {
+    window.location.href = `/api/run/${encodeURIComponent(newest.id)}/bundle`;
+  };
+}
+
 async function loadRun(runId) {
   try {
     const details = await api(`/api/run/${encodeURIComponent(runId)}`);
+    const files = await api(`/api/run/${encodeURIComponent(runId)}/files`);
+    state.selectedRunDetails = details;
+    state.selectedRunFiles = files;
+
     renderTimeline(details);
+    renderExecutionPanels(el.executionPanels, details.iterations || []);
     renderDiffs(details);
-    setCliOutput(JSON.stringify(details.result || {}, null, 2));
+    renderArtifacts(details);
+    renderFileTree(files);
+
+    if (state.lastCliRunId === runId) {
+      setCliOutput(JSON.stringify(details.result || {}, null, 2));
+      renderExecutionPanels(el.cliExecPanel, details.iterations || []);
+    }
   } catch (err) {
     setMessage(err.message);
   }
+}
+
+async function openRunTab(runId) {
+  activateTab("runs");
+  el.diffRunId.value = runId;
+  await loadRun(runId);
+}
+
+async function openDiffTab(runId) {
+  activateTab("diff");
+  el.diffRunId.value = runId;
+  await loadRun(runId);
 }
 
 async function refreshStatus() {
@@ -407,6 +648,7 @@ async function refreshRuns() {
     const status = encodeURIComponent(el.runStatusFilter.value.trim());
     state.runs = await api(`/api/runs?search=${search}&status=${status}&limit=120`);
     renderRuns();
+    handleRunCompletionNotification();
     if (state.selectedRunId) {
       await loadRun(state.selectedRunId);
     }
@@ -435,7 +677,7 @@ async function refreshTelemetry() {
 
 async function refreshLogs() {
   try {
-    const logs = await api("/api/logs/tail?limit=250");
+    const logs = await api("/api/logs/tail?limit=400");
     renderLogs(logs);
   } catch (err) {
     setMessage(err.message);
@@ -451,15 +693,19 @@ async function refreshSettings() {
   }
 }
 
+function activateTab(tab) {
+  el.tabs.querySelectorAll("button").forEach((b) => b.classList.remove("active"));
+  document.querySelectorAll(".tab-panel").forEach((panel) => panel.classList.remove("active"));
+  const button = el.tabs.querySelector(`button[data-tab="${tab}"]`);
+  if (button) button.classList.add("active");
+  const target = document.getElementById(`tab-${tab}`);
+  if (target) target.classList.add("active");
+}
+
 function wireTabs() {
   el.tabs.querySelectorAll("button[data-tab]").forEach((button) => {
     button.addEventListener("click", () => {
-      const tab = button.getAttribute("data-tab");
-      el.tabs.querySelectorAll("button").forEach((b) => b.classList.remove("active"));
-      button.classList.add("active");
-      document.querySelectorAll(".tab-panel").forEach((panel) => panel.classList.remove("active"));
-      const target = document.getElementById(`tab-${tab}`);
-      if (target) target.classList.add("active");
+      activateTab(button.getAttribute("data-tab"));
     });
   });
 }
@@ -477,6 +723,8 @@ function wireActions() {
         body: JSON.stringify({ command: `/goal ${goal}`, preview: el.previewMode.checked }),
       });
       setMessage(`Run queued: ${result.run_id}`);
+      state.selectedRunId = result.run_id;
+      showToast(`Run started: ${result.run_id}`);
       await refreshRuns();
       await refreshStatus();
     } catch (err) {
@@ -488,6 +736,7 @@ function wireActions() {
     try {
       const result = await api("/api/stop", { method: "POST" });
       setMessage(result.run_id ? `Stop requested for ${result.run_id}` : "No active run");
+      showToast(result.run_id ? `Stop requested: ${result.run_id}` : "No active run");
       await refreshStatus();
     } catch (err) {
       setMessage(err.message);
@@ -510,6 +759,8 @@ function wireActions() {
   });
 
   el.refreshLogsBtn.addEventListener("click", refreshLogs);
+  el.logsSearch.addEventListener("input", () => renderLogs(state.logs || {}));
+  el.logsLevelFilter.addEventListener("change", () => renderLogs(state.logs || {}));
 
   el.saveSettingsBtn.addEventListener("click", async () => {
     try {
@@ -527,6 +778,7 @@ function wireActions() {
       });
       renderSettings(settings);
       setMessage("Settings updated.");
+      showToast("Settings saved.");
       await refreshStatus();
     } catch (err) {
       setMessage(err.message);
@@ -544,7 +796,10 @@ function wireActions() {
         method: "POST",
         body: JSON.stringify({ command }),
       });
+      state.lastCliRunId = result.run_id;
+      state.selectedRunId = result.run_id;
       setCliOutput(`queued run: ${result.run_id}`);
+      showToast(`CLI command queued: ${result.run_id}`);
       await refreshRuns();
       await refreshStatus();
     } catch (err) {

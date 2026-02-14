@@ -287,6 +287,18 @@ http://127.0.0.1:8787
 - Settings: safe mode, rate limit, iteration override, risk thresholds.
 - CLI Mirror: send `/goal`, `/ask`, `/teach` commands from browser.
 
+### UX highlights (new)
+
+- Running banner + spinner with loop-stage tracker (`Planner -> Coder -> Safety -> Executor -> Critic -> Memory`).
+- Beginner-readable execution panels (collapsible) for `stdout`, `stderr`, return code, and timeout.
+- Successful preview experience:
+  - clean diff summary,
+  - created vs updated files list,
+  - click-to-open read-only file preview.
+- Success banner with quick actions: open run details, download run bundle, view changed files.
+- Dashboard activity feed with recent run events and approvals.
+- Logs tab filtering/search for `info` / `warn` / `error`.
+
 ### API endpoints
 
 - `GET /api/status`
@@ -294,6 +306,8 @@ http://127.0.0.1:8787
 - `POST /api/stop`
 - `GET /api/runs`
 - `GET /api/run/<run_id>`
+- `GET /api/run/<run_id>/timeline`
+- `GET /api/run/<run_id>/files`
 - `POST /api/run/<run_id>/retry`
 - `GET /api/run/<run_id>/bundle`
 - `GET /api/memory`
@@ -309,6 +323,13 @@ http://127.0.0.1:8787
 - Memory conflict approval gate for conflicting `--teach` facts.
 - Safe mode can block write operations (read-only monitoring mode).
 - Run artifacts are stored under `data/runs/<run_id>/` (plan, iteration outputs, diffs, result bundle).
+
+### Preview mode quick usage
+
+1. In Dashboard, enable `Run preview`.
+2. Start a `/goal` run.
+3. Use `Preview & Changed Files` and `Diff Viewer` to inspect proposed changes.
+4. Start again with preview disabled to apply changes after review.
 
 ## How David Learns
 

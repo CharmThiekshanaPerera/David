@@ -73,6 +73,24 @@ def create_app(
             return _json_error("Run not found.", status=404)
         return jsonify({"ok": True, "data": payload})
 
+    @app.get("/api/run/<run_id>/timeline")
+    def api_run_timeline(run_id: str):
+        try:
+            limit = int(request.args.get("limit", "1000"))
+        except ValueError:
+            limit = 1000
+        payload = center.get_run_timeline(run_id, limit=limit)
+        if payload is None:
+            return _json_error("Run not found.", status=404)
+        return jsonify({"ok": True, "data": payload})
+
+    @app.get("/api/run/<run_id>/files")
+    def api_run_files(run_id: str):
+        payload = center.get_run_files(run_id)
+        if payload is None:
+            return _json_error("Run not found.", status=404)
+        return jsonify({"ok": True, "data": payload})
+
     @app.post("/api/run/<run_id>/retry")
     def api_run_retry(run_id: str):
         ok, result = center.retry_run(run_id)
