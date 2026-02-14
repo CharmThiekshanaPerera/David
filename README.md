@@ -257,6 +257,59 @@ Ask later using memory-only retrieval:
 python -m agent.main --ask "Who is your father?"
 ```
 
+## David Control Center (Web UI, Local Only)
+
+The project includes a local web interface in `web/` to monitor and control David safely.
+Detailed documentation: `docs/WEB_UI.md`
+
+### Start the web server
+
+From project root (with virtual environment activated):
+
+```bash
+python -m web.server --host 127.0.0.1 --port 8787
+```
+
+Open in browser:
+
+```text
+http://127.0.0.1:8787
+```
+
+### Web tabs
+
+- Dashboard: current status, progress, quick run/stop actions, pending approvals.
+- Runs: run history, timeline, retry failed runs, explain-failure panel.
+- Diff Viewer: per-iteration workspace patch view.
+- Memory: facts/lessons + memory conflict detector.
+- Telemetry: success/error metrics and iteration-duration chart.
+- Logs: tail view of web + telemetry logs.
+- Settings: safe mode, rate limit, iteration override, risk thresholds.
+- CLI Mirror: send `/goal`, `/ask`, `/teach` commands from browser.
+
+### API endpoints
+
+- `GET /api/status`
+- `POST /api/run`
+- `POST /api/stop`
+- `GET /api/runs`
+- `GET /api/run/<run_id>`
+- `POST /api/run/<run_id>/retry`
+- `GET /api/run/<run_id>/bundle`
+- `GET /api/memory`
+- `GET /api/telemetry/tail`
+- `GET /api/logs/tail`
+
+### Safety behavior in web mode
+
+- Local-only by default (`127.0.0.1` bind).
+- No arbitrary shell endpoint; only `/goal`, `/ask`, `/teach`.
+- File writes remain restricted to `workspace/` by existing safety guard.
+- Risk approval gate for large edits and multi-file rewrites.
+- Memory conflict approval gate for conflicting `--teach` facts.
+- Safe mode can block write operations (read-only monitoring mode).
+- Run artifacts are stored under `data/runs/<run_id>/` (plan, iteration outputs, diffs, result bundle).
+
 ## How David Learns
 
 - Each iteration can add reusable lessons to `memory/long_term.json`.
@@ -273,6 +326,12 @@ pytest -q
 ```
 
 Current tests validate safety boundaries, executor timeout behavior, and teach/ask memory flow.
+
+Web API and safety tests:
+
+```bash
+pytest -q tests/test_web_api.py tests/test_web_safety.py
+```
 
 ## Suggested Evolution Roadmap
 

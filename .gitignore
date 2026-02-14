@@ -27,6 +27,8 @@ htmlcov/
 logs/
 memory/long_term.json
 workspace/
+data/runs/
+data/control_settings.json
 
 # OS/editor
 .DS_Store
