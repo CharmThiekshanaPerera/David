@@ -6,6 +6,7 @@ import json
 import logging
 import queue
 import re
+import shutil
 import threading
 import time
 import uuid
@@ -15,7 +16,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from agent.config import AgentConfig, load_config
+import requests
+
+from agent.config import AgentConfig, load_config, sanitize_model_name
 from agent.contracts import CoderOutput, CriticOutput, ExecutionResult, LessonProposal
 from agent.coder import Coder
 from agent.critic import Critic
@@ -23,6 +26,7 @@ from agent.llm import OllamaClient
 from agent.main import parse_chat_command
 from agent.memory import LongTermMemory
 from agent.planner import Planner
+from agent.projects import ensure_workspace_layout, prepare_project_for_goal
 from agent.qa import MemoryTeacherQA
 from agent.safety import SafetyError, SafetyGuard, ValidatedEdit
 from agent.telemetry import IterationMetric, TelemetryLogger
@@ -31,6 +35,48 @@ from agent.executor import RestrictedExecutor
 
 
 RUN_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{6,80}$")
+GOAL_TEMPLATES: list[dict[str, Any]] = [
+    {
+        "id": "build_cli_tool",
+        "name": "Build CLI Tool",
+        "description": "Build modular CLI app with tests and clean structure.",
+        "goal": (
+            "Build a modular Python CLI app inside the active project with clear package structure, "
+            "argument parsing, and pytest coverage for core flows."
+        ),
+        "tdd_mode": False,
+    },
+    {
+        "id": "bug_fix_mode",
+        "name": "Bug Fix Mode",
+        "description": "Analyze failing test, isolate root cause, fix only related code.",
+        "goal": (
+            "Analyze the failing tests, isolate the root cause, and apply a minimal fix "
+            "without rewriting unrelated files. Keep regression risk low."
+        ),
+        "tdd_mode": False,
+    },
+    {
+        "id": "refactor_mode",
+        "name": "Refactor Mode",
+        "description": "Improve readability, add docstrings, and increase test coverage.",
+        "goal": (
+            "Refactor the target module for readability, add useful docstrings, and improve "
+            "test coverage while preserving behavior."
+        ),
+        "tdd_mode": False,
+    },
+    {
+        "id": "strict_tdd_mode",
+        "name": "Strict TDD Mode",
+        "description": "Write failing tests first, then implement until tests pass.",
+        "goal": (
+            "Use strict TDD: write failing tests first under tests/ in the active project, do not implement "
+            "production code until tests fail, then iterate to green."
+        ),
+        "tdd_mode": True,
+    },
+]
 
 
 @dataclass
@@ -41,9 +87,16 @@ class ControlSettings:
     risky_large_edit_bytes: int = 50_000
     risky_multi_file_threshold: int = 4
     run_preview_default: bool = False
+    planner_model: str = ""
+    coder_model: str = ""
+    critic_model: str = ""
+    tdd_mode: bool = False
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ControlSettings":
+        planner_model = str(data.get("planner_model", "")).strip()
+        coder_model = str(data.get("coder_model", "")).strip()
+        critic_model = str(data.get("critic_model", "")).strip()
         return cls(
             safe_mode=bool(data.get("safe_mode", False)),
             rate_limit_seconds=max(0, int(data.get("rate_limit_seconds", 3))),
@@ -51,6 +104,10 @@ class ControlSettings:
             risky_large_edit_bytes=max(1_000, int(data.get("risky_large_edit_bytes", 50_000))),
             risky_multi_file_threshold=max(2, int(data.get("risky_multi_file_threshold", 4))),
             run_preview_default=bool(data.get("run_preview_default", False)),
+            planner_model=planner_model,
+            coder_model=coder_model,
+            critic_model=critic_model,
+            tdd_mode=bool(data.get("tdd_mode", False)),
         )
 
 
@@ -95,6 +152,8 @@ class DavidControlCenter:
             self._logger.addHandler(handler)
 
         self.settings = self._load_settings()
+        self._validate_role_models()
+        ensure_workspace_layout(self.config.workspace_dir)
 
     def get_status(self) -> dict[str, Any]:
         with self._lock:
@@ -110,6 +169,16 @@ class DavidControlCenter:
             "status": current_meta.get("status") if current_meta else "idle",
             "active_run_id": active,
             "selected_model": self.config.model,
+            "planner_model_used": current_meta.get("planner_model_used") if current_meta else self._planner_model(),
+            "coder_model_used": current_meta.get("coder_model_used") if current_meta else self._coder_model(),
+            "critic_model_used": current_meta.get("critic_model_used") if current_meta else self._critic_model(),
+            "tdd_mode": current_meta.get("tdd_mode") if current_meta else self.settings.tdd_mode,
+            "iterations_until_green": current_meta.get("iterations_until_green") if current_meta else None,
+            "project_slug": current_meta.get("project_slug", "") if current_meta else "",
+            "project_path": current_meta.get("project_path", "") if current_meta else "",
+            "project_created_new": current_meta.get("project_created_new") if current_meta else None,
+            "workspace_target_path": current_meta.get("workspace_target_path", "") if current_meta else "",
+            "workspace_target_type": current_meta.get("workspace_target_type", "") if current_meta else "",
             "current_stage": current_meta.get("current_stage", "idle") if current_meta else "idle",
             "stages": ["planner", "coder", "safety", "executor", "critic", "memory"],
             "iteration": current_meta.get("iteration", 0) if current_meta else 0,
@@ -161,9 +230,13 @@ class DavidControlCenter:
         return {
             **asdict(self.settings),
             "model": self.config.model,
+            "planner_model_default": self.config.planner_model,
+            "coder_model_default": self.config.coder_model,
+            "critic_model_default": self.config.critic_model,
             "allowed_commands": list(self.config.allowed_commands),
             "max_iterations_default": self.config.max_iterations,
             "workspace_dir": str(self.config.workspace_dir),
+            "goal_templates": self.goal_templates(),
         }
 
     def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -172,21 +245,98 @@ class DavidControlCenter:
             if key in payload:
                 current[key] = payload[key]
         self.settings = ControlSettings.from_dict(current)
+        self._validate_role_models()
         self._save_settings()
         return self.get_settings()
+
+    def goal_templates(self) -> list[dict[str, Any]]:
+        return [dict(item) for item in GOAL_TEMPLATES]
+
+    def _template_by_id(self, template_id: str) -> dict[str, Any] | None:
+        cleaned = template_id.strip()
+        if not cleaned:
+            return None
+        for item in GOAL_TEMPLATES:
+            if item.get("id") == cleaned:
+                return dict(item)
+        return None
+
+    def list_ollama_models(self) -> list[str]:
+        tags_url = self.config.ollama_url.replace("/api/chat", "/api/tags")
+        try:
+            response = requests.get(tags_url, timeout=(5, 10))
+            response.raise_for_status()
+            payload = response.json()
+        except Exception:
+            base = [self.config.model, self._planner_model(), self._coder_model(), self._critic_model()]
+            return sorted({item for item in base if item})
+
+        rows = payload.get("models", []) if isinstance(payload, dict) else []
+        names: list[str] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name", "")).strip()
+            if not name:
+                continue
+            try:
+                names.append(sanitize_model_name(name, "ollama_model"))
+            except ValueError:
+                continue
+
+        if not names:
+            names = [self.config.model, self._planner_model(), self._coder_model(), self._critic_model()]
+        return sorted({item for item in names if item})
 
     def effective_max_iterations(self) -> int:
         if self.settings.max_iterations_override > 0:
             return self.settings.max_iterations_override
         return self.config.max_iterations
 
+    def _planner_model(self) -> str:
+        chosen = self.settings.planner_model or self.config.planner_model or self.config.model
+        return sanitize_model_name(chosen, "planner_model")
+
+    def _coder_model(self) -> str:
+        chosen = self.settings.coder_model or self.config.coder_model or self.config.model
+        return sanitize_model_name(chosen, "coder_model")
+
+    def _critic_model(self) -> str:
+        chosen = self.settings.critic_model or self.config.critic_model or self.config.model
+        return sanitize_model_name(chosen, "critic_model")
+
+    def _validate_role_models(self) -> None:
+        # Sanitizes configured names and normalizes to safe values.
+        self.settings.planner_model = sanitize_model_name(
+            self.settings.planner_model or self.config.planner_model or self.config.model,
+            "planner_model",
+        )
+        self.settings.coder_model = sanitize_model_name(
+            self.settings.coder_model or self.config.coder_model or self.config.model,
+            "coder_model",
+        )
+        self.settings.critic_model = sanitize_model_name(
+            self.settings.critic_model or self.config.critic_model or self.config.model,
+            "critic_model",
+        )
+
     def start_run(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        template_id = str(payload.get("template_id", "")).strip()
+        template = self._template_by_id(template_id)
+        if template_id and template is None:
+            return False, {"error": "Unknown goal template."}
+
         command = str(payload.get("command", "")).strip()
         preview = bool(payload.get("preview", self.settings.run_preview_default))
+        requested_mode = str(payload.get("mode", "")).strip().lower()
+        requested_payload = str(payload.get("payload", "")).strip()
+
+        if not command and requested_mode == "goal" and not requested_payload and template:
+            command = f"/goal {template['goal']}"
 
         if not command:
-            mode = str(payload.get("mode", "")).strip().lower()
-            content = str(payload.get("payload", "")).strip()
+            mode = requested_mode
+            content = requested_payload
             if mode in {"goal", "ask", "teach"} and content:
                 command = f"/{mode} {content}"
 
@@ -199,6 +349,32 @@ class DavidControlCenter:
             return False, {"error": "Only /goal, /ask, and /teach are allowed."}
         if not content:
             return False, {"error": f"/{mode} requires content."}
+
+        try:
+            planner_model_used = sanitize_model_name(
+                str(payload.get("planner_model", self._planner_model())).strip() or self._planner_model(),
+                "planner_model",
+            )
+            coder_model_used = sanitize_model_name(
+                str(payload.get("coder_model", self._coder_model())).strip() or self._coder_model(),
+                "coder_model",
+            )
+            critic_model_used = sanitize_model_name(
+                str(payload.get("critic_model", self._critic_model())).strip() or self._critic_model(),
+                "critic_model",
+            )
+        except ValueError as exc:
+            return False, {"error": str(exc)}
+
+        tdd_mode = bool(payload.get("tdd_mode", template.get("tdd_mode", self.settings.tdd_mode) if template else self.settings.tdd_mode))
+        if mode != "goal":
+            tdd_mode = False
+
+        project_slug = ""
+        project_path = ""
+        project_created_new: bool | None = None
+        workspace_target_path = ""
+        workspace_target_type = ""
 
         with self._lock:
             if self._active_thread and self._active_thread.is_alive():
@@ -221,6 +397,25 @@ class DavidControlCenter:
                         "error": "Safe mode is enabled. Use preview=true for /goal in read-only mode."
                     }
 
+            if mode == "goal":
+                requested_target = str(payload.get("workspace_target_path", "")).strip()
+                if requested_target:
+                    try:
+                        target_path, normalized_target, target_type = self._resolve_existing_goal_target(requested_target)
+                    except ValueError as exc:
+                        return False, {"error": str(exc)}
+                    goal_workspace_dir = target_path if target_type == "folder" else target_path.parent
+                    project_slug = goal_workspace_dir.name or "workspace"
+                    project_path = str(goal_workspace_dir)
+                    project_created_new = False
+                    workspace_target_path = normalized_target
+                    workspace_target_type = target_type
+                else:
+                    project = prepare_project_for_goal(self.config.workspace_dir, content)
+                    project_slug = project.project_slug
+                    project_path = str(project.project_path)
+                    project_created_new = project.project_created_new
+
             run_id = self._new_run_id()
             run_dir = self._run_dir(run_id)
             run_dir.mkdir(parents=True, exist_ok=False)
@@ -237,6 +432,17 @@ class DavidControlCenter:
                 "started_at": self._now_iso(),
                 "ended_at": None,
                 "model": self.config.model,
+                "planner_model_used": planner_model_used,
+                "coder_model_used": coder_model_used,
+                "critic_model_used": critic_model_used,
+                "tdd_mode": tdd_mode,
+                "iterations_until_green": None,
+                "template_id": template.get("id") if template else "",
+                "project_slug": project_slug,
+                "project_path": project_path,
+                "project_created_new": project_created_new,
+                "workspace_target_path": workspace_target_path,
+                "workspace_target_type": workspace_target_type,
                 "iteration": 0,
                 "max_iterations": self.effective_max_iterations(),
                 "progress_percent": 0,
@@ -253,10 +459,22 @@ class DavidControlCenter:
             }
             self._write_json(run_dir / "meta.json", meta)
 
+            run_options = {
+                "planner_model_used": planner_model_used,
+                "coder_model_used": coder_model_used,
+                "critic_model_used": critic_model_used,
+                "tdd_mode": tdd_mode,
+                "template_id": template.get("id") if template else "",
+                "project_slug": project_slug,
+                "project_path": project_path,
+                "project_created_new": project_created_new,
+                "workspace_target_path": workspace_target_path,
+                "workspace_target_type": workspace_target_type,
+            }
             cancel_event = threading.Event()
             worker = threading.Thread(
                 target=self._execute_run,
-                args=(run_id, mode, content, preview, cancel_event),
+                args=(run_id, mode, content, preview, cancel_event, run_options),
                 daemon=True,
                 name=f"david-run-{run_id}",
             )
@@ -267,7 +485,20 @@ class DavidControlCenter:
             self._last_run_started_at = now
             worker.start()
 
-        return True, {"run_id": run_id, "status": "queued"}
+        return True, {
+            "run_id": run_id,
+            "status": "queued",
+            "planner_model_used": planner_model_used,
+            "coder_model_used": coder_model_used,
+            "critic_model_used": critic_model_used,
+            "tdd_mode": tdd_mode,
+            "template_id": template.get("id") if template else "",
+            "project_slug": project_slug,
+            "project_path": project_path,
+            "project_created_new": project_created_new,
+            "workspace_target_path": workspace_target_path,
+            "workspace_target_type": workspace_target_type,
+        }
 
     def stop_active_run(self) -> dict[str, Any]:
         with self._lock:
@@ -288,6 +519,80 @@ class DavidControlCenter:
 
         self._update_run_meta(run_id, status="stopping", message="Stop requested by user.", current_stage="executor")
         return {"stopped": True, "run_id": run_id}
+
+    def ask_memory(self, question: str, actor: str = "web_ui") -> dict[str, Any]:
+        clean_question = self._sanitize_user_text(question, field_name="question")
+        llm = OllamaClient(self.config)
+        memory = LongTermMemory(self.config.memory_file)
+        teacher = MemoryTeacherQA(llm=llm, memory=memory)
+
+        answer = teacher.ask(clean_question)
+        matched = memory.search_facts(clean_question, limit=8)
+        payload = {
+            "mode": "ask",
+            "question": clean_question,
+            "answer": answer,
+            "matched_facts": [asdict(item) for item in matched],
+            "matched_count": len(matched),
+            "actor": actor.strip() or "web_ui",
+            "timestamp_utc": self._now_iso(),
+        }
+        self.publish_event("status", {"type": "memory_ask_answered", "payload": payload})
+        self.publish_event("logs", {"type": "memory_ask_answered", "payload": payload})
+        return payload
+
+    def teach_memory(
+        self,
+        message: str,
+        *,
+        confirm_conflict: bool = False,
+        actor: str = "web_ui",
+    ) -> dict[str, Any]:
+        if self.settings.safe_mode:
+            raise ValueError("Safe mode is enabled. /teach is blocked in read-only mode.")
+
+        clean_message = self._sanitize_user_text(message, field_name="message")
+        llm = OllamaClient(self.config)
+        memory = LongTermMemory(self.config.memory_file)
+        teacher = MemoryTeacherQA(llm=llm, memory=memory)
+
+        conflicts = self._preview_teach_conflicts(teacher, memory, clean_message)
+        if conflicts and not confirm_conflict:
+            payload = {
+                "mode": "teach",
+                "status": "conflict",
+                "message": clean_message,
+                "requires_confirmation": True,
+                "stored_facts": [],
+                "stored_count": 0,
+                "skipped_items": [],
+                "notes": "Conflict detected. Confirm to continue.",
+                "conflicts": conflicts,
+                "actor": actor.strip() or "web_ui",
+                "timestamp_utc": self._now_iso(),
+            }
+            self.publish_event("status", {"type": "memory_teach_conflict", "payload": payload})
+            self.publish_event("logs", {"type": "memory_teach_conflict", "payload": payload})
+            return payload
+
+        result = teacher.teach(clean_message)
+        payload = {
+            "mode": "teach",
+            "status": "stored",
+            "message": clean_message,
+            "requires_confirmation": False,
+            "confirmed_conflict": bool(conflicts),
+            "stored_facts": [asdict(fact) for fact in result.stored_facts],
+            "stored_count": len(result.stored_facts),
+            "skipped_items": list(result.skipped_items),
+            "notes": result.notes,
+            "conflicts": conflicts,
+            "actor": actor.strip() or "web_ui",
+            "timestamp_utc": self._now_iso(),
+        }
+        self.publish_event("status", {"type": "memory_teach_completed", "payload": payload})
+        self.publish_event("logs", {"type": "memory_teach_completed", "payload": payload})
+        return payload
 
     def submit_approval(
         self,
@@ -446,6 +751,18 @@ class DavidControlCenter:
         run_dir = self._run_dir(run_id)
         if not run_dir.exists():
             return None
+        meta = self._read_json(run_dir / "meta.json", default={})
+        project_slug = ""
+        project_path_str = ""
+        project_dir: Path | None = None
+        if isinstance(meta, dict):
+            project_slug = str(meta.get("project_slug", "")).strip()
+            project_path_str = str(meta.get("project_path", "")).strip()
+            if project_path_str:
+                try:
+                    project_dir = self._resolve_goal_project_path(project_path_str)
+                except ValueError:
+                    project_dir = None
 
         created: dict[str, dict[str, Any]] = {}
         modified: dict[str, dict[str, Any]] = {}
@@ -478,11 +795,22 @@ class DavidControlCenter:
                     elif path not in created:
                         modified[path] = record
 
+        workspace_files, workspace_dirs, workspace_file_total, workspace_dir_total, workspace_files_truncated = self._list_workspace_files(
+            limit=20_000
+        )
         return {
             "artifacts_dir": str(run_dir),
             "workspace_dir": str(self.config.workspace_dir),
+            "project_slug": project_slug,
+            "project_path": project_path_str,
             "created": sorted(created.values(), key=lambda row: row["path"]),
             "modified": sorted(modified.values(), key=lambda row: row["path"]),
+            "project_files": self._list_project_files(project_dir, limit=1200),
+            "workspace_files": workspace_files,
+            "workspace_dirs": workspace_dirs,
+            "workspace_file_total": workspace_file_total,
+            "workspace_dir_total": workspace_dir_total,
+            "workspace_files_truncated": workspace_files_truncated,
         }
 
     def get_run_replay(self, run_id: str, iteration: int) -> dict[str, Any] | None:
@@ -569,10 +897,21 @@ class DavidControlCenter:
         current = self.get_run(run_id)
         if not current:
             return False, {"error": "Run not found."}
-        command = str(current["meta"].get("command", "")).strip()
+        meta = current.get("meta", {}) if isinstance(current, dict) else {}
+        command = str(meta.get("command", "")).strip()
         if not command:
             return False, {"error": "Original command missing."}
-        return self.start_run({"command": command, "preview": False})
+        payload: dict[str, Any] = {
+            "command": command,
+            "preview": False,
+            "template_id": str(meta.get("template_id", "")).strip(),
+            "planner_model": str(meta.get("planner_model_used", "")).strip(),
+            "coder_model": str(meta.get("coder_model_used", "")).strip(),
+            "critic_model": str(meta.get("critic_model_used", "")).strip(),
+            "tdd_mode": bool(meta.get("tdd_mode", False)),
+            "workspace_target_path": str(meta.get("workspace_target_path", "")).strip(),
+        }
+        return self.start_run(payload)
 
     def run_bundle_zip(self, run_id: str) -> io.BytesIO | None:
         if not self._is_safe_run_id(run_id):
@@ -693,17 +1032,48 @@ class DavidControlCenter:
                 )
         return warnings
 
-    def _execute_run(self, run_id: str, mode: str, payload: str, preview: bool, cancel_event: threading.Event) -> None:
+    def _execute_run(
+        self,
+        run_id: str,
+        mode: str,
+        payload: str,
+        preview: bool,
+        cancel_event: threading.Event,
+        run_options: dict[str, Any],
+    ) -> None:
         try:
             self._update_run_meta(run_id, status="running", current_stage="planner")
-            self._append_timeline(run_id, "run_started", {"mode": mode, "preview": preview})
+            self._append_timeline(
+                run_id,
+                "run_started",
+                {
+                    "mode": mode,
+                    "preview": preview,
+                    "planner_model_used": run_options.get("planner_model_used"),
+                    "coder_model_used": run_options.get("coder_model_used"),
+                    "critic_model_used": run_options.get("critic_model_used"),
+                    "tdd_mode": bool(run_options.get("tdd_mode", False)),
+                    "template_id": run_options.get("template_id", ""),
+                    "project_slug": run_options.get("project_slug", ""),
+                    "project_path": run_options.get("project_path", ""),
+                    "project_created_new": run_options.get("project_created_new"),
+                    "workspace_target_path": run_options.get("workspace_target_path", ""),
+                    "workspace_target_type": run_options.get("workspace_target_type", ""),
+                },
+            )
 
             if mode == "ask":
                 self._execute_ask(run_id, payload)
             elif mode == "teach":
                 self._execute_teach(run_id, payload)
             else:
-                self._execute_goal(run_id, payload, preview=preview, cancel_event=cancel_event)
+                self._execute_goal(
+                    run_id,
+                    payload,
+                    preview=preview,
+                    cancel_event=cancel_event,
+                    run_options=run_options,
+                )
 
         except Exception as exc:  # pragma: no cover - defensive boundary
             self._logger.exception("run failed run_id=%s", run_id)
@@ -782,35 +1152,130 @@ class DavidControlCenter:
             current_stage="memory",
         )
 
-    def _execute_goal(self, run_id: str, goal: str, preview: bool, cancel_event: threading.Event) -> None:
+    def _execute_goal(
+        self,
+        run_id: str,
+        goal: str,
+        preview: bool,
+        cancel_event: threading.Event,
+        run_options: dict[str, Any] | None = None,
+    ) -> None:
+        options = run_options or {}
+        planner_model_used = sanitize_model_name(
+            str(options.get("planner_model_used", self._planner_model())).strip() or self._planner_model(),
+            "planner_model",
+        )
+        coder_model_used = sanitize_model_name(
+            str(options.get("coder_model_used", self._coder_model())).strip() or self._coder_model(),
+            "coder_model",
+        )
+        critic_model_used = sanitize_model_name(
+            str(options.get("critic_model_used", self._critic_model())).strip() or self._critic_model(),
+            "critic_model",
+        )
+        tdd_mode = bool(options.get("tdd_mode", self.settings.tdd_mode))
+        project_slug = str(options.get("project_slug", "")).strip()
+        project_path_raw = str(options.get("project_path", "")).strip()
+        project_created_new = options.get("project_created_new")
+        workspace_target_path = str(options.get("workspace_target_path", "")).strip()
+        workspace_target_type = str(options.get("workspace_target_type", "")).strip().lower()
+        if not project_path_raw:
+            if workspace_target_path:
+                target_path, normalized_target, target_type = self._resolve_existing_goal_target(workspace_target_path)
+                workspace_target_path = normalized_target
+                workspace_target_type = target_type
+                goal_workspace_dir = target_path if target_type == "folder" else target_path.parent
+                project_slug = goal_workspace_dir.name or "workspace"
+                project_path_raw = str(goal_workspace_dir)
+                project_created_new = False
+            else:
+                project = prepare_project_for_goal(self.config.workspace_dir, goal)
+                project_slug = project.project_slug
+                project_path_raw = str(project.project_path)
+                project_created_new = project.project_created_new
+        project_path = self._resolve_goal_project_path(project_path_raw)
+        if not project_slug:
+            project_slug = project_path.name or "workspace"
+
+        effective_goal = self._augment_goal_with_workspace_target(goal, workspace_target_path, workspace_target_type)
+
         llm = OllamaClient(self.config)
-        planner = Planner(llm)
-        coder = Coder(llm)
-        critic = Critic(llm)
+        planner = Planner(llm, model_name=planner_model_used)
+        coder = Coder(llm, model_name=coder_model_used)
+        critic = Critic(llm, model_name=critic_model_used)
         safety = SafetyGuard(
-            workspace_dir=self.config.workspace_dir,
+            workspace_dir=project_path,
             max_file_write_bytes=self.config.max_file_write_bytes,
             max_total_write_bytes=self.config.max_total_write_bytes,
             allowed_commands=self.config.allowed_commands,
         )
         executor = RestrictedExecutor(
-            workspace_dir=self.config.workspace_dir,
+            workspace_dir=project_path,
             timeout_sec=self.config.command_timeout_sec,
             max_output_chars=self.config.max_command_output_chars,
         )
         memory = LongTermMemory(self.config.memory_file)
-        workspace = WorkspaceInspector(self.config.workspace_dir)
+        workspace = WorkspaceInspector(project_path)
         telemetry = TelemetryLogger(self.config.logs_dir)
+        project_meta = {
+            "project_slug": project_slug,
+            "project_path": str(project_path),
+            "project_created_new": project_created_new,
+            "workspace_target_path": workspace_target_path,
+            "workspace_target_type": workspace_target_type,
+        }
 
         iteration_limit = self.effective_max_iterations()
+        tdd_red_phase_complete = False
+        iterations_until_green: int | None = None
 
-        self._update_run_meta(run_id, current_stage="planner")
+        self._update_run_meta(
+            run_id,
+            current_stage="planner",
+            planner_model_used=planner_model_used,
+            coder_model_used=coder_model_used,
+            critic_model_used=critic_model_used,
+            tdd_mode=tdd_mode,
+            project_slug=project_slug,
+            project_path=str(project_path),
+            project_created_new=project_created_new,
+            workspace_target_path=workspace_target_path,
+            workspace_target_type=workspace_target_type,
+        )
         initial_snapshot = workspace.snapshot()
-        memory_context = memory.render_context(goal)
-        plan = planner.create_plan(goal=goal, workspace_snapshot=initial_snapshot, memory_context=memory_context)
+        memory_context = memory.render_context(effective_goal)
+        plan = planner.create_plan(
+            goal=effective_goal,
+            workspace_snapshot=initial_snapshot,
+            memory_context=memory_context,
+            tdd_mode=tdd_mode,
+        )
         self._write_json(self._run_dir(run_id) / "plan.json", plan.to_dict())
-        self._append_timeline(run_id, "plan_created", plan.to_dict())
-        telemetry.event("plan_created", {"run_id": run_id, "goal": goal, "plan": plan.to_dict()})
+        self._append_timeline(
+            run_id,
+            "plan_created",
+            {
+                "plan": plan.to_dict(),
+                "planner_model_used": planner_model_used,
+                "coder_model_used": coder_model_used,
+                "critic_model_used": critic_model_used,
+                "tdd_mode": tdd_mode,
+                **project_meta,
+            },
+        )
+        telemetry.event(
+            "plan_created",
+            {
+                "run_id": run_id,
+                "goal": effective_goal,
+                "plan": plan.to_dict(),
+                "planner_model_used": planner_model_used,
+                "coder_model_used": coder_model_used,
+                "critic_model_used": critic_model_used,
+                "tdd_mode": tdd_mode,
+                **project_meta,
+            },
+        )
 
         critic_feedback = "No critic feedback yet."
         tests_ran = False
@@ -818,10 +1283,36 @@ class DavidControlCenter:
 
         for iteration in range(1, iteration_limit + 1):
             if cancel_event.is_set():
-                self._finalize_stopped(run_id, "Run stopped by user.", tests_ran, tests_passed)
+                telemetry.event(
+                    "run_complete",
+                    {
+                        "run_id": run_id,
+                        "goal": effective_goal,
+                        "success": False,
+                        "iterations_used": max(0, iteration - 1),
+                        "planner_model_used": planner_model_used,
+                        "coder_model_used": coder_model_used,
+                        "critic_model_used": critic_model_used,
+                        "tdd_mode": tdd_mode,
+                        "iterations_until_green": iterations_until_green,
+                        **project_meta,
+                    },
+                )
+                self._finalize_stopped(
+                    run_id,
+                    "Run stopped by user.",
+                    tests_ran,
+                    tests_passed,
+                    iterations_until_green=iterations_until_green,
+                )
                 return
 
             started = time.perf_counter()
+            tdd_phase = (
+                "implementation"
+                if (tdd_mode and tdd_red_phase_complete)
+                else ("tests_first" if tdd_mode else "normal")
+            )
             self._update_run_meta(
                 run_id,
                 iteration=iteration,
@@ -831,14 +1322,16 @@ class DavidControlCenter:
             )
 
             workspace_snapshot = workspace.snapshot()
-            memory_context = memory.render_context(goal)
+            memory_context = memory.render_context(effective_goal)
             coder_output = coder.propose(
-                goal=goal,
+                goal=effective_goal,
                 plan_json=plan.to_dict(),
                 workspace_snapshot=workspace_snapshot,
                 memory_context=memory_context,
                 critic_feedback=critic_feedback,
                 iteration=iteration,
+                tdd_mode=tdd_mode,
+                tdd_phase=tdd_phase,
             )
 
             iter_dir = self._run_dir(run_id) / "iterations" / f"{iteration:03d}"
@@ -853,24 +1346,89 @@ class DavidControlCenter:
                     "edit_count": len(coder_output.edits),
                     "commands": coder_output.commands,
                     "done": coder_output.done,
+                    "planner_model_used": planner_model_used,
+                    "coder_model_used": coder_model_used,
+                    "critic_model_used": critic_model_used,
+                    "tdd_mode": tdd_mode,
+                    "tdd_phase": tdd_phase,
+                    **project_meta,
                 },
             )
 
             try:
                 self._update_run_meta(run_id, current_stage="safety")
                 validated_edits = safety.validate_edits(coder_output.edits)
+                if tdd_mode and not tdd_red_phase_complete:
+                    has_tests_edit, has_non_test_edit = self._summarize_tdd_test_edits(validated_edits)
+                    if not has_tests_edit or has_non_test_edit:
+                        reason = (
+                            "TDD mode requires tests-first edits under tests/ in the active project before implementation. "
+                            "Only test files are allowed until a failing pytest run is observed."
+                        )
+                        self._write_json(
+                            iter_dir / "risk.json",
+                            {
+                                "reasons": [reason],
+                                "tdd_violation": True,
+                                "has_tests_edit": has_tests_edit,
+                                "has_non_test_edit": has_non_test_edit,
+                            },
+                        )
+                        telemetry.event(
+                            "tdd_violation",
+                            {
+                                "run_id": run_id,
+                                "iteration": iteration,
+                                "reason": reason,
+                                "has_tests_edit": has_tests_edit,
+                                "has_non_test_edit": has_non_test_edit,
+                                **project_meta,
+                            },
+                        )
+                        self._append_timeline(
+                            run_id,
+                            "tdd_violation",
+                            {
+                                "iteration": iteration,
+                                "reason": reason,
+                                "has_tests_edit": has_tests_edit,
+                                "has_non_test_edit": has_non_test_edit,
+                                **project_meta,
+                            },
+                        )
+                        self._record_iteration_metric(telemetry, iteration, "retry", 0, 0, started)
+                        memory.append_lessons(
+                            goal=effective_goal,
+                            lessons=[
+                                LessonProposal(
+                                    lesson="In TDD mode, write tests under tests/ before implementation edits.",
+                                    tags=["tdd", "testing", "discipline"],
+                                )
+                            ],
+                            context=reason,
+                        )
+                        critic_feedback = reason
+                        continue
                 diffs = self._build_diff_entries(validated_edits)
             except SafetyError as exc:
                 reason = f"Safety guard rejected edits: {exc}"
-                telemetry.event("safety_violation", {"run_id": run_id, "iteration": iteration, "error": str(exc)})
+                telemetry.event(
+                    "safety_violation",
+                    {"run_id": run_id, "iteration": iteration, "error": str(exc), **project_meta},
+                )
                 self._write_json(iter_dir / "risk.json", {"safety_error": str(exc)})
-                self._append_timeline(run_id, "safety_violation", {"iteration": iteration, "error": str(exc)})
+                self._append_timeline(
+                    run_id,
+                    "safety_violation",
+                    {"iteration": iteration, "error": str(exc), **project_meta},
+                )
                 self._record_iteration_metric(telemetry, iteration, "retry", 0, 0, started)
                 memory.append_lessons(
-                    goal=goal,
+                    goal=effective_goal,
                     lessons=[
                         LessonProposal(
-                            lesson="Safety validation must pass before any file write.", tags=["safety", "files"]
+                            lesson="Safety validation must pass before any file write.",
+                            tags=["safety", "files"],
                         )
                     ],
                     context=reason,
@@ -899,7 +1457,7 @@ class DavidControlCenter:
                     iteration=iteration,
                     approval_type="risky_edit",
                     reasons=risk_reasons,
-                    payload={"diffs": [asdict(item) for item in diffs], "goal": goal},
+                    payload={"diffs": [asdict(item) for item in diffs], "goal": effective_goal},
                 )
                 self._update_run_meta(
                     run_id,
@@ -909,9 +1467,34 @@ class DavidControlCenter:
                 )
                 decision = self._wait_for_approval(approval_id)
                 if decision != "approve":
-                    self._finalize_rejected(run_id, "Risky edit set was rejected.", tests_ran, tests_passed)
+                    telemetry.event(
+                        "run_complete",
+                        {
+                            "run_id": run_id,
+                            "goal": effective_goal,
+                            "success": False,
+                            "iterations_used": iteration,
+                            "planner_model_used": planner_model_used,
+                            "coder_model_used": coder_model_used,
+                            "critic_model_used": critic_model_used,
+                            "tdd_mode": tdd_mode,
+                            "iterations_until_green": iterations_until_green,
+                            **project_meta,
+                        },
+                    )
+                    self._finalize_rejected(
+                        run_id,
+                        "Risky edit set was rejected.",
+                        tests_ran,
+                        tests_passed,
+                        iterations_until_green=iterations_until_green,
+                    )
                     return
-                self._append_timeline(run_id, "approval_granted", {"iteration": iteration, "approval_id": approval_id})
+                self._append_timeline(
+                    run_id,
+                    "approval_granted",
+                    {"iteration": iteration, "approval_id": approval_id, **project_meta},
+                )
 
             if preview:
                 self._write_json(
@@ -921,6 +1504,27 @@ class DavidControlCenter:
                         "iteration": iteration,
                         "coder": coder_output.to_dict(),
                         "diffs": [asdict(item) for item in diffs],
+                        "planner_model_used": planner_model_used,
+                        "coder_model_used": coder_model_used,
+                        "critic_model_used": critic_model_used,
+                        "tdd_mode": tdd_mode,
+                        **project_meta,
+                    },
+                )
+                telemetry.event(
+                    "run_complete",
+                    {
+                        "run_id": run_id,
+                        "goal": effective_goal,
+                        "success": True,
+                        "preview": True,
+                        "iterations_used": iteration,
+                        "planner_model_used": planner_model_used,
+                        "coder_model_used": coder_model_used,
+                        "critic_model_used": critic_model_used,
+                        "tdd_mode": tdd_mode,
+                        "iterations_until_green": iterations_until_green,
+                        **project_meta,
                     },
                 )
                 self._update_run_meta(
@@ -932,6 +1536,7 @@ class DavidControlCenter:
                     progress_percent=100,
                     tests_ran=False,
                     tests_passed=None,
+                    iterations_until_green=iterations_until_green,
                 )
                 return
 
@@ -939,14 +1544,22 @@ class DavidControlCenter:
 
             try:
                 self._update_run_meta(run_id, current_stage="safety")
-                command_specs = safety.validate_commands(coder_output.commands)
+                commands_to_run = self._prepare_commands_for_iteration(coder_output.commands, tdd_mode=tdd_mode)
+                command_specs = safety.validate_commands(commands_to_run)
             except SafetyError as exc:
                 reason = f"Safety guard rejected commands: {exc}"
-                telemetry.event("safety_violation", {"run_id": run_id, "iteration": iteration, "error": str(exc)})
-                self._append_timeline(run_id, "safety_violation", {"iteration": iteration, "error": str(exc)})
+                telemetry.event(
+                    "safety_violation",
+                    {"run_id": run_id, "iteration": iteration, "error": str(exc), **project_meta},
+                )
+                self._append_timeline(
+                    run_id,
+                    "safety_violation",
+                    {"iteration": iteration, "error": str(exc), **project_meta},
+                )
                 self._record_iteration_metric(telemetry, iteration, "retry", 0, 0, started)
                 memory.append_lessons(
-                    goal=goal,
+                    goal=effective_goal,
                     lessons=[
                         LessonProposal(
                             lesson="Command execution must stay inside the allow-list.",
@@ -960,11 +1573,18 @@ class DavidControlCenter:
 
             if not command_specs:
                 reason = "No validation commands were proposed. At least one allowed command is required."
-                telemetry.event("execution_skipped", {"run_id": run_id, "iteration": iteration, "error": reason})
-                self._append_timeline(run_id, "execution_skipped", {"iteration": iteration, "error": reason})
+                telemetry.event(
+                    "execution_skipped",
+                    {"run_id": run_id, "iteration": iteration, "error": reason, **project_meta},
+                )
+                self._append_timeline(
+                    run_id,
+                    "execution_skipped",
+                    {"iteration": iteration, "error": reason, **project_meta},
+                )
                 self._record_iteration_metric(telemetry, iteration, "retry", 0, 0, started)
                 memory.append_lessons(
-                    goal=goal,
+                    goal=effective_goal,
                     lessons=[
                         LessonProposal(
                             lesson="Every iteration must include at least one validation command.",
@@ -990,31 +1610,109 @@ class DavidControlCenter:
                 },
             )
 
-            for result in execution_results:
-                if "pytest" in result.command:
-                    tests_ran = True
+            pytest_results = self._extract_pytest_results(execution_results)
+            tests_ran_iteration = bool(pytest_results)
+            tests_passed_iteration = tests_ran_iteration and all(
+                item.returncode == 0 and not item.timed_out for item in pytest_results
+            )
+            tests_failed_iteration = tests_ran_iteration and not tests_passed_iteration
 
-            all_ok = bool(execution_results) and all(item.returncode == 0 and not item.timed_out for item in execution_results)
-            if tests_ran:
-                tests_passed = all_ok
+            if tests_ran_iteration:
+                tests_ran = True
+                tests_passed = tests_passed_iteration
+
+            if tdd_mode and not tests_ran_iteration:
+                reason = "TDD mode requires pytest execution in every iteration."
+                telemetry.event(
+                    "tdd_violation",
+                    {"run_id": run_id, "iteration": iteration, "reason": reason, **project_meta},
+                )
+                self._append_timeline(
+                    run_id,
+                    "tdd_violation",
+                    {"iteration": iteration, "reason": reason, **project_meta},
+                )
+                self._record_iteration_metric(
+                    telemetry,
+                    iteration,
+                    "retry",
+                    len(execution_results),
+                    self._count_passed_commands(execution_results),
+                    started,
+                )
+                memory.append_lessons(
+                    goal=effective_goal,
+                    lessons=[
+                        LessonProposal(
+                            lesson="TDD loops must run pytest to observe red/green feedback each iteration.",
+                            tags=["tdd", "testing"],
+                        )
+                    ],
+                    context=reason,
+                )
+                critic_feedback = reason
+                continue
 
             self._update_run_meta(run_id, current_stage="critic")
             critic_output = critic.review(
-                goal=goal,
+                goal=effective_goal,
                 plan_json=plan.to_dict(),
                 coder_json=coder_output.to_dict(),
                 execution_results=execution_results,
+                tdd_mode=tdd_mode,
+                tdd_red_phase_complete=tdd_red_phase_complete,
             )
             self._write_json(iter_dir / "critic.json", critic_output.to_dict())
 
             self._update_run_meta(run_id, current_stage="memory")
-            memory.append_lessons(goal=goal, lessons=critic_output.lessons, context=critic_output.analysis)
+            memory.append_lessons(goal=effective_goal, lessons=critic_output.lessons, context=critic_output.analysis)
 
             commands_passed = self._count_passed_commands(execution_results)
+            iteration_status = critic_output.status
+            if tdd_mode and not tdd_red_phase_complete:
+                if tests_failed_iteration:
+                    tdd_red_phase_complete = True
+                    iteration_status = "retry"
+                    critic_feedback = (
+                        "TDD red phase complete. Keep tests and implement minimal code to make them pass."
+                    )
+                    self._append_timeline(
+                        run_id,
+                        "tdd_red_phase_complete",
+                        {"iteration": iteration, **project_meta},
+                    )
+                    telemetry.event(
+                        "tdd_red_phase_complete",
+                        {"run_id": run_id, "iteration": iteration, **project_meta},
+                    )
+                else:
+                    iteration_status = "retry"
+                    critic_feedback = (
+                        "TDD mode expects failing tests before implementation. Strengthen tests first."
+                    )
+                    self._append_timeline(
+                        run_id,
+                        "tdd_violation",
+                        {
+                            "iteration": iteration,
+                            "reason": "Tests passed before observing required red phase.",
+                            **project_meta,
+                        },
+                    )
+                    telemetry.event(
+                        "tdd_violation",
+                        {
+                            "run_id": run_id,
+                            "iteration": iteration,
+                            "reason": "Tests passed before observing required red phase.",
+                            **project_meta,
+                        },
+                    )
+
             self._record_iteration_metric(
                 telemetry,
                 iteration,
-                critic_output.status,
+                iteration_status,
                 len(execution_results),
                 commands_passed,
                 started,
@@ -1025,11 +1723,17 @@ class DavidControlCenter:
                 {
                     "run_id": run_id,
                     "iteration": iteration,
-                    "status": critic_output.status,
+                    "status": iteration_status,
                     "written_paths": written_paths,
                     "commands_passed": commands_passed,
                     "commands_total": len(execution_results),
                     "analysis": critic_output.analysis,
+                    "planner_model_used": planner_model_used,
+                    "coder_model_used": coder_model_used,
+                    "critic_model_used": critic_model_used,
+                    "tdd_mode": tdd_mode,
+                    "tdd_red_phase_complete": tdd_red_phase_complete,
+                    **project_meta,
                 },
             )
 
@@ -1038,14 +1742,40 @@ class DavidControlCenter:
                 "iteration_complete",
                 {
                     "iteration": iteration,
-                    "status": critic_output.status,
+                    "status": iteration_status,
                     "analysis": critic_output.analysis,
                     "commands_total": len(execution_results),
                     "commands_passed": commands_passed,
+                    "planner_model_used": planner_model_used,
+                    "coder_model_used": coder_model_used,
+                    "critic_model_used": critic_model_used,
+                    "tdd_mode": tdd_mode,
+                    "tdd_red_phase_complete": tdd_red_phase_complete,
+                    **project_meta,
                 },
             )
 
-            if self._is_success(critic_output, coder_output, execution_results):
+            if (
+                self._is_success(critic_output, coder_output, execution_results)
+                and (not tdd_mode or (tdd_red_phase_complete and tests_passed_iteration))
+            ):
+                if tdd_mode and iterations_until_green is None:
+                    iterations_until_green = iteration
+                telemetry.event(
+                    "run_complete",
+                    {
+                        "run_id": run_id,
+                        "goal": effective_goal,
+                        "success": True,
+                        "iterations_used": iteration,
+                        "planner_model_used": planner_model_used,
+                        "coder_model_used": coder_model_used,
+                        "critic_model_used": critic_model_used,
+                        "tdd_mode": tdd_mode,
+                        "iterations_until_green": iterations_until_green,
+                        **project_meta,
+                    },
+                )
                 self._finalize_success(
                     run_id,
                     critic_output.analysis,
@@ -1053,15 +1783,36 @@ class DavidControlCenter:
                     tests_ran,
                     tests_passed,
                     result_payload={
-                        "goal": goal,
+                        "goal": effective_goal,
                         "status": "success",
                         "analysis": critic_output.analysis,
                         "iterations_used": iteration,
+                        "planner_model_used": planner_model_used,
+                        "coder_model_used": coder_model_used,
+                        "critic_model_used": critic_model_used,
+                        "tdd_mode": tdd_mode,
+                        "iterations_until_green": iterations_until_green,
                     },
+                    iterations_until_green=iterations_until_green,
                 )
                 return
 
             if critic_output.status == "abort":
+                telemetry.event(
+                    "run_complete",
+                    {
+                        "run_id": run_id,
+                        "goal": effective_goal,
+                        "success": False,
+                        "iterations_used": iteration,
+                        "planner_model_used": planner_model_used,
+                        "coder_model_used": coder_model_used,
+                        "critic_model_used": critic_model_used,
+                        "tdd_mode": tdd_mode,
+                        "iterations_until_green": iterations_until_green,
+                        **project_meta,
+                    },
+                )
                 self._finalize_failure(
                     run_id,
                     critic_output.analysis,
@@ -1069,11 +1820,28 @@ class DavidControlCenter:
                     execution_results,
                     tests_ran,
                     tests_passed,
+                    iterations_until_green=iterations_until_green,
                 )
                 return
 
-            critic_feedback = self._render_feedback(critic_output, execution_results)
+            if not (tdd_mode and not tdd_red_phase_complete):
+                critic_feedback = self._render_feedback(critic_output, execution_results)
 
+        telemetry.event(
+            "run_complete",
+            {
+                "run_id": run_id,
+                "goal": effective_goal,
+                "success": False,
+                "iterations_used": iteration_limit,
+                "planner_model_used": planner_model_used,
+                "coder_model_used": coder_model_used,
+                "critic_model_used": critic_model_used,
+                "tdd_mode": tdd_mode,
+                "iterations_until_green": iterations_until_green,
+                **project_meta,
+            },
+        )
         self._finalize_failure(
             run_id,
             "Iteration limit reached before meeting success criteria.",
@@ -1081,6 +1849,7 @@ class DavidControlCenter:
             execution_results=[],
             tests_ran=tests_ran,
             tests_passed=tests_passed,
+            iterations_until_green=iterations_until_green,
         )
 
     def _preview_teach_conflicts(
@@ -1252,6 +2021,7 @@ class DavidControlCenter:
         tests_ran: bool,
         tests_passed: bool | None,
         result_payload: dict[str, Any],
+        iterations_until_green: int | None = None,
     ) -> None:
         self._write_json(self._run_dir(run_id) / "result.json", result_payload)
         self._update_run_meta(
@@ -1264,6 +2034,7 @@ class DavidControlCenter:
             progress_percent=100,
             tests_ran=tests_ran,
             tests_passed=tests_passed,
+            iterations_until_green=iterations_until_green,
             current_stage="memory",
         )
         self.publish_event("status", {"type": "run_success", "run_id": run_id, "iteration": iteration, "message": message})
@@ -1277,6 +2048,7 @@ class DavidControlCenter:
         execution_results: list[ExecutionResult],
         tests_ran: bool,
         tests_passed: bool | None,
+        iterations_until_green: int | None = None,
     ) -> None:
         iter_dir = self._run_dir(run_id) / "iterations" / f"{iteration:03d}"
         diffs = self._read_json(iter_dir / "diffs.json", default=[])
@@ -1304,6 +2076,7 @@ class DavidControlCenter:
             progress_percent=100,
             tests_ran=tests_ran,
             tests_passed=tests_passed,
+            iterations_until_green=iterations_until_green,
             current_stage="critic",
         )
         self.publish_event("status", {"type": "run_failed", "run_id": run_id, "iteration": iteration, "failure": failure})
@@ -1315,6 +2088,7 @@ class DavidControlCenter:
         message: str,
         tests_ran: bool,
         tests_passed: bool | None,
+        iterations_until_green: int | None = None,
     ) -> None:
         self._write_json(self._run_dir(run_id) / "result.json", {"status": "stopped", "message": message})
         self._update_run_meta(
@@ -1325,6 +2099,7 @@ class DavidControlCenter:
             ended_at=self._now_iso(),
             tests_ran=tests_ran,
             tests_passed=tests_passed,
+            iterations_until_green=iterations_until_green,
             current_stage="executor",
         )
         self.publish_event("status", {"type": "run_stopped", "run_id": run_id, "message": message})
@@ -1336,6 +2111,7 @@ class DavidControlCenter:
         message: str,
         tests_ran: bool = False,
         tests_passed: bool | None = None,
+        iterations_until_green: int | None = None,
     ) -> None:
         self._write_json(self._run_dir(run_id) / "result.json", {"status": "rejected", "message": message})
         self._update_run_meta(
@@ -1346,6 +2122,7 @@ class DavidControlCenter:
             ended_at=self._now_iso(),
             tests_ran=tests_ran,
             tests_passed=tests_passed,
+            iterations_until_green=iterations_until_green,
             current_stage="safety",
         )
         self.publish_event("status", {"type": "run_rejected", "run_id": run_id, "message": message})
@@ -1420,13 +2197,130 @@ class DavidControlCenter:
             path = str(item.get("path", "")).strip()
             if not path:
                 continue
+            workspace_path = str(item.get("workspace_path", "")).strip()
+            if workspace_path:
+                open_path = workspace_path
+            else:
+                open_path = self.config.workspace_dir.joinpath(path).as_posix()
+            safe_open_path = open_path.replace('"', '\\"')
             rows.append(
                 {
                     "path": path,
-                    "vscode_command": f"code -g {self.config.workspace_dir.joinpath(path).as_posix()}:1",
+                    "vscode_command": f'code -g "{safe_open_path}:1"',
                 }
             )
         return rows
+
+    def _list_project_files(self, project_dir: Path | None, limit: int = 300) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        if not project_dir:
+            return rows
+        if not project_dir.exists() or not project_dir.is_dir():
+            return rows
+
+        count = 0
+        for path in sorted(project_dir.rglob("*")):
+            if count >= max(1, min(limit, 2000)):
+                break
+            if not path.is_file():
+                continue
+            try:
+                relative = path.relative_to(project_dir).as_posix()
+            except ValueError:
+                continue
+            if not relative:
+                continue
+            try:
+                after_preview = self._clip_preview(path.read_text(encoding="utf-8"), max_chars=1200)
+            except UnicodeDecodeError:
+                after_preview = "[binary file preview not available]"
+            except OSError:
+                after_preview = "[file preview unavailable]"
+
+            rows.append(
+                {
+                    "path": relative,
+                    "change_type": "workspace",
+                    "workspace_path": str(path),
+                    "added": 0,
+                    "removed": 0,
+                    "after_preview": after_preview,
+                }
+            )
+            count += 1
+        return rows
+
+    def _list_workspace_files(self, limit: int = 20_000) -> tuple[list[dict[str, Any]], list[str], int, int, bool]:
+        rows: list[dict[str, Any]] = []
+        dir_rows: list[str] = []
+        workspace_root = self.config.workspace_dir.resolve()
+        if not workspace_root.exists() or not workspace_root.is_dir():
+            return rows, dir_rows, 0, 0, False
+
+        max_items = max(1, min(limit, 50_000))
+        total_files = 0
+        total_dirs = 0
+        for path in sorted(workspace_root.rglob("*")):
+            if path.is_dir():
+                try:
+                    relative_dir = path.relative_to(workspace_root).as_posix()
+                except ValueError:
+                    continue
+                if relative_dir:
+                    total_dirs += 1
+                    if len(dir_rows) < max_items:
+                        dir_rows.append(relative_dir)
+                continue
+            if not path.is_file() or path.is_symlink():
+                continue
+            try:
+                relative = path.relative_to(workspace_root).as_posix()
+            except ValueError:
+                continue
+            if not relative:
+                continue
+            total_files += 1
+            if len(rows) >= max_items:
+                continue
+
+            try:
+                after_preview = self._clip_preview(path.read_text(encoding="utf-8"), max_chars=1200)
+            except UnicodeDecodeError:
+                after_preview = "[binary file preview not available]"
+            except OSError:
+                after_preview = "[file preview unavailable]"
+
+            rows.append(
+                {
+                    "path": relative,
+                    "change_type": "workspace",
+                    "workspace_path": str(path),
+                    "added": 0,
+                    "removed": 0,
+                    "after_preview": after_preview,
+                }
+            )
+
+        truncated = total_files > len(rows) or total_dirs > len(dir_rows)
+        return rows, dir_rows, total_files, total_dirs, truncated
+
+    def workspace_tree(self, limit: int = 20_000) -> dict[str, Any]:
+        files, dirs, total_files, total_dirs, truncated = self._list_workspace_files(limit=limit)
+        entries: list[dict[str, str]] = []
+        entries.extend({"path": row, "type": "folder"} for row in dirs if row)
+        entries.extend(
+            {"path": str(item.get("path", "")).strip(), "type": "file"}
+            for item in files
+            if str(item.get("path", "")).strip()
+        )
+        entries.sort(key=lambda row: (str(row.get("path", "")).count("/"), str(row.get("path", ""))))
+        return {
+            "workspace_dir": str(self.config.workspace_dir),
+            "entries": entries,
+            "file_total": total_files,
+            "dir_total": total_dirs,
+            "truncated": truncated,
+        }
 
     @staticmethod
     def _render_feedback(critic: CriticOutput, results: list[ExecutionResult]) -> str:
@@ -1445,6 +2339,35 @@ class DavidControlCenter:
     @staticmethod
     def _count_passed_commands(results: list[ExecutionResult]) -> int:
         return sum(1 for item in results if item.returncode == 0 and not item.timed_out)
+
+    @staticmethod
+    def _is_test_path(relative_path: str) -> bool:
+        path = relative_path.strip().replace("\\", "/")
+        return path.startswith("tests/")
+
+    @classmethod
+    def _summarize_tdd_test_edits(cls, edits: list[ValidatedEdit]) -> tuple[bool, bool]:
+        has_tests_edit = any(cls._is_test_path(item.relative_path) for item in edits)
+        has_non_test_edit = any(not cls._is_test_path(item.relative_path) for item in edits)
+        return has_tests_edit, has_non_test_edit
+
+    @staticmethod
+    def _command_mentions_pytest(raw_command: str) -> bool:
+        lowered = raw_command.strip().lower()
+        if lowered == "pytest" or lowered.startswith("pytest "):
+            return True
+        return lowered.startswith("python -m pytest")
+
+    @classmethod
+    def _prepare_commands_for_iteration(cls, commands: list[str], tdd_mode: bool) -> list[str]:
+        prepared = [item for item in commands if item.strip()]
+        if tdd_mode and not any(cls._command_mentions_pytest(item) for item in prepared):
+            prepared.append("pytest -q")
+        return prepared
+
+    @classmethod
+    def _extract_pytest_results(cls, results: list[ExecutionResult]) -> list[ExecutionResult]:
+        return [item for item in results if cls._command_mentions_pytest(item.command)]
 
     @staticmethod
     def _is_success(critic: CriticOutput, coder_output: CoderOutput, results: list[ExecutionResult]) -> bool:
@@ -1525,6 +2448,124 @@ class DavidControlCenter:
         settings = ControlSettings.from_dict(raw)
         self._write_json(self.settings_file, asdict(settings))
         return settings
+
+    def workspace_edit_file(self, relative_path: str, content: str, actor: str = "web_ui") -> dict[str, Any]:
+        if self.settings.safe_mode:
+            raise ValueError("Safe mode is enabled. Manual file edits are blocked in read-only mode.")
+        target, normalized = self._resolve_workspace_path(relative_path)
+        if target.exists() and target.is_dir():
+            raise ValueError("Target path is a folder. File edit requires a file path.")
+        clean_content = str(content).replace("\x00", "")
+        if len(clean_content) > 1_000_000:
+            raise ValueError("File content exceeds max length (1000000 chars).")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(clean_content, encoding="utf-8")
+        payload = {
+            "action": "edit_file",
+            "path": normalized,
+            "workspace_path": str(target),
+            "size_bytes": len(clean_content.encode("utf-8")),
+            "actor": actor.strip() or "web_ui",
+            "timestamp_utc": self._now_iso(),
+        }
+        self.publish_event("logs", {"type": "workspace_file_edited", "payload": payload})
+        return payload
+
+    def workspace_delete_path(self, relative_path: str, actor: str = "web_ui") -> dict[str, Any]:
+        if self.settings.safe_mode:
+            raise ValueError("Safe mode is enabled. Manual deletes are blocked in read-only mode.")
+        target, normalized = self._resolve_workspace_path(relative_path)
+        if not target.exists():
+            raise ValueError("Path not found in workspace.")
+
+        if target.is_dir() and not target.is_symlink():
+            shutil.rmtree(target)
+            target_type = "folder"
+        else:
+            target.unlink()
+            target_type = "file"
+        payload = {
+            "action": "delete_path",
+            "path": normalized,
+            "path_type": target_type,
+            "actor": actor.strip() or "web_ui",
+            "timestamp_utc": self._now_iso(),
+        }
+        self.publish_event("logs", {"type": "workspace_path_deleted", "payload": payload})
+        return payload
+
+    def workspace_rename_path(self, relative_path: str, new_relative_path: str, actor: str = "web_ui") -> dict[str, Any]:
+        if self.settings.safe_mode:
+            raise ValueError("Safe mode is enabled. Manual rename is blocked in read-only mode.")
+        source_path, source_rel = self._resolve_workspace_path(relative_path)
+        if not source_path.exists():
+            raise ValueError("Source path not found in workspace.")
+        target_path, target_rel = self._resolve_workspace_path(new_relative_path)
+        if target_path.exists():
+            raise ValueError("Destination path already exists.")
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path.rename(target_path)
+        payload = {
+            "action": "rename_path",
+            "from_path": source_rel,
+            "to_path": target_rel,
+            "path_type": "folder" if target_path.is_dir() else "file",
+            "actor": actor.strip() or "web_ui",
+            "timestamp_utc": self._now_iso(),
+        }
+        self.publish_event("logs", {"type": "workspace_path_renamed", "payload": payload})
+        return payload
+
+    def _resolve_workspace_path(self, relative_path: str) -> tuple[Path, str]:
+        raw = str(relative_path).replace("\\", "/").strip()
+        cleaned = "/".join(part for part in raw.split("/") if part not in {"", "."})
+        if not cleaned:
+            raise ValueError("Path cannot be empty.")
+        if cleaned.startswith("..") or "/.." in cleaned:
+            raise ValueError("Path escapes workspace boundary.")
+
+        workspace_root = self.config.workspace_dir.resolve()
+        candidate = (workspace_root / cleaned).resolve()
+        if candidate == workspace_root or workspace_root not in candidate.parents:
+            raise ValueError("Path escapes workspace boundary.")
+        return candidate, cleaned
+
+    def _resolve_existing_goal_target(self, target_path: str) -> tuple[Path, str, str]:
+        target, normalized = self._resolve_workspace_path(target_path)
+        if not target.exists():
+            raise ValueError("Selected workspace target does not exist.")
+        target_type = "folder" if target.is_dir() and not target.is_symlink() else "file"
+        return target, normalized, target_type
+
+    def _resolve_goal_project_path(self, project_path: str | Path) -> Path:
+        workspace_root = self.config.workspace_dir.resolve()
+        candidate = Path(project_path)
+        if not candidate.is_absolute():
+            candidate = workspace_root / candidate
+        candidate = candidate.resolve()
+        if candidate != workspace_root and workspace_root not in candidate.parents:
+            raise ValueError("Project path escapes workspace boundary.")
+        if not candidate.exists() or not candidate.is_dir():
+            raise ValueError("Project path does not exist in workspace.")
+        return candidate
+
+    @staticmethod
+    def _augment_goal_with_workspace_target(goal: str, target_path: str, target_type: str) -> str:
+        clean_goal = goal.strip()
+        if not target_path:
+            return clean_goal
+        safe_target = target_path.replace("\\", "/")
+        if target_type == "file":
+            directive = (
+                f"\n\nWorkspace focus target: file `{safe_target}`.\n"
+                "Keep changes centered on this file or nearby files in the same folder."
+            )
+        else:
+            directive = (
+                f"\n\nWorkspace focus target: folder `{safe_target}`.\n"
+                "Create or update files inside this folder tree."
+            )
+        return f"{clean_goal}{directive}".strip()
 
     @staticmethod
     def _read_json(path: Path, default: Any) -> Any:
@@ -1607,6 +2648,15 @@ class DavidControlCenter:
     @staticmethod
     def _now_iso() -> str:
         return datetime.now(timezone.utc).isoformat()
+
+    @staticmethod
+    def _sanitize_user_text(value: str, *, field_name: str, max_chars: int = 4_000) -> str:
+        text = str(value).replace("\x00", "").strip()
+        if not text:
+            raise ValueError(f"{field_name} cannot be empty.")
+        if len(text) > max_chars:
+            raise ValueError(f"{field_name} exceeds max length ({max_chars} chars).")
+        return text
 
 
 def create_control_center(config: AgentConfig | None = None, data_root: Path | None = None) -> DavidControlCenter:

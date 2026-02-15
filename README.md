@@ -18,7 +18,7 @@ For each goal, David runs this loop:
 1. Planner creates a structured JSON plan and success criteria.
 2. Coder proposes JSON file edits and allowed commands.
 3. Safety Guard validates paths and write sizes.
-4. Executor runs only whitelisted commands (`python`, `pytest`) in `workspace/`.
+4. Executor runs only whitelisted commands (`python`, `pytest`) inside the active project folder.
 5. Critic reviews results and proposes improvements.
 6. Memory stores lessons in `memory/long_term.json`.
 7. Loop repeats until success or iteration limit.
@@ -27,12 +27,64 @@ For each goal, David runs this loop:
 
 David enforces:
 
-- Workspace boundary: file edits are only allowed under `workspace/`.
+- Workspace boundary: file edits are only allowed under `workspace/projects/<project_slug>/`.
 - Path validation: no `..`, no absolute paths, no drive paths.
 - Write limits: per-file and per-iteration byte limits.
 - Command allow-list: only commands starting with `python` or `pytest`.
 - No shell execution: commands run with `shell=False`.
 - Local model only: Ollama URL must be localhost (`127.0.0.1` / `localhost`).
+
+## Per-Role Models and TDD Mode
+
+David supports separate local models per role while preserving single-model fallback.
+
+- Planner uses `PLANNER_MODEL`
+- Coder uses `CODER_MODEL`
+- Critic uses `CRITIC_MODEL`
+- Unset role values fall back to `DAVID_MODEL`
+- TDD-first behavior is controlled by `TDD_MODE=true|false`
+
+Example `.env`:
+
+```env
+DAVID_MODEL=qwen2.5-coder:1.5b
+PLANNER_MODEL=llama3.2:3b
+CODER_MODEL=qwen2.5-coder:1.5b
+CRITIC_MODEL=deepseek-r1:7b
+TDD_MODE=false
+```
+
+TDD mode behavior:
+
+- Planner is instructed to write tests first.
+- Tests are expected under `workspace/projects/<project_slug>/tests/`.
+- The loop expects a failing pytest run first (red), then implementation, then green.
+- All safety constraints stay active (allow-list, sandbox, workspace-only writes).
+
+## Workspace Architecture (Project Isolation)
+
+David now isolates each new goal into its own project directory so files from different goals never mix.
+
+- Root `workspace/` stays structured:
+  - `workspace/projects/`
+  - `workspace/templates/`
+  - `workspace/scratch/`
+  - optional `workspace/active_project.json` (tracks the current project)
+- Every new `/goal` creates a dedicated folder:
+  - `workspace/projects/<project_slug>/`
+  - slug is normalized from goal text (lowercase, underscores, unsafe chars removed)
+  - if the slug already exists, a timestamp suffix is appended
+- Required project structure:
+  - `src/`
+  - `tests/`
+  - `docs/`
+  - `data/`
+  - `config/`
+  - `README.md`
+- Safety behavior:
+  - all generated paths are validated relative to the active project root
+  - no absolute writes, no `..` traversal, no writes outside the project folder
+  - existing legacy files under `workspace/` are not deleted, but new writes are project-scoped
 
 ## Project Layout
 
@@ -46,7 +98,10 @@ David enforces:
 - `agent/memory.py`: long-term lessons store/retrieval
 - `agent/qa.py`: explicit teach/ask fact memory pathway
 - `agent/telemetry.py`: structured telemetry and performance metrics
-- `workspace/`: protected coding area for generated files
+- `workspace/projects/`: isolated project roots for goal runs
+- `workspace/templates/`: reusable starter assets
+- `workspace/scratch/`: temporary scratch space
+- `workspace/active_project.json`: current active project pointer
 - `memory/long_term.json`: persistent lessons
 - `logs/telemetry.jsonl`: reasoning/execution event log
 - `logs/metrics.json`: iteration performance metrics
@@ -284,8 +339,34 @@ http://127.0.0.1:8787
 - Memory: facts/lessons + memory conflict detector.
 - Telemetry: success/error metrics and iteration-duration chart.
 - Logs: tail view of web + telemetry logs.
-- Settings: safe mode, rate limit, iteration override, risk thresholds.
-- CLI Mirror: send `/goal`, `/ask`, `/teach` commands from browser.
+- Settings: safe mode, rate limit, iteration override, risk thresholds, planner/coder/critic model config, and default TDD mode.
+- Memory & Chat: chat-style panel for natural ask/teach input, explicit `/goal|/ask|/teach`, and searchable memory viewer.
+
+### Goal templates
+
+Dashboard and Memory & Chat include beginner-friendly templates:
+
+1. `Build CLI Tool`
+2. `Bug Fix Mode`
+3. `Refactor Mode`
+4. `Strict TDD Mode`
+
+Templates prefill goal text and can set run flags (`Strict TDD Mode` enables `tdd_mode`).
+All existing safety checks still apply.
+
+### Teach and Ask in Web UI
+
+Use the `Memory & Chat` tab to interact with long-term memory without CLI:
+
+1. Enter natural text:
+   - question-like text maps to `/ask`
+   - statement/fact-like text maps to `/teach`
+2. Optional: force mode using `Auto / Ask / Teach` buttons.
+3. Submit with `Send`.
+4. For memory conflicts, review the warning bubble and click `Confirm Conflicting Teach` to proceed.
+5. Use the built-in Memory Viewer search box to filter structured facts (`subject`, `predicate`, `object`, `timestamp`).
+
+Memory writes occur only through explicit teach actions (`/teach` mapping or `/api/teach`).
 
 ### UX highlights (new)
 
@@ -326,6 +407,8 @@ http://127.0.0.1:8787
 
 - `GET /api/status`
 - `POST /api/run`
+- `POST /api/ask`
+- `POST /api/teach`
 - `POST /api/stop`
 - `GET /api/runs`
 - `GET /api/run/<run_id>`
@@ -339,6 +422,11 @@ http://127.0.0.1:8787
 - `GET /api/memory`
 - `GET /api/telemetry/tail`
 - `GET /api/logs/tail`
+- `GET /api/settings`
+- `POST /api/settings`
+- `GET /api/models`
+- `GET /api/approvals`
+- `POST /api/approval/<approval_id>`
 - `GET /api/stream/status`
 - `GET /api/stream/logs`
 - `GET /api/stream/run/<run_id>`
@@ -350,7 +438,7 @@ http://127.0.0.1:8787
 - Request body size limit enforced server-side.
 - Server-side state-change throttling to reduce abuse/spam loops.
 - No arbitrary shell endpoint; only `/goal`, `/ask`, `/teach`.
-- File writes remain restricted to `workspace/` by existing safety guard.
+- File writes remain restricted to active project directories under `workspace/projects/`.
 - Risk approval gate for large edits and multi-file rewrites.
 - Memory conflict approval gate for conflicting `--teach` facts.
 - Safe mode can block write operations (read-only monitoring mode).
@@ -390,7 +478,19 @@ Current tests validate safety boundaries, executor timeout behavior, and teach/a
 Web API and safety tests:
 
 ```bash
-pytest -q tests/test_web_api.py tests/test_web_safety.py
+pytest -q tests/test_web_api.py tests/test_web_memory_api.py tests/test_web_safety.py
+```
+
+Per-role model + TDD + template tests:
+
+```bash
+pytest -q tests/test_config_models.py tests/test_control_center_modes.py
+```
+
+Workspace isolation and project layout tests:
+
+```bash
+pytest -q tests/test_projects_layout.py tests/test_loop_projects.py
 ```
 
 ## Suggested Evolution Roadmap

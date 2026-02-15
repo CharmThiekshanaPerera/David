@@ -12,8 +12,9 @@ from agent.prompts import CRITIC_SYSTEM_PROMPT
 class Critic:
     """Analyzes command output and guides the next iteration."""
 
-    def __init__(self, llm: OllamaClient) -> None:
+    def __init__(self, llm: OllamaClient, model_name: str | None = None) -> None:
         self._llm = llm
+        self._model_name = model_name
 
     def review(
         self,
@@ -21,8 +22,17 @@ class Critic:
         plan_json: dict,
         coder_json: dict,
         execution_results: list[ExecutionResult],
+        tdd_mode: bool = False,
+        tdd_red_phase_complete: bool = False,
     ) -> CriticOutput:
         rendered_results = json.dumps([result.to_dict() for result in execution_results], indent=2)
+        tdd_section = "TDD mode disabled."
+        if tdd_mode:
+            phase = "implementation/green" if tdd_red_phase_complete else "tests-first/red"
+            tdd_section = (
+                f"TDD mode enabled. Current phase: {phase}. "
+                "Only mark success when tests pass after a prior failing test run."
+            )
 
         user_prompt = f"""
 Goal:
@@ -36,10 +46,13 @@ Coder output (JSON):
 
 Execution results:
 {rendered_results}
+
+TDD guidance:
+{tdd_section}
 """.strip()
 
         try:
-            raw = self._llm.chat(CRITIC_SYSTEM_PROMPT, user_prompt)
+            raw = self._llm.chat(CRITIC_SYSTEM_PROMPT, user_prompt, model=self._model_name)
             data = parse_json_object(raw)
             return CriticOutput.from_dict(data)
         except (JsonParseError, ContractError):

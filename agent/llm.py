@@ -5,7 +5,7 @@ from typing import Any
 
 import requests
 
-from agent.config import AgentConfig
+from agent.config import AgentConfig, sanitize_model_name
 
 
 class LLMError(RuntimeError):
@@ -18,15 +18,16 @@ class OllamaClient:
 
     config: AgentConfig
 
-    def chat(self, system_prompt: str, user_prompt: str) -> str:
+    def chat(self, system_prompt: str, user_prompt: str, model: str | None = None) -> str:
+        model_name = sanitize_model_name(model or self.config.model, "model")
         payload: dict[str, Any] = {
-            "model": self.config.model,
+            "model": model_name,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
             "stream": False,
-            "options": {"temperature": 0.1},
+            "options": {"temperature": self.config.temperature},
         }
 
         try:
@@ -38,7 +39,7 @@ class OllamaClient:
         except requests.RequestException as exc:
             raise LLMError(
                 "Failed to connect to local Ollama. Ensure `ollama serve` is running and "
-                f"model `{self.config.model}` exists. Details: {exc}"
+                f"model `{model_name}` exists. Details: {exc}"
             ) from exc
 
         if response.status_code != 200:

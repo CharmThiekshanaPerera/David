@@ -54,6 +54,7 @@
 
     <nav class="tabs" id="tabs">
       <button data-tab="dashboard" class="active">Dashboard</button>
+      <button data-tab="cli">Memory & Chat</button>
       <button data-tab="runs">Runs</button>
       <button data-tab="approvals">Approvals</button>
       <button data-tab="diff">Diff Viewer</button>
@@ -61,7 +62,6 @@
       <button data-tab="telemetry">Telemetry</button>
       <button data-tab="logs">Logs</button>
       <button data-tab="settings">Settings</button>
-      <button data-tab="cli">CLI Mirror</button>
     </nav>
 
     <main>
@@ -71,22 +71,59 @@
           <p class="muted">Monitor run state, approvals, and workspace artifacts in one place.</p>
         </article>
 
-        <div class="grid two">
-          <article class="card">
-            <h2>Quick Actions</h2>
-            <label class="field">
-              Goal
-              <input id="goalInput" type="text" placeholder="Create a Python TODO app with tests" />
-            </label>
-            <label class="check"><input id="previewMode" type="checkbox" /> Run preview (no file writes)</label>
-            <div class="row">
+        <div class="grid two dashboard-top-grid">
+          <article class="card quick-actions-card">
+            <div class="quick-actions-head">
+              <h2>Quick Actions</h2>
+              <p class="muted">Choose New Goal for fresh work, or Update Selected to apply goal changes to an existing workspace file/folder.</p>
+            </div>
+            <div class="quick-actions-grid">
+              <label class="field field-wide quick-field-scope">
+                Goal flow
+                <div class="segmented" role="group" aria-label="Goal flow mode">
+                  <button id="goalScopeNewBtn" type="button" class="segment-btn active" aria-pressed="true">New Goal</button>
+                  <button id="goalScopeTargetBtn" type="button" class="segment-btn" aria-pressed="false">Update Selected</button>
+                </div>
+                <span id="goalScopeHint" class="muted">New Goal mode creates and runs in a new project under workspace/projects.</span>
+              </label>
+              <label class="field quick-field-target">
+                Workspace target (folder or file)
+                <div class="quick-target-control">
+                  <select id="goalWorkspaceTargetSelect">
+                    <option value="">No target (create new project)</option>
+                  </select>
+                  <button id="refreshWorkspaceTargetsBtn" type="button" class="ghost">Sync Workspace</button>
+                </div>
+                <span id="goalWorkspaceTargetHint" class="muted">No target selected. Goal will run in a new project under workspace/projects.</span>
+              </label>
+              <label class="field field-wide quick-field-goal">
+                Goal
+                <input id="goalInput" type="text" placeholder="Create a Python TODO app with tests" />
+              </label>
+            </div>
+            <div class="row quick-actions-toggle-row">
+              <label class="check quick-toggle"><input id="previewMode" type="checkbox" /> Run preview (no file writes)</label>
+              <label class="check quick-toggle"><input id="goalTddMode" type="checkbox" /> TDD mode</label>
+            </div>
+            <div class="quick-actions-config-block">
+              <p class="muted quick-actions-config-label">Run config</p>
+              <div id="runConfigSummary" class="muted run-config-summary quick-actions-summary">
+                <span class="run-config-pill">Planner: -</span>
+                <span class="run-config-pill">Coder: -</span>
+                <span class="run-config-pill">Critic: -</span>
+                <span class="run-config-pill">TDD: false</span>
+              </div>
+            </div>
+            <div class="row quick-actions-actions">
               <button id="startGoalBtn">Start Goal</button>
               <button id="stopRunBtn" class="danger">Stop Active</button>
             </div>
-            <div class="progress-wrap">
-              <div class="progress-bar" id="runProgress"></div>
+            <div class="quick-actions-status">
+              <p id="dashboardMessage" class="muted quick-actions-message">No active run.</p>
+              <div class="progress-wrap quick-actions-progress">
+                <div class="progress-bar" id="runProgress"></div>
+              </div>
             </div>
-            <p id="dashboardMessage" class="muted">No active run.</p>
             <div class="stage-tracker" id="stageTracker"></div>
           </article>
 
@@ -98,12 +135,12 @@
           </article>
         </div>
 
-        <div class="grid two">
-          <article class="card">
+        <div class="grid two dashboard-lower-grid">
+          <article class="card dashboard-activity-card">
             <h2>Activity Feed</h2>
             <div id="activityFeed" class="timeline compact"></div>
           </article>
-          <article class="card">
+          <article class="card dashboard-files-card">
             <h2>Preview & Changed Files</h2>
             <div id="previewSummary" class="muted">No preview data yet.</div>
             <div id="fileTree" class="file-tree"></div>
@@ -245,6 +282,27 @@
               <button id="resetAppearanceBtn" type="button" class="btn-subtle">Reset Appearance</button>
             </div>
           </section>
+          <section class="appearance-panel">
+            <h3>Model Configuration</h3>
+            <div class="grid two">
+              <label class="field">
+                Planner Model
+                <select id="settingPlannerModel"></select>
+              </label>
+              <label class="field">
+                Coder Model
+                <select id="settingCoderModel"></select>
+              </label>
+              <label class="field">
+                Critic Model
+                <select id="settingCriticModel"></select>
+              </label>
+              <label class="check"><input id="settingTddMode" type="checkbox" /> Default TDD mode</label>
+            </div>
+            <div class="row">
+              <button id="refreshModelsBtn" type="button" class="ghost">Refresh local models</button>
+            </div>
+          </section>
           <div class="grid two">
             <label class="field">
               Safe mode (read-only)
@@ -277,16 +335,55 @@
       </section>
 
       <section id="tab-cli" class="tab-panel">
-        <article class="card">
-          <h2>CLI Mirror</h2>
-          <p class="muted">Allowed: <code>/goal ...</code>, <code>/ask ...</code>, <code>/teach ...</code></p>
-          <div class="row">
-            <input id="cliInput" type="text" placeholder="/goal Create a TODO app" />
-            <button id="cliSendBtn">Send</button>
+        <article class="card cli-shell">
+          <h2>Memory & Chat</h2>
+          <p class="muted">Natural text auto-maps to <code>/ask</code> or <code>/teach</code>. You can still send explicit <code>/goal</code>, <code>/ask</code>, or <code>/teach</code> commands.</p>
+
+          <div class="row cli-controls">
+            <div class="segmented" role="group" aria-label="Chat intent mode">
+              <button id="chatModeAutoBtn" type="button" class="segment-btn active" aria-pressed="true">Auto</button>
+              <button id="chatModeAskBtn" type="button" class="segment-btn" aria-pressed="false">Ask</button>
+              <button id="chatModeTeachBtn" type="button" class="segment-btn" aria-pressed="false">Teach</button>
+            </div>
+            <label class="field">
+              Goal template (for /goal)
+              <select id="cliTemplateSelect">
+                <option value="">No template</option>
+              </select>
+            </label>
+            <label class="check"><input id="cliTddMode" type="checkbox" /> TDD mode</label>
           </div>
-          <pre id="cliOutput" class="code"></pre>
-          <h3>Last Execution Output</h3>
-          <div id="cliExecPanel" class="stack"></div>
+
+          <div class="memory-chat-layout">
+            <section class="memory-chat-primary">
+              <div class="row memory-chat-input-row">
+                <input id="memoryChatInput" type="text" placeholder="Ask a question or teach a fact..." />
+                <button id="cliSendBtn">Send</button>
+              </div>
+              <div class="row memory-chat-action-row">
+                <button id="memoryConfirmTeachBtn" class="ghost hidden" type="button">Confirm Conflicting Teach</button>
+                <button id="memoryClearHistoryBtn" class="ghost" type="button">Clear Chat</button>
+              </div>
+
+              <h3>Conversation</h3>
+              <div id="memoryChatHistory" class="chat-history"></div>
+
+              <h3>Command Output</h3>
+              <pre id="cliOutput" class="code"></pre>
+            </section>
+
+            <aside class="memory-chat-secondary">
+              <h3>Memory Viewer</h3>
+              <div class="row memory-chat-search-row">
+                <input id="memoryChatSearch" type="text" placeholder="Search facts (subject, predicate, object)" />
+                <button id="memoryChatRefreshBtn" class="ghost" type="button">Refresh Memory</button>
+              </div>
+              <div id="memoryChatFacts" class="stack"></div>
+
+              <h3>Last Execution Output</h3>
+              <div id="cliExecPanel" class="stack"></div>
+            </aside>
+          </div>
         </article>
       </section>
     </main>

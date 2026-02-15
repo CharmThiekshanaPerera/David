@@ -11,7 +11,8 @@ from agent.executor import RestrictedExecutor
 from agent.llm import OllamaClient
 from agent.memory import LongTermMemory
 from agent.planner import Planner
-from agent.safety import SafetyError, SafetyGuard
+from agent.projects import ensure_workspace_layout, prepare_project_for_goal
+from agent.safety import SafetyError, SafetyGuard, ValidatedEdit
 from agent.telemetry import IterationMetric, TelemetryLogger
 from agent.workspace import WorkspaceInspector
 
@@ -31,38 +32,77 @@ class DavidAgent:
         self._config = config
         llm = OllamaClient(config)
 
-        self._planner = Planner(llm)
-        self._coder = Coder(llm)
-        self._critic = Critic(llm)
-        self._safety = SafetyGuard(
-            workspace_dir=config.workspace_dir,
-            max_file_write_bytes=config.max_file_write_bytes,
-            max_total_write_bytes=config.max_total_write_bytes,
-            allowed_commands=config.allowed_commands,
-        )
-        self._executor = RestrictedExecutor(
-            workspace_dir=config.workspace_dir,
-            timeout_sec=config.command_timeout_sec,
-            max_output_chars=config.max_command_output_chars,
-        )
+        self._planner = Planner(llm, model_name=config.planner_model)
+        self._coder = Coder(llm, model_name=config.coder_model)
+        self._critic = Critic(llm, model_name=config.critic_model)
         self._memory = LongTermMemory(config.memory_file)
-        self._workspace = WorkspaceInspector(config.workspace_dir)
         self._telemetry = TelemetryLogger(config.logs_dir)
+        ensure_workspace_layout(config.workspace_dir)
 
     def run(self, goal: str, max_iterations: int | None = None) -> RunSummary:
         iteration_limit = max_iterations or self._config.max_iterations
+        tdd_mode = self._config.tdd_mode
+        tdd_red_phase_complete = False
+        iterations_until_green: int | None = None
+        project = prepare_project_for_goal(self._config.workspace_dir, goal)
+        safety = SafetyGuard(
+            workspace_dir=project.project_path,
+            max_file_write_bytes=self._config.max_file_write_bytes,
+            max_total_write_bytes=self._config.max_total_write_bytes,
+            allowed_commands=self._config.allowed_commands,
+        )
+        executor = RestrictedExecutor(
+            workspace_dir=project.project_path,
+            timeout_sec=self._config.command_timeout_sec,
+            max_output_chars=self._config.max_command_output_chars,
+        )
+        workspace = WorkspaceInspector(project.project_path)
+        project_meta = {
+            "project_slug": project.project_slug,
+            "project_path": str(project.project_path),
+            "project_created_new": project.project_created_new,
+        }
 
-        initial_snapshot = self._workspace.snapshot()
+        self._telemetry.event(
+            "run_started",
+            {
+                "goal": goal,
+                "planner_model_used": self._config.planner_model,
+                "coder_model_used": self._config.coder_model,
+                "critic_model_used": self._config.critic_model,
+                "tdd_mode": tdd_mode,
+                **project_meta,
+            },
+        )
+
+        initial_snapshot = workspace.snapshot()
         memory_context = self._memory.render_context(goal)
-        plan = self._planner.create_plan(goal=goal, workspace_snapshot=initial_snapshot, memory_context=memory_context)
+        plan = self._planner.create_plan(
+            goal=goal,
+            workspace_snapshot=initial_snapshot,
+            memory_context=memory_context,
+            tdd_mode=tdd_mode,
+        )
 
-        self._telemetry.event("plan_created", {"goal": goal, "plan": plan.to_dict()})
+        self._telemetry.event(
+            "plan_created",
+            {
+                "goal": goal,
+                "plan": plan.to_dict(),
+                "planner_model_used": self._config.planner_model,
+                "coder_model_used": self._config.coder_model,
+                "critic_model_used": self._config.critic_model,
+                "tdd_mode": tdd_mode,
+                **project_meta,
+            },
+        )
 
         critic_feedback = "No critic feedback yet."
         for iteration in range(1, iteration_limit + 1):
             started = time.perf_counter()
-            workspace_snapshot = self._workspace.snapshot()
+            workspace_snapshot = workspace.snapshot()
             memory_context = self._memory.render_context(goal)
+            tdd_phase = "implementation" if (tdd_mode and tdd_red_phase_complete) else ("tests_first" if tdd_mode else "normal")
 
             coder_output = self._coder.propose(
                 goal=goal,
@@ -71,6 +111,8 @@ class DavidAgent:
                 memory_context=memory_context,
                 critic_feedback=critic_feedback,
                 iteration=iteration,
+                tdd_mode=tdd_mode,
+                tdd_phase=tdd_phase,
             )
             self._telemetry.event(
                 "coder_output",
@@ -80,16 +122,65 @@ class DavidAgent:
                     "edit_count": len(coder_output.edits),
                     "commands": coder_output.commands,
                     "done": coder_output.done,
+                    "planner_model_used": self._config.planner_model,
+                    "coder_model_used": self._config.coder_model,
+                    "critic_model_used": self._config.critic_model,
+                    "tdd_mode": tdd_mode,
+                    "tdd_phase": tdd_phase,
+                    **project_meta,
                 },
             )
 
             try:
-                validated_edits = self._safety.validate_edits(coder_output.edits)
-                written_paths = self._safety.apply_edits(validated_edits)
+                validated_edits = safety.validate_edits(coder_output.edits)
+                if tdd_mode and not tdd_red_phase_complete:
+                    has_tests_edit, has_non_test_edit = self._summarize_tdd_test_edits(validated_edits)
+                    if not has_tests_edit or has_non_test_edit:
+                        reason = (
+                            "TDD mode requires tests-first edits under tests/ in the active project before implementation. "
+                            "Only test files are allowed until a failing pytest run is observed."
+                        )
+                        critic_feedback = reason
+                        self._telemetry.event(
+                            "tdd_violation",
+                            {
+                                "iteration": iteration,
+                                "reason": reason,
+                                "has_tests_edit": has_tests_edit,
+                                "has_non_test_edit": has_non_test_edit,
+                                **project_meta,
+                            },
+                        )
+                        self._record_iteration_metric(
+                            iteration=iteration,
+                            status="retry",
+                            commands_total=0,
+                            commands_passed=0,
+                            started=started,
+                        )
+                        self._memory.append_lessons(
+                            goal=goal,
+                            lessons=[
+                                LessonProposal(
+                                    lesson="In TDD mode, write tests under tests/ in the active project before implementation edits.",
+                                    tags=["tdd", "testing", "discipline"],
+                                )
+                            ],
+                            context=reason,
+                        )
+                        continue
+                written_paths = safety.apply_edits(validated_edits)
             except SafetyError as exc:
                 reason = f"Safety guard rejected edits: {exc}"
                 critic_feedback = reason
-                self._telemetry.event("safety_violation", {"iteration": iteration, "error": str(exc)})
+                self._telemetry.event(
+                    "safety_violation",
+                    {
+                        "iteration": iteration,
+                        "error": str(exc),
+                        **project_meta,
+                    },
+                )
                 self._record_iteration_metric(
                     iteration=iteration,
                     status="retry",
@@ -110,11 +201,19 @@ class DavidAgent:
                 continue
 
             try:
-                command_specs = self._safety.validate_commands(coder_output.commands)
+                commands_to_run = self._prepare_commands_for_iteration(coder_output.commands, tdd_mode=tdd_mode)
+                command_specs = safety.validate_commands(commands_to_run)
             except SafetyError as exc:
                 reason = f"Safety guard rejected commands: {exc}"
                 critic_feedback = reason
-                self._telemetry.event("safety_violation", {"iteration": iteration, "error": str(exc)})
+                self._telemetry.event(
+                    "safety_violation",
+                    {
+                        "iteration": iteration,
+                        "error": str(exc),
+                        **project_meta,
+                    },
+                )
                 self._record_iteration_metric(
                     iteration=iteration,
                     status="retry",
@@ -137,7 +236,14 @@ class DavidAgent:
             if not command_specs:
                 reason = "No validation commands were proposed. At least one allowed command is required."
                 critic_feedback = reason
-                self._telemetry.event("execution_skipped", {"iteration": iteration, "error": reason})
+                self._telemetry.event(
+                    "execution_skipped",
+                    {
+                        "iteration": iteration,
+                        "error": reason,
+                        **project_meta,
+                    },
+                )
                 self._record_iteration_metric(
                     iteration=iteration,
                     status="retry",
@@ -157,20 +263,85 @@ class DavidAgent:
                 )
                 continue
 
-            execution_results = self._executor.run(command_specs)
+            execution_results = executor.run(command_specs)
+            pytest_results = self._extract_pytest_results(execution_results)
+            tests_ran = bool(pytest_results)
+            tests_passed = bool(pytest_results) and all(
+                item.returncode == 0 and not item.timed_out for item in pytest_results
+            )
+            tests_failed = tests_ran and not tests_passed
+
+            if tdd_mode and not tests_ran:
+                reason = "TDD mode requires pytest execution in every iteration."
+                critic_feedback = reason
+                self._telemetry.event(
+                    "tdd_violation",
+                    {
+                        "iteration": iteration,
+                        "reason": reason,
+                        **project_meta,
+                    },
+                )
+                self._record_iteration_metric(
+                    iteration=iteration,
+                    status="retry",
+                    commands_total=len(execution_results),
+                    commands_passed=self._count_passed_commands(execution_results),
+                    started=started,
+                )
+                self._memory.append_lessons(
+                    goal=goal,
+                    lessons=[
+                        LessonProposal(
+                            lesson="TDD loops must run pytest to observe red/green feedback each iteration.",
+                            tags=["tdd", "testing"],
+                        )
+                    ],
+                    context=reason,
+                )
+                continue
+
             critic_output = self._critic.review(
                 goal=goal,
                 plan_json=plan.to_dict(),
                 coder_json=coder_output.to_dict(),
                 execution_results=execution_results,
+                tdd_mode=tdd_mode,
+                tdd_red_phase_complete=tdd_red_phase_complete,
             )
 
             self._memory.append_lessons(goal=goal, lessons=critic_output.lessons, context=critic_output.analysis)
 
             commands_passed = self._count_passed_commands(execution_results)
+            iteration_status = critic_output.status
+            if tdd_mode and not tdd_red_phase_complete:
+                if tests_failed:
+                    tdd_red_phase_complete = True
+                    iteration_status = "retry"
+                    critic_feedback = (
+                        "TDD red phase complete. Keep tests and implement minimal code to make them pass."
+                    )
+                    self._telemetry.event(
+                        "tdd_red_phase_complete",
+                        {"iteration": iteration, "commands_total": len(execution_results), **project_meta},
+                    )
+                else:
+                    iteration_status = "retry"
+                    critic_feedback = (
+                        "TDD mode expects failing tests before implementation. Strengthen tests first."
+                    )
+                    self._telemetry.event(
+                        "tdd_violation",
+                        {
+                            "iteration": iteration,
+                            "reason": "Tests passed before observing required red phase.",
+                            **project_meta,
+                        },
+                    )
+
             self._record_iteration_metric(
                 iteration=iteration,
-                status=critic_output.status,
+                status=iteration_status,
                 commands_total=len(execution_results),
                 commands_passed=commands_passed,
                 started=started,
@@ -180,15 +351,40 @@ class DavidAgent:
                 "iteration_complete",
                 {
                     "iteration": iteration,
-                    "status": critic_output.status,
+                    "status": iteration_status,
                     "written_paths": written_paths,
                     "commands_passed": commands_passed,
                     "commands_total": len(execution_results),
                     "analysis": critic_output.analysis,
+                    "planner_model_used": self._config.planner_model,
+                    "coder_model_used": self._config.coder_model,
+                    "critic_model_used": self._config.critic_model,
+                    "tdd_mode": tdd_mode,
+                    "tdd_red_phase_complete": tdd_red_phase_complete,
+                    **project_meta,
                 },
             )
 
-            if self._is_success(critic_output, coder_output.done, execution_results):
+            if (
+                self._is_success(critic_output, coder_output.done, execution_results)
+                and (not tdd_mode or (tdd_red_phase_complete and tests_passed))
+            ):
+                if tdd_mode and iterations_until_green is None:
+                    iterations_until_green = iteration
+                self._telemetry.event(
+                    "run_complete",
+                    {
+                        "goal": goal,
+                        "success": True,
+                        "iterations_used": iteration,
+                        "planner_model_used": self._config.planner_model,
+                        "coder_model_used": self._config.coder_model,
+                        "critic_model_used": self._config.critic_model,
+                        "tdd_mode": tdd_mode,
+                        "iterations_until_green": iterations_until_green,
+                        **project_meta,
+                    },
+                )
                 return RunSummary(
                     goal=goal,
                     success=True,
@@ -197,6 +393,20 @@ class DavidAgent:
                 )
 
             if critic_output.status == "abort":
+                self._telemetry.event(
+                    "run_complete",
+                    {
+                        "goal": goal,
+                        "success": False,
+                        "iterations_used": iteration,
+                        "planner_model_used": self._config.planner_model,
+                        "coder_model_used": self._config.coder_model,
+                        "critic_model_used": self._config.critic_model,
+                        "tdd_mode": tdd_mode,
+                        "iterations_until_green": iterations_until_green,
+                        **project_meta,
+                    },
+                )
                 return RunSummary(
                     goal=goal,
                     success=False,
@@ -204,14 +414,58 @@ class DavidAgent:
                     message=critic_output.analysis,
                 )
 
-            critic_feedback = self._render_feedback(critic_output, execution_results)
+            if not (tdd_mode and not tdd_red_phase_complete):
+                critic_feedback = self._render_feedback(critic_output, execution_results)
 
+        self._telemetry.event(
+            "run_complete",
+            {
+                "goal": goal,
+                "success": False,
+                "iterations_used": iteration_limit,
+                "planner_model_used": self._config.planner_model,
+                "coder_model_used": self._config.coder_model,
+                "critic_model_used": self._config.critic_model,
+                "tdd_mode": tdd_mode,
+                "iterations_until_green": iterations_until_green,
+                **project_meta,
+            },
+        )
         return RunSummary(
             goal=goal,
             success=False,
             iterations_used=iteration_limit,
             message="Iteration limit reached before meeting success criteria.",
         )
+
+    @staticmethod
+    def _is_test_path(relative_path: str) -> bool:
+        path = relative_path.strip().replace("\\", "/")
+        return path.startswith("tests/")
+
+    @classmethod
+    def _summarize_tdd_test_edits(cls, edits: list[ValidatedEdit]) -> tuple[bool, bool]:
+        has_tests_edit = any(cls._is_test_path(item.relative_path) for item in edits)
+        has_non_test_edit = any(not cls._is_test_path(item.relative_path) for item in edits)
+        return has_tests_edit, has_non_test_edit
+
+    @staticmethod
+    def _command_mentions_pytest(raw_command: str) -> bool:
+        lowered = raw_command.strip().lower()
+        if lowered == "pytest" or lowered.startswith("pytest "):
+            return True
+        return lowered.startswith("python -m pytest")
+
+    @classmethod
+    def _prepare_commands_for_iteration(cls, commands: list[str], tdd_mode: bool) -> list[str]:
+        prepared = [item for item in commands if item.strip()]
+        if tdd_mode and not any(cls._command_mentions_pytest(item) for item in prepared):
+            prepared.append("pytest -q")
+        return prepared
+
+    @classmethod
+    def _extract_pytest_results(cls, results: list[ExecutionResult]) -> list[ExecutionResult]:
+        return [item for item in results if cls._command_mentions_pytest(item.command)]
 
     def _record_iteration_metric(
         self,

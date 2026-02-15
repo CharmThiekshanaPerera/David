@@ -50,6 +50,10 @@ def run_diagnostics(config: AgentConfig) -> int:
         "memory_file": str(config.memory_file),
         "logs_dir": str(config.logs_dir),
         "model": config.model,
+        "planner_model": config.planner_model,
+        "coder_model": config.coder_model,
+        "critic_model": config.critic_model,
+        "tdd_mode": config.tdd_mode,
         "ollama_url": config.ollama_url,
         "allowed_commands": list(config.allowed_commands),
         "checks": {

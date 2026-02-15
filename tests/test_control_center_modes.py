@@ -1,0 +1,476 @@
+from __future__ import annotations
+
+import json
+import time
+from pathlib import Path
+
+import pytest
+
+from agent.config import AgentConfig
+from agent.contracts import CodeEdit, CoderOutput, CriticOutput, ExecutionResult, LessonProposal, PlanOutput, PlanStep
+from web.control_center import DavidControlCenter
+
+
+def _make_config(tmp_path: Path) -> AgentConfig:
+    project_root = tmp_path / "project"
+    workspace = tmp_path / "workspace"
+    memory_dir = tmp_path / "memory"
+    logs_dir = tmp_path / "logs"
+    memory_file = memory_dir / "long_term.json"
+    project_root.mkdir(parents=True, exist_ok=True)
+    workspace.mkdir(parents=True, exist_ok=True)
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    memory_file.write_text('{"facts": [], "lessons": [], "preferences": []}\n', encoding="utf-8")
+
+    return AgentConfig(
+        project_root=project_root,
+        workspace_dir=workspace,
+        memory_file=memory_file,
+        logs_dir=logs_dir,
+        model="qwen2.5-coder:1.5b",
+        planner_model="qwen2.5-coder:1.5b",
+        coder_model="qwen2.5-coder:1.5b",
+        critic_model="qwen2.5-coder:1.5b",
+        ollama_url="http://127.0.0.1:11434/api/chat",
+        tdd_mode=False,
+        max_iterations=4,
+        command_timeout_sec=10,
+        max_file_write_bytes=100_000,
+        max_total_write_bytes=400_000,
+        max_command_output_chars=8_000,
+        temperature=0.2,
+        allowed_commands=("python", "pytest"),
+    )
+
+
+def _wait_for_terminal(center: DavidControlCenter, run_id: str, timeout_sec: float = 4.0) -> dict:
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        payload = center.get_run(run_id)
+        if not payload:
+            time.sleep(0.05)
+            continue
+        status = str(payload.get("meta", {}).get("status", ""))
+        if status in {"success", "failed", "rejected", "stopped", "preview_ready"}:
+            return payload
+        time.sleep(0.05)
+    raise AssertionError(f"Run {run_id} did not reach terminal status in time.")
+
+
+def test_per_role_model_override_used(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    center = DavidControlCenter(config=config, data_root=tmp_path / "data")
+    seen: dict[str, str | None] = {"planner": None, "coder": None, "critic": None}
+
+    class FakePlanner:
+        def __init__(self, _llm, model_name=None):
+            seen["planner"] = model_name
+
+        def create_plan(self, goal, workspace_snapshot, memory_context, tdd_mode=False):
+            return PlanOutput(
+                goal=goal,
+                steps=[
+                    PlanStep(id="S1", title="Plan", details="Do work.", success_check="tests pass"),
+                ],
+                success_criteria=["tests pass"],
+            )
+
+    class FakeCoder:
+        def __init__(self, _llm, model_name=None):
+            seen["coder"] = model_name
+
+        def propose(self, goal, plan_json, workspace_snapshot, memory_context, critic_feedback, iteration, tdd_mode=False, tdd_phase="normal"):
+            return CoderOutput(
+                summary="single pass",
+                edits=[CodeEdit(path="app.py", content="print('ok')\n", reason="implement")],
+                commands=["pytest -q"],
+                done=True,
+                done_reason="done",
+            )
+
+    class FakeCritic:
+        def __init__(self, _llm, model_name=None):
+            seen["critic"] = model_name
+
+        def review(self, goal, plan_json, coder_json, execution_results, tdd_mode=False, tdd_red_phase_complete=False):
+            return CriticOutput(
+                status="success",
+                analysis="all good",
+                next_actions=["finish"],
+                lessons=[LessonProposal(lesson="keep tests green", tags=["testing"])],
+            )
+
+    class FakeExecutor:
+        def __init__(self, workspace_dir, timeout_sec, max_output_chars):
+            self.workspace_dir = workspace_dir
+
+        def run(self, command_specs):
+            return [
+                ExecutionResult(
+                    command=spec.raw,
+                    returncode=0,
+                    stdout="ok",
+                    stderr="",
+                    timed_out=False,
+                    duration_sec=0.01,
+                )
+                for spec in command_specs
+            ]
+
+    monkeypatch.setattr("web.control_center.Planner", FakePlanner)
+    monkeypatch.setattr("web.control_center.Coder", FakeCoder)
+    monkeypatch.setattr("web.control_center.Critic", FakeCritic)
+    monkeypatch.setattr("web.control_center.RestrictedExecutor", FakeExecutor)
+
+    ok, start = center.start_run(
+        {
+            "command": "/goal build sample",
+            "planner_model": "llama3.2:3b",
+            "coder_model": "qwen2.5-coder:1.5b",
+            "critic_model": "deepseek-r1:7b",
+            "tdd_mode": False,
+        }
+    )
+    assert ok is True
+
+    run = _wait_for_terminal(center, start["run_id"])
+    meta = run["meta"]
+    assert meta["status"] == "success"
+    assert meta["planner_model_used"] == "llama3.2:3b"
+    assert meta["coder_model_used"] == "qwen2.5-coder:1.5b"
+    assert meta["critic_model_used"] == "deepseek-r1:7b"
+    assert str(meta.get("project_slug", "")).startswith("build_sample")
+    project_path = Path(str(meta.get("project_path", "")))
+    assert project_path.exists()
+    assert (project_path / "app.py").exists()
+    assert not (config.workspace_dir / "app.py").exists()
+    assert seen == {
+        "planner": "llama3.2:3b",
+        "coder": "qwen2.5-coder:1.5b",
+        "critic": "deepseek-r1:7b",
+    }
+
+
+def test_tdd_mode_tests_first_then_green(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    center = DavidControlCenter(config=config, data_root=tmp_path / "data")
+    executor_state = {"calls": 0}
+
+    class FakePlanner:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def create_plan(self, goal, workspace_snapshot, memory_context, tdd_mode=False):
+            assert tdd_mode is True
+            return PlanOutput(
+                goal=goal,
+                steps=[
+                    PlanStep(id="S1", title="Write tests", details="tests first", success_check="pytest fails first"),
+                    PlanStep(id="S2", title="Implement", details="make tests pass", success_check="pytest green"),
+                ],
+                success_criteria=["tests-first then green"],
+            )
+
+    class FakeCoder:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def propose(self, goal, plan_json, workspace_snapshot, memory_context, critic_feedback, iteration, tdd_mode=False, tdd_phase="normal"):
+            assert tdd_mode is True
+            if tdd_phase == "tests_first":
+                return CoderOutput(
+                    summary="add failing tests",
+                    edits=[CodeEdit(path="tests/test_app.py", content="def test_demo():\n    assert False\n", reason="red")],
+                    commands=["pytest -q"],
+                    done=False,
+                    done_reason="",
+                )
+            return CoderOutput(
+                summary="implement",
+                edits=[CodeEdit(path="app.py", content="def ok():\n    return True\n", reason="green")],
+                commands=["pytest -q"],
+                done=True,
+                done_reason="done",
+            )
+
+    class FakeCritic:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def review(self, goal, plan_json, coder_json, execution_results, tdd_mode=False, tdd_red_phase_complete=False):
+            return CriticOutput(
+                status="retry",
+                analysis="iterate",
+                next_actions=["continue"],
+                lessons=[LessonProposal(lesson="small step", tags=["tdd"])],
+            )
+
+    class FakeExecutor:
+        def __init__(self, workspace_dir, timeout_sec, max_output_chars):
+            self.workspace_dir = workspace_dir
+
+        def run(self, command_specs):
+            executor_state["calls"] += 1
+            failing = executor_state["calls"] == 1
+            return [
+                ExecutionResult(
+                    command=spec.raw,
+                    returncode=1 if ("pytest" in spec.raw and failing) else 0,
+                    stdout="",
+                    stderr="AssertionError" if ("pytest" in spec.raw and failing) else "",
+                    timed_out=False,
+                    duration_sec=0.02,
+                )
+                for spec in command_specs
+            ]
+
+    monkeypatch.setattr("web.control_center.Planner", FakePlanner)
+    monkeypatch.setattr("web.control_center.Coder", FakeCoder)
+    monkeypatch.setattr("web.control_center.Critic", FakeCritic)
+    monkeypatch.setattr("web.control_center.RestrictedExecutor", FakeExecutor)
+
+    ok, start = center.start_run({"command": "/goal use strict tdd", "tdd_mode": True})
+    assert ok is True
+    run = _wait_for_terminal(center, start["run_id"])
+    meta = run["meta"]
+    assert meta["status"] == "success"
+    assert meta["tdd_mode"] is True
+    assert meta["iterations_until_green"] == 2
+    project_path = Path(str(meta.get("project_path", "")))
+    assert project_path.exists()
+    assert (project_path / "tests" / "test_app.py").exists()
+    assert (project_path / "app.py").exists()
+    assert not (config.workspace_dir / "tests" / "test_app.py").exists()
+
+    iterations = run["iterations"]
+    first_diff_paths = [row["path"] for row in iterations[0]["diffs"]]
+    assert first_diff_paths == ["tests/test_app.py"]
+    second_diff_paths = [row["path"] for row in iterations[1]["diffs"]]
+    assert "app.py" in second_diff_paths
+
+
+def test_template_injects_tdd_flag_and_goal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    center = DavidControlCenter(config=config, data_root=tmp_path / "data")
+
+    class FastPlanner:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def create_plan(self, goal, workspace_snapshot, memory_context, tdd_mode=False):
+            return PlanOutput(
+                goal=goal,
+                steps=[PlanStep(id="S1", title="Plan", details="One step", success_check="ok")],
+                success_criteria=["ok"],
+            )
+
+    class FastCoder:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def propose(self, goal, plan_json, workspace_snapshot, memory_context, critic_feedback, iteration, tdd_mode=False, tdd_phase="normal"):
+            path = "tests/test_template.py" if tdd_mode and tdd_phase == "tests_first" else "template.py"
+            done = bool(tdd_mode and tdd_phase != "tests_first")
+            return CoderOutput(
+                summary="template run",
+                edits=[CodeEdit(path=path, content="pass\n", reason="template")],
+                commands=["pytest -q"],
+                done=done,
+                done_reason="",
+            )
+
+    class FastCritic:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def review(self, goal, plan_json, coder_json, execution_results, tdd_mode=False, tdd_red_phase_complete=False):
+            return CriticOutput(
+                status="retry",
+                analysis="retry",
+                next_actions=["continue"],
+                lessons=[LessonProposal(lesson="template", tags=["template"])],
+            )
+
+    class FastExecutor:
+        def __init__(self, workspace_dir, timeout_sec, max_output_chars):
+            self.calls = 0
+
+        def run(self, command_specs):
+            self.calls += 1
+            # Force red then green for strict TDD template.
+            failing = self.calls == 1
+            return [
+                ExecutionResult(
+                    command=spec.raw,
+                    returncode=1 if ("pytest" in spec.raw and failing) else 0,
+                    stdout="",
+                    stderr="AssertionError" if failing else "",
+                    timed_out=False,
+                    duration_sec=0.01,
+                )
+                for spec in command_specs
+            ]
+
+    monkeypatch.setattr("web.control_center.Planner", FastPlanner)
+    monkeypatch.setattr("web.control_center.Coder", FastCoder)
+    monkeypatch.setattr("web.control_center.Critic", FastCritic)
+    monkeypatch.setattr("web.control_center.RestrictedExecutor", FastExecutor)
+
+    ok, started = center.start_run({"mode": "goal", "template_id": "strict_tdd_mode"})
+    assert ok is True
+    assert started["template_id"] == "strict_tdd_mode"
+    assert started["tdd_mode"] is True
+
+    run = _wait_for_terminal(center, started["run_id"])
+    meta = run["meta"]
+    assert meta["template_id"] == "strict_tdd_mode"
+    assert meta["tdd_mode"] is True
+    assert "strict TDD" in meta["payload"]
+    assert str(meta.get("project_slug", "")).startswith("use_strict_tdd")
+    assert Path(str(meta.get("project_path", ""))).exists()
+
+
+def test_start_run_rejects_invalid_model_name(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    center = DavidControlCenter(config=config, data_root=tmp_path / "data")
+
+    ok, payload = center.start_run({"command": "/goal test", "planner_model": "bad model; rm -rf /"})
+    assert ok is False
+    assert "invalid characters" in str(payload.get("error", "")).lower()
+
+
+def test_goal_run_targets_selected_workspace_folder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    target_dir = config.workspace_dir / "projects" / "existing_app"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    (target_dir / "README.md").write_text("# Existing App\n", encoding="utf-8")
+
+    center = DavidControlCenter(config=config, data_root=tmp_path / "data")
+
+    class FastPlanner:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def create_plan(self, goal, workspace_snapshot, memory_context, tdd_mode=False):
+            return PlanOutput(
+                goal=goal,
+                steps=[PlanStep(id="S1", title="Plan", details="One step", success_check="ok")],
+                success_criteria=["ok"],
+            )
+
+    class FastCoder:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def propose(self, goal, plan_json, workspace_snapshot, memory_context, critic_feedback, iteration, tdd_mode=False, tdd_phase="normal"):
+            return CoderOutput(
+                summary="targeted run",
+                edits=[CodeEdit(path="main.py", content="print('targeted')\n", reason="implement")],
+                commands=["pytest -q"],
+                done=True,
+                done_reason="done",
+            )
+
+    class FastCritic:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def review(self, goal, plan_json, coder_json, execution_results, tdd_mode=False, tdd_red_phase_complete=False):
+            return CriticOutput(
+                status="success",
+                analysis="done",
+                next_actions=["finish"],
+                lessons=[LessonProposal(lesson="targeted", tags=["workspace"])],
+            )
+
+    class FastExecutor:
+        def __init__(self, workspace_dir, timeout_sec, max_output_chars):
+            self.workspace_dir = workspace_dir
+
+        def run(self, command_specs):
+            return [
+                ExecutionResult(
+                    command=spec.raw,
+                    returncode=0,
+                    stdout="ok",
+                    stderr="",
+                    timed_out=False,
+                    duration_sec=0.01,
+                )
+                for spec in command_specs
+            ]
+
+    monkeypatch.setattr("web.control_center.Planner", FastPlanner)
+    monkeypatch.setattr("web.control_center.Coder", FastCoder)
+    monkeypatch.setattr("web.control_center.Critic", FastCritic)
+    monkeypatch.setattr("web.control_center.RestrictedExecutor", FastExecutor)
+
+    ok, started = center.start_run(
+        {
+            "mode": "goal",
+            "payload": "Add one entry-point file.",
+            "workspace_target_path": "projects/existing_app",
+        }
+    )
+    assert ok is True
+
+    run = _wait_for_terminal(center, started["run_id"])
+    meta = run["meta"]
+    assert meta["status"] == "success"
+    assert meta["project_created_new"] is False
+    assert meta["workspace_target_path"] == "projects/existing_app"
+    assert meta["workspace_target_type"] == "folder"
+    assert meta["project_path"] == str(target_dir)
+    assert (target_dir / "main.py").exists()
+
+
+def test_get_run_files_syncs_full_workspace_listing(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    center = DavidControlCenter(config=config, data_root=tmp_path / "data")
+
+    project_root = config.workspace_dir / "projects" / "demo_project"
+    (project_root / "src").mkdir(parents=True, exist_ok=True)
+    (project_root / "tests").mkdir(parents=True, exist_ok=True)
+    (project_root / "src" / "app.py").write_text("print('hello')\n", encoding="utf-8")
+    (project_root / "tests" / "test_app.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+    (config.workspace_dir / "templates" / "base.txt").write_text("template\n", encoding="utf-8")
+
+    run_dir = (tmp_path / "data" / "runs" / "run_test_files")
+    iter_dir = run_dir / "iterations" / "001"
+    iter_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "meta.json").write_text(
+        json.dumps({"id": "run_test_files", "project_slug": "demo_project", "project_path": str(project_root)}) + "\n",
+        encoding="utf-8",
+    )
+    (iter_dir / "diffs.json").write_text(
+        json.dumps(
+            [
+                {
+                    "path": "src/app.py",
+                    "change_type": "edited",
+                    "workspace_path": str(project_root / "src" / "app.py"),
+                    "added": 1,
+                    "removed": 0,
+                    "after_preview": "print('hello')",
+                }
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    payload = center.get_run_files("run_test_files")
+    assert payload is not None
+    workspace_paths = {row["path"] for row in payload["workspace_files"]}
+    workspace_dirs = set(payload.get("workspace_dirs", []))
+    assert "projects/demo_project/src/app.py" in workspace_paths
+    assert "projects/demo_project/tests/test_app.py" in workspace_paths
+    assert "templates/base.txt" in workspace_paths
+    assert "projects" in workspace_dirs
+    assert "projects/demo_project" in workspace_dirs
+    assert "projects/demo_project/src" in workspace_dirs
+    assert "projects/demo_project/tests" in workspace_dirs
+    assert payload["workspace_file_total"] >= len(workspace_paths)
+    assert payload["workspace_dir_total"] >= len(workspace_dirs)
+    assert payload["workspace_files_truncated"] is False
