@@ -1,3 +1,4 @@
+// web/static/app.js
 const STAGES = ["planner", "coder", "safety", "executor", "critic", "memory"];
 const STREAM_RETRY_MS = 3000;
 
@@ -32,9 +33,21 @@ const state = {
     tddMode: false,
   },
   chatMode: "auto",
+  advancedChatMode: true,
+  detectedChatIntent: "chat",
+  detectedChatConfidence: 0,
+  selectedChatIntent: "chat",
+  selectedChatSessionId: localStorage.getItem("dcc_chat_session_id") || "",
+  chatSessions: [],
   chatMessages: [],
   pendingTeachMessage: "",
+  pendingOverwriteId: "",
+  pinnedMessageIds: JSON.parse(localStorage.getItem("dcc_chat_pins") || "[]"),
   memoryData: null,
+  memoryFactsData: null,
+  memoryConversationsData: null,
+  memoryPanelTab: "facts",
+  lastExplainWhy: null,
   memoryEventKeys: [],
   workspaceTargets: [],
   selectedGoalWorkspacePath: "",
@@ -129,6 +142,16 @@ const el = {
   chatModeAutoBtn: document.getElementById("chatModeAutoBtn"),
   chatModeAskBtn: document.getElementById("chatModeAskBtn"),
   chatModeTeachBtn: document.getElementById("chatModeTeachBtn"),
+  advancedChatToggle: document.getElementById("advancedChatToggle"),
+  chatConfirmSave: document.getElementById("chatConfirmSave"),
+  chatIntentPreview: document.getElementById("chatIntentPreview"),
+  chatIntentAskBtn: document.getElementById("chatIntentAskBtn"),
+  chatIntentTeachBtn: document.getElementById("chatIntentTeachBtn"),
+  chatIntentGoalBtn: document.getElementById("chatIntentGoalBtn"),
+  chatIntentChatBtn: document.getElementById("chatIntentChatBtn"),
+  chatNewSessionBtn: document.getElementById("chatNewSessionBtn"),
+  chatSessionSummary: document.getElementById("chatSessionSummary"),
+  chatSessionsList: document.getElementById("chatSessionsList"),
   memoryChatInput: document.getElementById("memoryChatInput"),
   cliTemplateSelect: document.getElementById("cliTemplateSelect"),
   cliTddMode: document.getElementById("cliTddMode"),
@@ -139,11 +162,21 @@ const el = {
   memoryChatSearch: document.getElementById("memoryChatSearch"),
   memoryChatRefreshBtn: document.getElementById("memoryChatRefreshBtn"),
   memoryChatFacts: document.getElementById("memoryChatFacts"),
+  memoryPanelFactsBtn: document.getElementById("memoryPanelFactsBtn"),
+  memoryPanelConversationsBtn: document.getElementById("memoryPanelConversationsBtn"),
+  memoryPanelLessonsBtn: document.getElementById("memoryPanelLessonsBtn"),
+  memoryPanelConversations: document.getElementById("memoryPanelConversations"),
+  memoryPanelLessons: document.getElementById("memoryPanelLessons"),
+  memoryExplainView: document.getElementById("memoryExplainView"),
   cliOutput: document.getElementById("cliOutput"),
   cliExecPanel: document.getElementById("cliExecPanel"),
   toastContainer: document.getElementById("toastContainer"),
   heroParticles: document.getElementById("heroParticles"),
 };
+
+if (!Array.isArray(state.pinnedMessageIds)) {
+  state.pinnedMessageIds = [];
+}
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -324,12 +357,29 @@ async function api(path, options = {}) {
   return json.data;
 }
 
+async function safeRefresh(label, handler, { silent = false } = {}) {
+  try {
+    return await handler();
+  } catch (err) {
+    const message = err?.message || "Unknown error";
+    console.error(`[refresh:${label}]`, err);
+    if (!silent) {
+      setMessage(`${label} refresh failed: ${message}`);
+    }
+    return null;
+  }
+}
+
 function setMessage(text) {
-  el.dashboardMessage.textContent = text;
+  if (el.dashboardMessage) {
+    el.dashboardMessage.textContent = text;
+  }
 }
 
 function setCliOutput(text) {
-  el.cliOutput.textContent = text;
+  if (el.cliOutput) {
+    el.cliOutput.textContent = text;
+  }
 }
 
 function setChatMode(mode) {
@@ -345,6 +395,51 @@ function setChatMode(mode) {
     node.classList.toggle("active", !!active);
     node.setAttribute("aria-pressed", active ? "true" : "false");
   });
+}
+
+function classifyAdvancedIntent(rawText) {
+  const text = String(rawText || "").trim();
+  if (!text) return { intent: "chat", confidence: 0, reason: "empty" };
+  if (text.startsWith("/ask ")) return { intent: "ask", confidence: 1, reason: "explicit_command" };
+  if (text.startsWith("/teach ")) return { intent: "teach", confidence: 1, reason: "explicit_command" };
+  if (text.startsWith("/goal ")) return { intent: "goal", confidence: 1, reason: "explicit_command" };
+
+  const askLike = text.endsWith("?") || /^(who|what|when|where|why|how|is|are|can|could|do|does|did|which)\b/i.test(text);
+  const teachLike = /\b(remember|teach|save this|my name is|i am your|from now on|you should know|call me)\b/i.test(text);
+  const goalLike = /^(build|create|implement|refactor|fix|update|add|remove|improve|write|generate)\b/i.test(text);
+  if (teachLike) return { intent: "teach", confidence: 0.88, reason: "memory_statement" };
+  if (askLike) return { intent: "ask", confidence: 0.82, reason: "question_shape" };
+  if (goalLike) return { intent: "goal", confidence: 0.7, reason: "task_instruction" };
+  return { intent: "chat", confidence: 0.62, reason: "default_chat" };
+}
+
+function setAdvancedIntent(intent) {
+  const normalized = ["ask", "teach", "goal", "chat"].includes(intent) ? intent : "chat";
+  state.selectedChatIntent = normalized;
+  const rows = [
+    [el.chatIntentAskBtn, normalized === "ask"],
+    [el.chatIntentTeachBtn, normalized === "teach"],
+    [el.chatIntentGoalBtn, normalized === "goal"],
+    [el.chatIntentChatBtn, normalized === "chat"],
+  ];
+  rows.forEach(([node, active]) => {
+    if (!node) return;
+    node.classList.toggle("active", !!active);
+    node.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+}
+
+function updateIntentPreview() {
+  const detected = classifyAdvancedIntent(el.memoryChatInput?.value || "");
+  state.detectedChatIntent = detected.intent;
+  state.detectedChatConfidence = Number(detected.confidence || 0);
+  if (el.chatIntentPreview) {
+    const confidencePct = Math.round(state.detectedChatConfidence * 100);
+    el.chatIntentPreview.textContent = `I think this is: ${detected.intent} (${confidencePct}% confidence)`;
+  }
+  if (state.advancedChatMode) {
+    setAdvancedIntent(detected.intent);
+  }
 }
 
 function inferChatRequest(rawText) {
@@ -366,6 +461,8 @@ function inferChatRequest(rawText) {
 
 function pushChatMessage(kind, text, meta = {}) {
   state.chatMessages.push({
+    message_id: String(meta?.message_id || `${Date.now()}_${Math.random().toString(16).slice(2)}`),
+    session_id: String(meta?.session_id || state.selectedChatSessionId || ""),
     kind: String(kind || "system"),
     text: String(text || ""),
     meta,
@@ -377,9 +474,111 @@ function pushChatMessage(kind, text, meta = {}) {
   renderChatHistory();
 }
 
+function persistPinnedMessages() {
+  localStorage.setItem("dcc_chat_pins", JSON.stringify(state.pinnedMessageIds));
+}
+
+function togglePinnedMessage(messageId) {
+  const clean = String(messageId || "").trim();
+  if (!clean) return;
+  if (state.pinnedMessageIds.includes(clean)) {
+    state.pinnedMessageIds = state.pinnedMessageIds.filter((id) => id !== clean);
+  } else {
+    state.pinnedMessageIds = [...state.pinnedMessageIds, clean];
+  }
+  persistPinnedMessages();
+  renderChatHistory();
+}
+
+function renderChatSessions() {
+  if (!el.chatSessionsList) return;
+  const sessions = Array.isArray(state.chatSessions) ? state.chatSessions : [];
+  if (!sessions.length) {
+    el.chatSessionsList.innerHTML = '<div class="muted session-empty">No sessions yet.</div>';
+    if (el.chatSessionSummary) {
+      el.chatSessionSummary.textContent = "No active session";
+    }
+    return;
+  }
+  if (!state.selectedChatSessionId) {
+    state.selectedChatSessionId = sessions[0].session_id || "";
+    if (state.selectedChatSessionId) {
+      localStorage.setItem("dcc_chat_session_id", state.selectedChatSessionId);
+    }
+  }
+  const selected = sessions.find((row) => row.session_id === state.selectedChatSessionId) || sessions[0];
+  if (selected?.session_id && selected.session_id !== state.selectedChatSessionId) {
+    state.selectedChatSessionId = selected.session_id;
+    localStorage.setItem("dcc_chat_session_id", state.selectedChatSessionId);
+  }
+
+  el.chatSessionsList.innerHTML = sessions
+    .map((row) => {
+      const sid = String(row.session_id || "");
+      const active = sid === state.selectedChatSessionId;
+      const preview = String(row.preview || "").trim() || "No preview";
+      const messageCount = Number(row.message_count || 0);
+      const lastMessageAt = fmtDate(row.last_message_at || row.started_at || "");
+      const pinnedCount = Number(row.pinned_count || 0);
+      const intents = row.intents && typeof row.intents === "object" ? row.intents : {};
+      const topIntent =
+        Object.entries(intents)
+          .sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0))
+          .map((item) => String(item[0] || ""))
+          .find(Boolean) || "chat";
+      const shortId = sid.length > 20 ? `${sid.slice(0, 10)}...${sid.slice(-5)}` : sid;
+      return `<button type="button" class="session-item ${active ? "active" : ""}" data-chat-session="${escapeHtml(
+        sid
+      )}">
+        <span class="session-row-top">
+          <span class="session-id">${escapeHtml(shortId || "session")}</span>
+          <span class="session-count">${escapeHtml(String(messageCount))} msgs</span>
+        </span>
+        <span class="session-main">${escapeHtml(preview)}</span>
+        <span class="session-row-bottom">
+          <span class="session-meta">${escapeHtml(lastMessageAt)}</span>
+          <span class="session-badge">${escapeHtml(topIntent)}</span>
+          ${pinnedCount > 0 ? `<span class="session-badge">${escapeHtml(String(pinnedCount))} pinned</span>` : ""}
+        </span>
+      </button>`;
+    })
+    .join("");
+  if (el.chatSessionSummary) {
+    el.chatSessionSummary.textContent = `Active: ${state.selectedChatSessionId || "-"} (${sessions.length} sessions)`;
+  }
+}
+
+function syncChatMessagesFromConversations(rows) {
+  if (!Array.isArray(rows) || !rows.length) return;
+  const seen = new Set(state.chatMessages.map((row) => String(row.message_id || "")));
+  rows.forEach((row) => {
+    const messageId = String(row?.message_id || "");
+    if (!messageId || seen.has(messageId)) return;
+    const role = String(row?.role || "assistant");
+    const intent = String(row?.intent || "chat");
+    const kind =
+      role === "user" ? "user" : intent === "ask" ? "ask" : intent === "teach" ? "teach" : "system";
+    state.chatMessages.push({
+      message_id: messageId,
+      session_id: String(row?.session_id || ""),
+      kind,
+      text: String(row?.text || ""),
+      meta: row?.metadata || {},
+      timestamp_utc: String(row?.timestamp_utc || new Date().toISOString()),
+    });
+  });
+  state.chatMessages.sort((a, b) => String(a.timestamp_utc || "").localeCompare(String(b.timestamp_utc || "")));
+  if (state.chatMessages.length > 500) {
+    state.chatMessages.splice(0, state.chatMessages.length - 500);
+  }
+}
+
 function renderChatHistory() {
   if (!el.memoryChatHistory) return;
-  if (!state.chatMessages.length) {
+  const rows = state.selectedChatSessionId
+    ? state.chatMessages.filter((item) => String(item.session_id || "") === state.selectedChatSessionId)
+    : state.chatMessages;
+  if (!rows.length) {
     el.memoryChatHistory.innerHTML = '<div class="muted">No messages yet. Ask a question or teach a fact.</div>';
     return;
   }
@@ -392,27 +591,60 @@ function renderChatHistory() {
     system: "System",
   };
 
-  el.memoryChatHistory.innerHTML = state.chatMessages
+  el.memoryChatHistory.innerHTML = rows
     .map((row) => {
       const kind = row.kind || "system";
       const label = labels[kind] || "Message";
+      const alignment = kind === "user" ? "user" : "assistant";
       const timestamp = fmtDate(row.timestamp_utc);
-      const conflictRows = Array.isArray(row.meta?.conflicts) ? row.meta.conflicts : [];
+      const messageId = String(row.message_id || "");
+      const pinned = state.pinnedMessageIds.includes(messageId);
+      const conflictRows = Array.isArray(row.meta?.conflicts)
+        ? row.meta.conflicts
+        : Array.isArray(row.meta?.response?.conflicts)
+        ? row.meta.response.conflicts
+        : [];
+      const citationRows = Array.isArray(row.meta?.citations)
+        ? row.meta.citations
+        : Array.isArray(row.meta?.response?.citations)
+        ? row.meta.response.citations
+        : [];
       const conflictHtml = conflictRows.length
         ? `<ul>${conflictRows
             .map(
               (item) =>
                 `<li><code>${escapeHtml(item.subject)}.${escapeHtml(item.predicate)}</code>: <strong>${escapeHtml(
-                  item.existing
+                  item.existing || (item.existing_values || []).join(" | ")
                 )}</strong> -> <strong>${escapeHtml(item.incoming)}</strong></li>`
             )
             .join("")}</ul>`
         : "";
+      const citationsHtml = citationRows.length
+        ? `<div class="chat-citations">${citationRows
+            .map((c) => `<span class="chip">[${escapeHtml(c.type || "memory")}] ${escapeHtml(c.subject || c.excerpt || c.object || c.id || "")}</span>`)
+            .join("")}</div>`
+        : "";
+      const showQuickActions = kind === "ask" || kind === "teach" || kind === "system";
+      const quickActions = showQuickActions
+        ? `<div class="chat-chips"><button type="button" class="chip-btn" data-chat-chip="save-memory" data-chat-text="${escapeHtml(
+            row.text
+          )}">Save this as memory</button><button type="button" class="chip-btn" data-chat-chip="ask-followup" data-chat-text="${escapeHtml(
+            row.text
+          )}">Ask a follow-up</button><button type="button" class="chip-btn" data-chat-chip="teach-refine" data-chat-text="${escapeHtml(
+            row.text
+          )}">Teach refinement</button></div>`
+        : "";
       return `
-        <div class="chat-bubble ${escapeHtml(kind)}">
-          <div class="chat-meta">${escapeHtml(label)} · ${escapeHtml(timestamp)}</div>
-          <div class="chat-text">${escapeHtml(row.text)}</div>
-          ${conflictHtml}
+        <div class="chat-row ${escapeHtml(alignment)}">
+          <div class="chat-bubble ${escapeHtml(kind)}">
+            <div class="chat-meta"><span>${escapeHtml(label)} · ${escapeHtml(timestamp)}</span><button class="btn-subtle chat-pin-btn" type="button" data-chat-pin="${escapeHtml(
+            messageId
+          )}">${pinned ? "Unpin" : "Pin"}</button></div>
+            <div class="chat-text">${escapeHtml(row.text)}</div>
+            ${conflictHtml}
+            ${citationsHtml}
+            ${quickActions}
+          </div>
         </div>
       `;
     })
@@ -457,6 +689,7 @@ function fmtBool(value) {
 }
 
 function kvList(target, entries) {
+  if (!target) return;
   target.innerHTML = entries
     .map(([k, v]) => `<li><span class="k">${escapeHtml(k)}</span><span>${escapeHtml(v)}</span></li>`)
     .join("");
@@ -800,6 +1033,7 @@ function renderArtifacts(details) {
 }
 
 function renderApprovals(rows) {
+  if (!el.approvalList) return;
   state.approvals = rows || [];
   const pending = state.approvals.filter((item) => item.status === "pending");
   if (!pending.length) {
@@ -1213,30 +1447,41 @@ function renderFileTree(summary) {
 }
 
 function renderMemory(data) {
-  const facts = data.facts || [];
-  const lessons = data.lessons || [];
-  const conflicts = data.conflicts || [];
+  const snapshot = data && typeof data === "object" ? data : {};
+  const facts = Array.isArray(snapshot.facts) ? snapshot.facts : [];
+  const lessons = Array.isArray(snapshot.lessons) ? snapshot.lessons : [];
+  const conflicts = Array.isArray(snapshot.conflicts) ? snapshot.conflicts : [];
 
-  el.factsView.innerHTML = facts
-    .slice(-120)
-    .reverse()
-    .map((f) => `<div><code>${escapeHtml(f.subject)}.${escapeHtml(f.predicate)}</code> = ${escapeHtml(f.object)} <span class="muted">(${escapeHtml(f.timestamp || "")})</span></div>`)
-    .join("");
+  if (el.factsView) {
+    el.factsView.innerHTML = !facts.length
+      ? '<p class="muted">No facts stored yet.</p>'
+      : facts
+          .slice(-120)
+          .reverse()
+          .map((f) => `<div><code>${escapeHtml(f.subject)}.${escapeHtml(f.predicate)}</code> = ${escapeHtml(f.object)} <span class="muted">(${escapeHtml(f.timestamp || "")})</span></div>`)
+          .join("");
+  }
 
-  el.lessonsView.innerHTML = lessons
-    .slice(-120)
-    .reverse()
-    .map((l) => `<div><strong>${escapeHtml(l.lesson || "")}</strong><br/><span class="muted">goal=${escapeHtml(l.goal || "")}</span></div>`)
-    .join("");
+  if (el.lessonsView) {
+    el.lessonsView.innerHTML = !lessons.length
+      ? '<p class="muted">No lessons stored yet.</p>'
+      : lessons
+          .slice(-120)
+          .reverse()
+          .map((l) => `<div><strong>${escapeHtml(l.lesson || "")}</strong><br/><span class="muted">goal=${escapeHtml(l.goal || "")}</span></div>`)
+          .join("");
+  }
 
-  el.memoryConflicts.innerHTML = !conflicts.length
-    ? '<p class="muted">No memory conflicts detected.</p>'
-    : conflicts.map((c) => `<div class="approval"><strong>${escapeHtml(c.subject)}.${escapeHtml(c.predicate)}</strong><div>Values: ${escapeHtml((c.values || []).join(" | "))}</div></div>`).join("");
+  if (el.memoryConflicts) {
+    el.memoryConflicts.innerHTML = !conflicts.length
+      ? '<p class="muted">No memory conflicts detected.</p>'
+      : conflicts.map((c) => `<div class="approval"><strong>${escapeHtml(c.subject)}.${escapeHtml(c.predicate)}</strong><div>Values: ${escapeHtml((c.values || []).join(" | "))}</div></div>`).join("");
+  }
 }
 
 function renderMemoryChatFacts() {
   if (!el.memoryChatFacts) return;
-  const data = state.memoryData || {};
+  const data = state.memoryFactsData || state.memoryData || {};
   const facts = Array.isArray(data.facts) ? data.facts : [];
   const conflicts = Array.isArray(data.conflicts) ? data.conflicts : [];
   const query = (el.memoryChatSearch?.value || "").trim().toLowerCase();
@@ -1261,16 +1506,119 @@ function renderMemoryChatFacts() {
     .map((fact) => {
       const key = `${String(fact.subject || "").toLowerCase()}::${String(fact.predicate || "").toLowerCase()}`;
       const conflict = conflictKeys.has(key);
+      const aliases = Array.isArray(fact.aliases) ? fact.aliases.filter(Boolean) : [];
       return `
         <div class="memory-fact-row ${conflict ? "conflict" : ""}">
           <div><span class="muted">Subject:</span> <code>${escapeHtml(fact.subject || "-")}</code></div>
           <div><span class="muted">Predicate:</span> <code>${escapeHtml(fact.predicate || "-")}</code></div>
           <div><span class="muted">Object:</span> ${escapeHtml(fact.object || "-")}</div>
+          <div><span class="muted">Aliases:</span> ${escapeHtml(aliases.join(", ") || "-")}</div>
           <div><span class="muted">Timestamp:</span> ${escapeHtml(fmtDate(fact.timestamp || ""))}</div>
         </div>
       `;
     })
     .join("");
+}
+
+function renderMemoryConversationsPanel() {
+  if (!el.memoryPanelConversations) return;
+  let rows = Array.isArray(state.memoryConversationsData?.conversations) ? state.memoryConversationsData.conversations : [];
+  if (state.selectedChatSessionId) {
+    rows = rows.filter((row) => String(row?.session_id || "") === state.selectedChatSessionId);
+  }
+  const query = (el.memoryChatSearch?.value || "").trim().toLowerCase();
+  const filtered = rows.filter((row) => {
+    if (!query) return true;
+    const text = `${row.text || ""} ${row.intent || ""} ${row.session_id || ""}`.toLowerCase();
+    return text.includes(query);
+  });
+  if (!filtered.length) {
+    el.memoryPanelConversations.innerHTML = '<p class="muted">No conversation rows matched.</p>';
+    return;
+  }
+  el.memoryPanelConversations.innerHTML = filtered
+    .slice(-160)
+    .reverse()
+    .map(
+      (row) => `<div class="memory-fact-row">
+        <div><span class="muted">Session:</span> <code>${escapeHtml(row.session_id || "-")}</code></div>
+        <div><span class="muted">Role/Intent:</span> ${escapeHtml(row.role || "-")} / ${escapeHtml(row.intent || "-")}</div>
+        <div>${escapeHtml(row.text || "")}</div>
+        <div><span class="muted">When:</span> ${escapeHtml(fmtDate(row.timestamp_utc || ""))}</div>
+      </div>`
+    )
+    .join("");
+}
+
+function renderMemoryLessonsPanel() {
+  if (!el.memoryPanelLessons) return;
+  const lessons = Array.isArray(state.memoryData?.lessons) ? state.memoryData.lessons : [];
+  const query = (el.memoryChatSearch?.value || "").trim().toLowerCase();
+  const filtered = lessons.filter((row) => {
+    if (!query) return true;
+    const text = `${row.lesson || ""} ${row.goal || ""} ${(row.tags || []).join(" ")}`.toLowerCase();
+    return text.includes(query);
+  });
+  if (!filtered.length) {
+    el.memoryPanelLessons.innerHTML = '<p class="muted">No lessons matched your search.</p>';
+    return;
+  }
+  el.memoryPanelLessons.innerHTML = filtered
+    .slice(-120)
+    .reverse()
+    .map(
+      (row) => `<div class="memory-fact-row">
+        <div><strong>${escapeHtml(row.lesson || "")}</strong></div>
+        <div><span class="muted">Goal:</span> ${escapeHtml(row.goal || "-")}</div>
+        <div><span class="muted">Tags:</span> ${escapeHtml((row.tags || []).join(", ") || "-")}</div>
+      </div>`
+    )
+    .join("");
+}
+
+function renderExplainWhy() {
+  if (!el.memoryExplainView) return;
+  const data = state.lastExplainWhy || {};
+  const citations = Array.isArray(data.citations) ? data.citations : [];
+  if (!citations.length) {
+    el.memoryExplainView.innerHTML = '<p class="muted">Ask a question to see cited memory facts and conversation evidence.</p>';
+    return;
+  }
+  el.memoryExplainView.innerHTML = citations
+    .map((item) => {
+      if (item.type === "fact") {
+        return `<div class="memory-fact-row"><div><code>${escapeHtml(item.subject || "")}.${escapeHtml(item.predicate || "")}</code> = ${escapeHtml(
+          item.object || ""
+        )}</div><div class="muted">${escapeHtml(fmtDate(item.timestamp || ""))}</div></div>`;
+      }
+      return `<div class="memory-fact-row"><div>${escapeHtml(item.excerpt || item.id || "")}</div><div class="muted">conversation · ${escapeHtml(
+        fmtDate(item.timestamp || "")
+      )}</div></div>`;
+    })
+    .join("");
+}
+
+function setMemoryPanelTab(tabName) {
+  const tab = ["facts", "conversations", "lessons"].includes(tabName) ? tabName : "facts";
+  state.memoryPanelTab = tab;
+  const rows = [
+    [el.memoryPanelFactsBtn, tab === "facts"],
+    [el.memoryPanelConversationsBtn, tab === "conversations"],
+    [el.memoryPanelLessonsBtn, tab === "lessons"],
+  ];
+  rows.forEach(([node, active]) => {
+    if (!node) return;
+    node.classList.toggle("active", !!active);
+    node.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+  if (el.memoryChatFacts) el.memoryChatFacts.classList.toggle("hidden", tab !== "facts");
+  if (el.memoryPanelConversations) el.memoryPanelConversations.classList.toggle("hidden", tab !== "conversations");
+  if (el.memoryPanelLessons) el.memoryPanelLessons.classList.toggle("hidden", tab !== "lessons");
+
+  renderMemoryChatFacts();
+  renderMemoryConversationsPanel();
+  renderMemoryLessonsPanel();
+  renderExplainWhy();
 }
 
 function drawDurationChart(metrics) {
@@ -1362,23 +1710,36 @@ function renderLogs(data) {
 }
 
 function renderSettings(data) {
-  state.settings = data;
-  state.goalTemplates = Array.isArray(data.goal_templates) ? data.goal_templates : [];
-  el.settingSafeMode.value = String(!!data.safe_mode);
-  el.settingRateLimit.value = data.rate_limit_seconds ?? 3;
-  el.settingMaxIterations.value = data.max_iterations_override ?? 0;
-  el.settingLargeEdit.value = data.risky_large_edit_bytes ?? 50000;
-  el.settingMultiFile.value = data.risky_multi_file_threshold ?? 4;
-  el.settingPreviewDefault.checked = !!data.run_preview_default;
+  const safeData = data && typeof data === "object" ? data : {};
+  state.settings = safeData;
+  state.goalTemplates = Array.isArray(safeData.goal_templates) ? safeData.goal_templates : [];
+  if (el.settingSafeMode) {
+    el.settingSafeMode.value = String(!!safeData.safe_mode);
+  }
+  if (el.settingRateLimit) {
+    el.settingRateLimit.value = safeData.rate_limit_seconds ?? 3;
+  }
+  if (el.settingMaxIterations) {
+    el.settingMaxIterations.value = safeData.max_iterations_override ?? 0;
+  }
+  if (el.settingLargeEdit) {
+    el.settingLargeEdit.value = safeData.risky_large_edit_bytes ?? 50000;
+  }
+  if (el.settingMultiFile) {
+    el.settingMultiFile.value = safeData.risky_multi_file_threshold ?? 4;
+  }
+  if (el.settingPreviewDefault) {
+    el.settingPreviewDefault.checked = !!safeData.run_preview_default;
+  }
   if (el.settingTddMode) {
-    el.settingTddMode.checked = !!data.tdd_mode;
+    el.settingTddMode.checked = !!safeData.tdd_mode;
   }
 
   const modelDefaults = [
-    data.model,
-    data.planner_model_default,
-    data.coder_model_default,
-    data.critic_model_default,
+    safeData.model,
+    safeData.planner_model_default,
+    safeData.coder_model_default,
+    safeData.critic_model_default,
     ...(Array.isArray(state.models) ? state.models : []),
   ]
     .map((item) => String(item || "").trim())
@@ -1387,38 +1748,38 @@ function renderSettings(data) {
   setSelectOptions(
     el.settingPlannerModel,
     uniqueModels,
-    data.planner_model || data.planner_model_default || data.model
+    safeData.planner_model || safeData.planner_model_default || safeData.model
   );
   setSelectOptions(
     el.settingCoderModel,
     uniqueModels,
-    data.coder_model || data.coder_model_default || data.model
+    safeData.coder_model || safeData.coder_model_default || safeData.model
   );
   setSelectOptions(
     el.settingCriticModel,
     uniqueModels,
-    data.critic_model || data.critic_model_default || data.model
+    safeData.critic_model || safeData.critic_model_default || safeData.model
   );
   renderTemplateSelects();
 
   if (el.goalTddMode) {
-    el.goalTddMode.checked = !!data.tdd_mode;
-    state.pendingGoalRunOptions.tddMode = !!data.tdd_mode;
+    el.goalTddMode.checked = !!safeData.tdd_mode;
+    state.pendingGoalRunOptions.tddMode = !!safeData.tdd_mode;
   }
   if (el.cliTddMode && state.pendingCliRunOptions.templateId === "") {
-    el.cliTddMode.checked = !!data.tdd_mode;
-    state.pendingCliRunOptions.tddMode = !!data.tdd_mode;
+    el.cliTddMode.checked = !!safeData.tdd_mode;
+    state.pendingCliRunOptions.tddMode = !!safeData.tdd_mode;
   }
   refreshRunOptionSummary();
   kvList(el.settingsInfo, [
-    ["Model", data.model || "-"],
-    ["Planner model", data.planner_model || data.planner_model_default || "-"],
-    ["Coder model", data.coder_model || data.coder_model_default || "-"],
-    ["Critic model", data.critic_model || data.critic_model_default || "-"],
-    ["Default TDD mode", fmtBool(data.tdd_mode)],
-    ["Allowed commands", (data.allowed_commands || []).join(", ")],
-    ["Workspace", data.workspace_dir || "-"],
-    ["Default max iterations", data.max_iterations_default || 0],
+    ["Model", safeData.model || "-"],
+    ["Planner model", safeData.planner_model || safeData.planner_model_default || "-"],
+    ["Coder model", safeData.coder_model || safeData.coder_model_default || "-"],
+    ["Critic model", safeData.critic_model || safeData.critic_model_default || "-"],
+    ["Default TDD mode", fmtBool(safeData.tdd_mode)],
+    ["Allowed commands", (safeData.allowed_commands || []).join(", ")],
+    ["Workspace", safeData.workspace_dir || "-"],
+    ["Default max iterations", safeData.max_iterations_default || 0],
     ["Goal templates", (state.goalTemplates || []).length],
   ]);
 }
@@ -1524,7 +1885,7 @@ async function refreshStatus() {
 
 async function refreshApprovals() {
   const approvals = await api("/api/approvals");
-  renderApprovals(approvals || []);
+  renderApprovals(Array.isArray(approvals) ? approvals : []);
 }
 
 async function refreshRuns() {
@@ -1553,10 +1914,37 @@ async function refreshRuns() {
 }
 
 async function refreshMemory() {
-  const payload = await api("/api/memory");
-  state.memoryData = payload;
-  renderMemory(payload);
-  renderMemoryChatFacts();
+  const query = encodeURIComponent((el.memoryChatSearch?.value || "").trim());
+  const [snapshotResult, factsResult, conversationsResult, sessionsResult] = await Promise.allSettled([
+    api("/api/memory"),
+    api(`/api/memory/facts?query=${query}&limit=800`),
+    api("/api/memory/conversations?limit=1200"),
+    api("/api/chat/sessions?limit=120"),
+  ]);
+
+  const snapshot =
+    snapshotResult.status === "fulfilled" && snapshotResult.value && typeof snapshotResult.value === "object"
+      ? snapshotResult.value
+      : state.memoryData || {};
+  const factsData =
+    factsResult.status === "fulfilled" && factsResult.value && typeof factsResult.value === "object"
+      ? factsResult.value
+      : state.memoryFactsData || {};
+  const conversationsData =
+    conversationsResult.status === "fulfilled" && conversationsResult.value && typeof conversationsResult.value === "object"
+      ? conversationsResult.value
+      : state.memoryConversationsData || {};
+  const sessions = sessionsResult.status === "fulfilled" && Array.isArray(sessionsResult.value) ? sessionsResult.value : state.chatSessions || [];
+
+  state.memoryData = snapshot;
+  state.memoryFactsData = factsData;
+  state.memoryConversationsData = conversationsData;
+  state.chatSessions = Array.isArray(sessions) ? sessions : [];
+  syncChatMessagesFromConversations(conversationsData?.conversations || []);
+  renderMemory(snapshot);
+  renderChatSessions();
+  setMemoryPanelTab(state.memoryPanelTab || "facts");
+  renderChatHistory();
 }
 
 async function refreshTelemetry() {
@@ -1627,10 +2015,35 @@ function setupSSE() {
         const mem = payload.payload || {};
         if (!hasSeenMemoryEvent(payload.type, mem)) {
           rememberMemoryEvent(payload.type, mem);
-          if (payload.type === "memory_ask_answered") {
+          if (payload.type === "memory_chat_response") {
+            const response = mem.response || {};
+            const selectedIntent = mem.selected_intent || "chat";
+            const assistantText =
+              mem.assistant_turn?.text ||
+              response.answer ||
+              response.reply ||
+              response.message ||
+              "Response received.";
+            const kind = selectedIntent === "ask" ? "ask" : selectedIntent === "teach" ? "teach" : "system";
+            pushChatMessage(kind, assistantText, {
+              message_id: mem.assistant_turn?.message_id,
+              session_id: mem.session_id || mem.assistant_turn?.session_id || state.selectedChatSessionId,
+              response,
+              citations: response.citations || [],
+              conflicts: response.conflicts || [],
+            });
+            if (response?.citations) {
+              state.lastExplainWhy = { citations: response.citations };
+            }
+            if (mem?.session_id) {
+              state.selectedChatSessionId = mem.session_id;
+              localStorage.setItem("dcc_chat_session_id", mem.session_id);
+            }
+          } else if (payload.type === "memory_ask_answered") {
             const hitCount = Number(mem.matched_count || 0);
             const suffix = hitCount > 0 ? ` (matched facts: ${hitCount})` : "";
             pushChatMessage("ask", `${mem.answer || "No answer returned."}${suffix}`);
+            state.lastExplainWhy = { citations: mem.citations || [] };
           } else if (payload.type === "memory_teach_completed") {
             const storedCount = Number(mem.stored_count || 0);
             const skipped = Array.isArray(mem.skipped_items) ? mem.skipped_items.length : 0;
@@ -1643,6 +2056,10 @@ function setupSSE() {
               "Conflicting memory values detected. Confirm to overwrite with the incoming teach message.",
               { conflicts: mem.conflicts || [] }
             );
+          } else if (payload.type === "memory_teach_overwrite_confirmed") {
+            pushChatMessage("teach", `Overwrite confirmed. Saved ${Number(mem.stored_count || 0)} facts.`, {
+              conflicts: mem.conflicts || [],
+            });
           }
         }
         await refreshMemory().catch(() => {});
@@ -1680,7 +2097,11 @@ async function handleMemoryAsk(question) {
   rememberMemoryEvent("memory_ask_answered", result);
   const hitCount = Number(result.matched_count || 0);
   const suffix = hitCount > 0 ? ` (matched facts: ${hitCount})` : "";
-  pushChatMessage("ask", `${result.answer || "No answer returned."}${suffix}`);
+  pushChatMessage("ask", `${result.answer || "No answer returned."}${suffix}`, {
+    session_id: state.selectedChatSessionId,
+    citations: result.citations || [],
+  });
+  state.lastExplainWhy = { citations: result.citations || [] };
   setCliOutput(JSON.stringify(result, null, 2));
   await refreshMemory().catch(() => {});
 }
@@ -1699,7 +2120,7 @@ async function handleMemoryTeach(message, confirmConflict = false) {
     pushChatMessage(
       "conflict",
       "Conflicting memory values detected. Confirm to overwrite with the incoming teach message.",
-      { conflicts: result.conflicts || [] }
+      { conflicts: result.conflicts || [], session_id: state.selectedChatSessionId }
     );
     setCliOutput(JSON.stringify(result, null, 2));
     return;
@@ -1712,7 +2133,7 @@ async function handleMemoryTeach(message, confirmConflict = false) {
   const storedCount = Number(result.stored_count || 0);
   const skipped = Array.isArray(result.skipped_items) ? result.skipped_items.length : 0;
   const summary = `Stored ${storedCount} facts${skipped ? `, skipped ${skipped}` : ""}.`;
-  pushChatMessage("teach", summary, { conflicts: result.conflicts || [] });
+  pushChatMessage("teach", summary, { conflicts: result.conflicts || [], session_id: state.selectedChatSessionId });
   setCliOutput(JSON.stringify(result, null, 2));
   await refreshMemory().catch(() => {});
 }
@@ -1733,45 +2154,145 @@ async function handleGoalCommand(request) {
   state.selectedRunId = result.run_id;
   localStorage.setItem("dcc_selected_run", result.run_id);
   setupRunStream(result.run_id);
-  pushChatMessage("system", `Goal queued: ${result.run_id}`);
+  pushChatMessage("system", `Goal queued: ${result.run_id}`, { session_id: state.selectedChatSessionId });
   setCliOutput(`queued run: ${result.run_id}`);
   await refreshRuns();
   await refreshStatus();
 }
 
+async function confirmPendingOverwrite(decision = "approve") {
+  const overwriteId = String(state.pendingOverwriteId || "").trim();
+  if (!overwriteId) {
+    setCliOutput("No pending overwrite to confirm.");
+    return;
+  }
+  const result = await api("/api/memory/confirm_overwrite", {
+    method: "POST",
+    body: JSON.stringify({ overwrite_id: overwriteId, decision, actor: "web_ui" }),
+  });
+  state.pendingOverwriteId = "";
+  state.pendingTeachMessage = "";
+  if (el.memoryConfirmTeachBtn) {
+    el.memoryConfirmTeachBtn.classList.add("hidden");
+  }
+  if (String(result.status || "") === "stored") {
+    pushChatMessage("teach", `Overwrite confirmed. Saved ${Number(result.stored_count || 0)} facts.`, {
+      conflicts: result.conflicts || [],
+      session_id: result.session_id || state.selectedChatSessionId,
+      citations: result.citations || [],
+    });
+  } else {
+    pushChatMessage("system", "Overwrite request rejected.");
+  }
+  setCliOutput(JSON.stringify(result, null, 2));
+  await refreshMemory().catch(() => {});
+}
+
+async function handleAdvancedChat(rawMessage) {
+  const text = String(rawMessage || "").trim();
+  if (!text) return;
+  const detected = classifyAdvancedIntent(text);
+  const selectedIntent = state.selectedChatIntent || detected.intent || "chat";
+  const confirmSave = selectedIntent === "teach" ? !!el.chatConfirmSave?.checked : false;
+
+  const result = await api("/api/chat", {
+    method: "POST",
+    body: JSON.stringify({
+      message: text,
+      intent: selectedIntent,
+      confirm_save: confirmSave,
+      session_id: state.selectedChatSessionId || "",
+      actor: "web_ui",
+    }),
+  });
+  rememberMemoryEvent("memory_chat_response", result);
+
+  if (result?.session_id) {
+    state.selectedChatSessionId = result.session_id;
+    localStorage.setItem("dcc_chat_session_id", result.session_id);
+  }
+  if (result?.user_turn) {
+    pushChatMessage("user", result.user_turn.text || text, {
+      message_id: result.user_turn.message_id,
+      session_id: result.user_turn.session_id || state.selectedChatSessionId,
+    });
+  } else {
+    pushChatMessage("user", text, { session_id: state.selectedChatSessionId });
+  }
+
+  const response = result.response || {};
+  const responseMode = String(response.mode || selectedIntent || "chat");
+  const responseStatus = String(response.status || "ok");
+  const assistantText =
+    result.assistant_turn?.text ||
+    response.answer ||
+    response.reply ||
+    (responseStatus === "confirmation_required"
+      ? "Teach is pending confirmation. Enable Confirm Teach save and send again."
+      : "Completed.");
+  const kind = responseMode === "ask" ? "ask" : responseMode === "teach" ? "teach" : "system";
+  pushChatMessage(kind, assistantText, {
+    message_id: result.assistant_turn?.message_id,
+    session_id: result.assistant_turn?.session_id || state.selectedChatSessionId,
+    response,
+    citations: response.citations || [],
+    conflicts: response.conflicts || [],
+  });
+  if (Array.isArray(response.citations) && response.citations.length) {
+    state.lastExplainWhy = { citations: response.citations };
+  }
+  if (responseStatus === "overwrite_confirmation_required") {
+    state.pendingTeachMessage = text;
+    state.pendingOverwriteId = response.overwrite_id || "";
+    if (el.memoryConfirmTeachBtn) {
+      el.memoryConfirmTeachBtn.classList.remove("hidden");
+      el.memoryConfirmTeachBtn.textContent = "Confirm Overwrite";
+    }
+  } else if (responseStatus === "queued" && response?.run?.run_id) {
+    state.lastCliRunId = response.run.run_id;
+    state.selectedRunId = response.run.run_id;
+    localStorage.setItem("dcc_selected_run", response.run.run_id);
+    setupRunStream(response.run.run_id);
+    await refreshRuns();
+    await refreshStatus();
+  } else {
+    state.pendingOverwriteId = "";
+    if (el.memoryConfirmTeachBtn) {
+      el.memoryConfirmTeachBtn.classList.add("hidden");
+      el.memoryConfirmTeachBtn.textContent = "Confirm Overwrite";
+    }
+  }
+
+  setCliOutput(JSON.stringify(result, null, 2));
+  await refreshMemory().catch(() => {});
+}
+
 async function submitMemoryChat() {
   const raw = (el.memoryChatInput?.value || "").trim();
-  const request = inferChatRequest(raw);
-  if (!request) {
+  if (!raw) {
     setCliOutput("Enter a question, a fact, or an explicit /goal|/ask|/teach command.");
     return;
   }
-  if (!request.payload) {
-    setCliOutput(`/${request.mode} requires content.`);
-    return;
-  }
-
-  pushChatMessage("user", raw);
   if (el.memoryChatInput) {
     el.memoryChatInput.value = "";
   }
+  updateIntentPreview();
 
-  if (request.mode === "ask") {
-    await handleMemoryAsk(request.payload);
-    return;
-  }
-  if (request.mode === "teach") {
-    await handleMemoryTeach(request.payload, false);
-    return;
-  }
-  if (request.mode === "goal") {
-    await handleGoalCommand(request);
+  if (state.advancedChatMode) {
+    await handleAdvancedChat(raw);
     return;
   }
 
-  const msg = "Unsupported command. Use /goal, /ask, /teach, or plain natural input.";
-  setCliOutput(msg);
-  pushChatMessage("system", msg);
+  const request = inferChatRequest(raw);
+  if (!request || !request.payload) {
+    setCliOutput("Unsupported command. Use /goal, /ask, /teach, or plain natural input.");
+    return;
+  }
+  pushChatMessage("user", raw, { session_id: state.selectedChatSessionId });
+  if (request.mode === "ask") return handleMemoryAsk(request.payload);
+  if (request.mode === "teach") return handleMemoryTeach(request.payload, false);
+  if (request.mode === "goal") return handleGoalCommand(request);
+  setCliOutput("Unsupported command. Use /goal, /ask, /teach, or plain natural input.");
 }
 
 function wireTabs() {
@@ -1950,14 +2471,20 @@ function wireActions() {
       pushChatMessage("system", err.message);
     }
   });
+  el.memoryChatInput?.addEventListener("input", () => updateIntentPreview());
 
   el.memoryConfirmTeachBtn?.addEventListener("click", async () => {
-    const pending = state.pendingTeachMessage;
-    if (!pending) {
-      setCliOutput("No pending conflicting teach message.");
-      return;
-    }
     try {
+      if (state.pendingOverwriteId) {
+        await confirmPendingOverwrite("approve");
+        showToast("Memory overwrite confirmed.");
+        return;
+      }
+      const pending = state.pendingTeachMessage;
+      if (!pending) {
+        setCliOutput("No pending conflicting teach message.");
+        return;
+      }
       await handleMemoryTeach(pending, true);
       showToast("Conflicting teach confirmed.");
     } catch (err) {
@@ -1977,6 +2504,82 @@ function wireActions() {
 
   el.memoryChatSearch?.addEventListener("input", () => {
     renderMemoryChatFacts();
+    renderMemoryConversationsPanel();
+    renderMemoryLessonsPanel();
+  });
+
+  el.memoryPanelFactsBtn?.addEventListener("click", () => setMemoryPanelTab("facts"));
+  el.memoryPanelConversationsBtn?.addEventListener("click", () => setMemoryPanelTab("conversations"));
+  el.memoryPanelLessonsBtn?.addEventListener("click", () => setMemoryPanelTab("lessons"));
+
+  el.advancedChatToggle?.addEventListener("change", () => {
+    state.advancedChatMode = !!el.advancedChatToggle.checked;
+    showToast(state.advancedChatMode ? "Advanced Chat enabled." : "Advanced Chat disabled.");
+  });
+  el.chatIntentAskBtn?.addEventListener("click", () => setAdvancedIntent("ask"));
+  el.chatIntentTeachBtn?.addEventListener("click", () => setAdvancedIntent("teach"));
+  el.chatIntentGoalBtn?.addEventListener("click", () => setAdvancedIntent("goal"));
+  el.chatIntentChatBtn?.addEventListener("click", () => setAdvancedIntent("chat"));
+
+  el.chatNewSessionBtn?.addEventListener("click", async () => {
+    state.selectedChatSessionId = "";
+    localStorage.removeItem("dcc_chat_session_id");
+    await refreshMemory().catch(() => {});
+    renderChatHistory();
+    showToast("Started new chat session.");
+  });
+
+  el.chatSessionsList?.addEventListener("click", async (event) => {
+    const button = event.target?.closest?.("button[data-chat-session]");
+    if (!button) return;
+    const sid = String(button.getAttribute("data-chat-session") || "").trim();
+    if (!sid) return;
+    state.selectedChatSessionId = sid;
+    localStorage.setItem("dcc_chat_session_id", sid);
+    await refreshMemory().catch(() => {});
+    renderChatHistory();
+  });
+
+  el.memoryChatHistory?.addEventListener("click", async (event) => {
+    const pinBtn = event.target?.closest?.("button[data-chat-pin]");
+    if (pinBtn) {
+      const messageId = pinBtn.getAttribute("data-chat-pin");
+      togglePinnedMessage(messageId);
+      return;
+    }
+
+    const chipBtn = event.target?.closest?.("button[data-chat-chip]");
+    if (!chipBtn) return;
+    const chip = String(chipBtn.getAttribute("data-chat-chip") || "");
+    const sourceText = String(chipBtn.getAttribute("data-chat-text") || "").trim();
+    if (chip === "save-memory") {
+      setAdvancedIntent("teach");
+      if (el.chatConfirmSave) el.chatConfirmSave.checked = true;
+      if (el.memoryChatInput) {
+        el.memoryChatInput.value = sourceText;
+        el.memoryChatInput.focus();
+      }
+      updateIntentPreview();
+      return;
+    }
+    if (chip === "ask-followup") {
+      setAdvancedIntent("ask");
+      if (el.memoryChatInput) {
+        el.memoryChatInput.value = `Can you clarify this: ${sourceText}`;
+        el.memoryChatInput.focus();
+      }
+      updateIntentPreview();
+      return;
+    }
+    if (chip === "teach-refine") {
+      setAdvancedIntent("teach");
+      if (el.chatConfirmSave) el.chatConfirmSave.checked = true;
+      if (el.memoryChatInput) {
+        el.memoryChatInput.value = `Refinement: ${sourceText}`;
+        el.memoryChatInput.focus();
+      }
+      updateIntentPreview();
+    }
   });
 
   el.replayPrevBtn.addEventListener("click", async () => {
@@ -2036,6 +2639,10 @@ async function bootstrap() {
   applyBackgroundPreference();
   setStreamState("polling fallback");
   setChatMode("auto");
+  setAdvancedIntent(state.selectedChatIntent || "chat");
+  state.advancedChatMode = el.advancedChatToggle ? !!el.advancedChatToggle.checked : true;
+  setMemoryPanelTab(state.memoryPanelTab || "facts");
+  updateIntentPreview();
   renderChatHistory();
   initHeroParticles();
 
@@ -2056,26 +2663,33 @@ async function bootstrap() {
   wireActions();
   setGoalRunScope("new");
 
-  try {
-    await refreshModelOptions();
-    await Promise.all([refreshStatus(), refreshApprovals(), refreshRuns(), refreshMemory(), refreshTelemetry(), refreshLogs(), refreshWorkspaceTargets()]);
-    await refreshSettings();
-    renderWorkspaceTargetHint();
-    if (state.selectedRunId) {
-      setupRunStream(state.selectedRunId);
-      await loadRun(state.selectedRunId);
-    }
-  } catch (err) {
-    setMessage(err.message);
+  await safeRefresh("models", refreshModelOptions);
+  await Promise.all([
+    safeRefresh("status", refreshStatus),
+    safeRefresh("approvals", refreshApprovals),
+    safeRefresh("runs", refreshRuns),
+    safeRefresh("memory", refreshMemory),
+    safeRefresh("telemetry", refreshTelemetry),
+    safeRefresh("logs", refreshLogs),
+    safeRefresh("workspace", refreshWorkspaceTargets),
+  ]);
+  await safeRefresh("settings", refreshSettings);
+  renderWorkspaceTargetHint();
+  if (state.selectedRunId) {
+    setupRunStream(state.selectedRunId);
+    await safeRefresh("run details", async () => loadRun(state.selectedRunId));
   }
 
   setupSSE();
   setInterval(async () => {
     if (!state.streams.connected) {
       setStreamState("polling fallback");
-      try {
-        await Promise.all([refreshStatus(), refreshRuns(), refreshApprovals(), refreshLogs()]);
-      } catch (_) {}
+      await Promise.all([
+        safeRefresh("status", refreshStatus, { silent: true }),
+        safeRefresh("runs", refreshRuns, { silent: true }),
+        safeRefresh("approvals", refreshApprovals, { silent: true }),
+        safeRefresh("logs", refreshLogs, { silent: true }),
+      ]);
       setupSSE();
     }
   }, STREAM_RETRY_MS);

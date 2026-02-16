@@ -152,6 +152,84 @@ def test_per_role_model_override_used(monkeypatch: pytest.MonkeyPatch, tmp_path:
     }
 
 
+def test_goal_uses_tail_logs_as_context(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    (config.logs_dir / "web_control_center.log").write_text(
+        "INFO server boot\nERROR import failed in module sample_app\n",
+        encoding="utf-8",
+    )
+    center = DavidControlCenter(config=config, data_root=tmp_path / "data")
+    captured: dict[str, str] = {"planner": "", "coder": ""}
+
+    class FakePlanner:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def create_plan(self, goal, workspace_snapshot, memory_context, tdd_mode=False):
+            captured["planner"] = str(memory_context)
+            return PlanOutput(
+                goal=goal,
+                steps=[PlanStep(id="S1", title="Plan", details="Do work.", success_check="tests pass")],
+                success_criteria=["tests pass"],
+            )
+
+    class FakeCoder:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def propose(self, goal, plan_json, workspace_snapshot, memory_context, critic_feedback, iteration, tdd_mode=False, tdd_phase="normal"):
+            captured["coder"] = str(memory_context)
+            return CoderOutput(
+                summary="single pass",
+                edits=[CodeEdit(path="app.py", content="print('ok')\n", reason="implement")],
+                commands=["pytest -q"],
+                done=True,
+                done_reason="done",
+            )
+
+    class FakeCritic:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def review(self, goal, plan_json, coder_json, execution_results, tdd_mode=False, tdd_red_phase_complete=False):
+            return CriticOutput(
+                status="success",
+                analysis="all good",
+                next_actions=["finish"],
+                lessons=[LessonProposal(lesson="keep tests green", tags=["testing"])],
+            )
+
+    class FakeExecutor:
+        def __init__(self, workspace_dir, timeout_sec, max_output_chars):
+            self.workspace_dir = workspace_dir
+
+        def run(self, command_specs):
+            return [
+                ExecutionResult(
+                    command=spec.raw,
+                    returncode=0,
+                    stdout="ok",
+                    stderr="",
+                    timed_out=False,
+                    duration_sec=0.01,
+                )
+                for spec in command_specs
+            ]
+
+    monkeypatch.setattr("web.control_center.Planner", FakePlanner)
+    monkeypatch.setattr("web.control_center.Coder", FakeCoder)
+    monkeypatch.setattr("web.control_center.Critic", FakeCritic)
+    monkeypatch.setattr("web.control_center.RestrictedExecutor", FakeExecutor)
+
+    ok, start = center.start_run({"command": "/goal fix errors from logs"})
+    assert ok is True
+    run = _wait_for_terminal(center, start["run_id"])
+    assert run["meta"]["status"] == "success"
+    assert "Recent tail logs context:" in captured["planner"]
+    assert "import failed in module sample_app" in captured["planner"]
+    assert "Recent tail logs context:" in captured["coder"]
+
+
 def test_tdd_mode_tests_first_then_green(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     center = DavidControlCenter(config=config, data_root=tmp_path / "data")

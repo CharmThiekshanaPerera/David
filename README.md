@@ -340,7 +340,8 @@ http://127.0.0.1:8787
 - Telemetry: success/error metrics and iteration-duration chart.
 - Logs: tail view of web + telemetry logs.
 - Settings: safe mode, rate limit, iteration override, risk thresholds, planner/coder/critic model config, and default TDD mode.
-- Memory & Chat: chat-style panel for natural ask/teach input, explicit `/goal|/ask|/teach`, and searchable memory viewer.
+- Memory & Chat: Advanced Chat mode with natural intent detection (`Teach` / `Ask` / `Goal` / `Chat`), confirm-gated memory writes, session history, memory citations, and searchable Facts/Conversations/Lessons tabs.
+- Goal runs are log-aware: David automatically reads recent tail logs and uses them as extra context when planning/coding fixes.
 
 ### Goal templates
 
@@ -354,19 +355,26 @@ Dashboard and Memory & Chat include beginner-friendly templates:
 Templates prefill goal text and can set run flags (`Strict TDD Mode` enables `tdd_mode`).
 All existing safety checks still apply.
 
-### Teach and Ask in Web UI
+### Advanced Chat in Web UI
 
-Use the `Memory & Chat` tab to interact with long-term memory without CLI:
+Use the `Memory & Chat` tab to interact naturally while keeping memory writes explicit and safe:
 
-1. Enter natural text:
-   - question-like text maps to `/ask`
-   - statement/fact-like text maps to `/teach`
-2. Optional: force mode using `Auto / Ask / Teach` buttons.
-3. Submit with `Send`.
-4. For memory conflicts, review the warning bubble and click `Confirm Conflicting Teach` to proceed.
-5. Use the built-in Memory Viewer search box to filter structured facts (`subject`, `predicate`, `object`, `timestamp`).
+1. Type naturally; the UI detects intent and shows a pre-send hint: `I think this is: Teach/Ask/Goal/Chat`.
+2. Confirm or override intent with one-click toggles (`Ask`, `Teach`, `Goal`, `Chat`).
+3. Teach writes are gated:
+   - `Confirm Teach save` must be enabled before a teach message is stored.
+   - conflicting teaches require explicit overwrite confirmation.
+4. Conversation history is grouped by session, supports pinning, and includes quick-reply chips:
+   - `Save this as memory`
+   - `Ask a follow-up`
+   - `Teach refinement`
+5. Memory panel has searchable tabs:
+   - `Facts` (with conflict indicators, aliases, provenance metadata),
+   - `Conversations`,
+   - `Lessons`.
+6. `Explain why David answered this` shows citations for memory facts/snippets used in the answer.
 
-Memory writes occur only through explicit teach actions (`/teach` mapping or `/api/teach`).
+`/ask` and `/teach` CLI mirror behavior remains backward-compatible.
 
 ### UX highlights (new)
 
@@ -409,6 +417,7 @@ Memory writes occur only through explicit teach actions (`/teach` mapping or `/a
 - `POST /api/run`
 - `POST /api/ask`
 - `POST /api/teach`
+- `POST /api/chat`
 - `POST /api/stop`
 - `GET /api/runs`
 - `GET /api/run/<run_id>`
@@ -420,6 +429,10 @@ Memory writes occur only through explicit teach actions (`/teach` mapping or `/a
 - `POST /api/run/<run_id>/retry`
 - `GET /api/run/<run_id>/bundle`
 - `GET /api/memory`
+- `GET /api/memory/facts`
+- `GET /api/memory/conversations`
+- `POST /api/memory/confirm_overwrite`
+- `GET /api/chat/sessions`
 - `GET /api/telemetry/tail`
 - `GET /api/logs/tail`
 - `GET /api/settings`
@@ -441,6 +454,7 @@ Memory writes occur only through explicit teach actions (`/teach` mapping or `/a
 - File writes remain restricted to active project directories under `workspace/projects/`.
 - Risk approval gate for large edits and multi-file rewrites.
 - Memory conflict approval gate for conflicting `--teach` facts.
+- Advanced Chat teach save gate (`confirm_save`) and explicit overwrite confirmation for conflicting facts.
 - Safe mode can block write operations (read-only monitoring mode).
 - Run artifacts are stored under `data/runs/<run_id>/` (plan, iteration outputs, diffs, result bundle).
 
@@ -464,6 +478,7 @@ Memory writes occur only through explicit teach actions (`/teach` mapping or `/a
 - Future goals load relevant lessons to avoid repeating mistakes.
 - Telemetry logs each major step for debugging and auditability.
 - Personal facts are stored only through the explicit `--teach` pathway.
+- Conversation turns and extracted takeaways are persisted in `memory/conversations.jsonl` (session-aware metadata: timestamp, session_id, intent, topics, confidence).
 
 ## Tests
 

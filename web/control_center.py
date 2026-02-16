@@ -35,6 +35,37 @@ from agent.executor import RestrictedExecutor
 
 
 RUN_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{6,80}$")
+INTENT_CHOICES = {"teach", "ask", "goal", "chat"}
+MEMORY_UNKNOWN_ANSWER = 'I do not know yet. Please teach me using --teach "...".'
+INTENT_STOPWORDS = {
+    "a",
+    "an",
+    "the",
+    "to",
+    "for",
+    "of",
+    "on",
+    "in",
+    "and",
+    "or",
+    "is",
+    "are",
+    "was",
+    "were",
+    "be",
+    "you",
+    "me",
+    "my",
+    "i",
+    "it",
+    "this",
+    "that",
+    "with",
+    "from",
+    "as",
+    "at",
+    "by",
+}
 GOAL_TEMPLATES: list[dict[str, Any]] = [
     {
         "id": "build_cli_tool",
@@ -142,6 +173,10 @@ class DavidControlCenter:
         self._last_run_started_at: float = 0.0
         self._subscribers: dict[str, list[queue.Queue[dict[str, Any]]]] = {"status": [], "logs": []}
         self._csrf_token = uuid.uuid4().hex
+        self._pending_memory_overwrites: dict[str, dict[str, Any]] = {}
+        self._chat_session_by_actor: dict[str, str] = {}
+        self._conversations_file = self.config.memory_file.parent / "conversations.jsonl"
+        self._ensure_conversation_store()
 
         self._logger = logging.getLogger("david.control_center")
         self._logger.setLevel(logging.INFO)
@@ -520,23 +555,50 @@ class DavidControlCenter:
         self._update_run_meta(run_id, status="stopping", message="Stop requested by user.", current_stage="executor")
         return {"stopped": True, "run_id": run_id}
 
+    def classify_chat_intent(self, message: str) -> dict[str, Any]:
+        text = self._sanitize_user_text(message, field_name="message")
+        parsed = parse_chat_command(text)
+        if parsed and parsed[0] in INTENT_CHOICES:
+            intent = str(parsed[0])
+            topics = self._extract_topics(parsed[1] or text)
+            return {"intent": intent, "confidence": 1.0, "topics": topics, "reason": "explicit_command"}
+
+        lowered = text.casefold()
+        ask_like = text.endswith("?") or bool(re.match(r"^(who|what|when|where|why|how|is|are|can|could|do|does|did)\b", lowered))
+        goal_like = bool(
+            re.match(
+                r"^(build|create|implement|refactor|fix|update|add|remove|improve|write|generate)\b",
+                lowered,
+            )
+        ) or "workspace" in lowered
+        teach_like = bool(
+            re.search(
+                r"\b(remember|teach|save this|my name is|i am your|from now on|you should know|call me)\b",
+                lowered,
+            )
+        )
+
+        if teach_like:
+            intent = "teach"
+            confidence = 0.88
+            reason = "memory_statement"
+        elif ask_like:
+            intent = "ask"
+            confidence = 0.82
+            reason = "question_shape"
+        elif goal_like:
+            intent = "goal"
+            confidence = 0.7
+            reason = "task_instruction"
+        else:
+            intent = "chat"
+            confidence = 0.62
+            reason = "default_chat"
+        return {"intent": intent, "confidence": confidence, "topics": self._extract_topics(text), "reason": reason}
+
     def ask_memory(self, question: str, actor: str = "web_ui") -> dict[str, Any]:
         clean_question = self._sanitize_user_text(question, field_name="question")
-        llm = OllamaClient(self.config)
-        memory = LongTermMemory(self.config.memory_file)
-        teacher = MemoryTeacherQA(llm=llm, memory=memory)
-
-        answer = teacher.ask(clean_question)
-        matched = memory.search_facts(clean_question, limit=8)
-        payload = {
-            "mode": "ask",
-            "question": clean_question,
-            "answer": answer,
-            "matched_facts": [asdict(item) for item in matched],
-            "matched_count": len(matched),
-            "actor": actor.strip() or "web_ui",
-            "timestamp_utc": self._now_iso(),
-        }
+        payload = self._ask_memory_first(clean_question, actor=actor.strip() or "web_ui", session_id="")
         self.publish_event("status", {"type": "memory_ask_answered", "payload": payload})
         self.publish_event("logs", {"type": "memory_ask_answered", "payload": payload})
         return payload
@@ -552,47 +614,284 @@ class DavidControlCenter:
             raise ValueError("Safe mode is enabled. /teach is blocked in read-only mode.")
 
         clean_message = self._sanitize_user_text(message, field_name="message")
-        llm = OllamaClient(self.config)
-        memory = LongTermMemory(self.config.memory_file)
-        teacher = MemoryTeacherQA(llm=llm, memory=memory)
+        payload = self._teach_confirmed(
+            clean_message,
+            actor=actor.strip() or "web_ui",
+            session_id="",
+            allow_overwrite=confirm_conflict,
+            legacy_mode=True,
+        )
+        if payload.get("status") == "overwrite_confirmation_required":
+            payload["status"] = "conflict"
+            payload["requires_confirmation"] = True
+            payload["notes"] = "Conflict detected. Confirm to continue."
+            payload["stored_facts"] = []
+            payload["stored_count"] = 0
+            payload["skipped_items"] = []
+        if payload.get("status") == "stored":
+            payload["confirmed_conflict"] = bool(payload.get("conflicts")) and bool(confirm_conflict)
+            payload["requires_confirmation"] = False
 
-        conflicts = self._preview_teach_conflicts(teacher, memory, clean_message)
-        if conflicts and not confirm_conflict:
-            payload = {
-                "mode": "teach",
-                "status": "conflict",
-                "message": clean_message,
-                "requires_confirmation": True,
-                "stored_facts": [],
-                "stored_count": 0,
-                "skipped_items": [],
-                "notes": "Conflict detected. Confirm to continue.",
-                "conflicts": conflicts,
-                "actor": actor.strip() or "web_ui",
-                "timestamp_utc": self._now_iso(),
-            }
-            self.publish_event("status", {"type": "memory_teach_conflict", "payload": payload})
-            self.publish_event("logs", {"type": "memory_teach_conflict", "payload": payload})
-            return payload
-
-        result = teacher.teach(clean_message)
-        payload = {
-            "mode": "teach",
-            "status": "stored",
-            "message": clean_message,
-            "requires_confirmation": False,
-            "confirmed_conflict": bool(conflicts),
-            "stored_facts": [asdict(fact) for fact in result.stored_facts],
-            "stored_count": len(result.stored_facts),
-            "skipped_items": list(result.skipped_items),
-            "notes": result.notes,
-            "conflicts": conflicts,
-            "actor": actor.strip() or "web_ui",
-            "timestamp_utc": self._now_iso(),
-        }
         self.publish_event("status", {"type": "memory_teach_completed", "payload": payload})
         self.publish_event("logs", {"type": "memory_teach_completed", "payload": payload})
         return payload
+
+    def chat_message(
+        self,
+        message: str,
+        *,
+        intent: str = "",
+        confirm_save: bool = False,
+        session_id: str = "",
+        actor: str = "web_ui",
+    ) -> dict[str, Any]:
+        clean_message = self._sanitize_user_text(message, field_name="message")
+        actor_value = actor.strip() or "web_ui"
+        detected = self.classify_chat_intent(clean_message)
+        selected_intent = self._normalize_intent(intent) or str(detected.get("intent", "chat"))
+        active_session_id = self._resolve_chat_session_id(session_id=session_id, actor=actor_value)
+        topics = detected.get("topics", [])
+        confidence = float(detected.get("confidence", 0.5))
+
+        user_turn = self._append_conversation_turn(
+            session_id=active_session_id,
+            role="user",
+            text=clean_message,
+            intent=selected_intent,
+            topics=topics if isinstance(topics, list) else [],
+            confidence=confidence,
+            actor=actor_value,
+        )
+
+        response: dict[str, Any]
+        if selected_intent == "ask":
+            response = self._ask_memory_first(clean_message, actor=actor_value, session_id=active_session_id)
+            assistant_text = str(response.get("answer", "")).strip() or "No answer generated."
+        elif selected_intent == "teach":
+            if not bool(confirm_save):
+                preview = self._extract_teach_memory(clean_message)
+                response = {
+                    "mode": "teach",
+                    "status": "confirmation_required",
+                    "message": clean_message,
+                    "requires_confirmation": True,
+                    "confirm_save": False,
+                    "actor": actor_value,
+                    "session_id": active_session_id,
+                    "triples": preview.get("triples", []),
+                    "aliases": preview.get("aliases", []),
+                    "notes": preview.get("notes", ""),
+                    "topics": preview.get("topics", []),
+                    "timestamp_utc": self._now_iso(),
+                }
+                assistant_text = "I can save this as memory after you confirm Teach."
+            else:
+                response = self._teach_confirmed(
+                    clean_message,
+                    actor=actor_value,
+                    session_id=active_session_id,
+                    allow_overwrite=False,
+                    legacy_mode=False,
+                )
+                if response.get("status") == "overwrite_confirmation_required":
+                    assistant_text = "I detected conflicting memory. Confirm overwrite to continue."
+                else:
+                    stored_count = int(response.get("stored_count", 0))
+                    assistant_text = f"Saved {stored_count} memory facts."
+        elif selected_intent == "goal":
+            started, run_result = self.start_run(
+                {
+                    "mode": "goal",
+                    "payload": clean_message,
+                    "preview": False,
+                }
+            )
+            response = {
+                "mode": "goal",
+                "status": "queued" if started else "error",
+                "run": run_result,
+                "message": clean_message,
+                "actor": actor_value,
+                "session_id": active_session_id,
+                "timestamp_utc": self._now_iso(),
+            }
+            assistant_text = (
+                f"Goal queued: {run_result.get('run_id', '')}"
+                if started
+                else f"Goal could not start: {run_result.get('error', 'unknown error')}"
+            )
+        else:
+            response = {
+                "mode": "chat",
+                "status": "ok",
+                "message": clean_message,
+                "reply": (
+                    "I can chat naturally. If you want me to remember something, switch to Teach and confirm save."
+                ),
+                "actor": actor_value,
+                "session_id": active_session_id,
+                "timestamp_utc": self._now_iso(),
+            }
+            assistant_text = str(response["reply"])
+
+        assistant_turn = self._append_conversation_turn(
+            session_id=active_session_id,
+            role="assistant",
+            text=assistant_text,
+            intent=selected_intent,
+            topics=topics if isinstance(topics, list) else [],
+            confidence=confidence,
+            actor=actor_value,
+            metadata={
+                "response_status": str(response.get("status", "")),
+                "citations": response.get("citations", []),
+                "used_memory": response.get("used_memory", {}),
+                "takeaways": response.get("stored_facts", []),
+            },
+        )
+
+        payload = {
+            "mode": "chat",
+            "message": clean_message,
+            "detected_intent": detected.get("intent", "chat"),
+            "detected_confidence": round(confidence, 3),
+            "selected_intent": selected_intent,
+            "confirm_save": bool(confirm_save),
+            "session_id": active_session_id,
+            "user_turn": user_turn,
+            "assistant_turn": assistant_turn,
+            "response": response,
+            "timestamp_utc": self._now_iso(),
+        }
+        self.publish_event("status", {"type": "memory_chat_response", "payload": payload})
+        self.publish_event("logs", {"type": "memory_chat_response", "payload": payload})
+        return payload
+
+    def memory_facts(self, query: str = "", limit: int = 500) -> dict[str, Any]:
+        payload = self._read_memory_payload()
+        facts = payload.get("facts", []) if isinstance(payload.get("facts"), list) else []
+        conflicts = self._detect_memory_conflicts(facts)
+        query_tokens = set(self._tokenize_text(query))
+        filtered: list[dict[str, Any]] = []
+        for row in facts:
+            if not isinstance(row, dict):
+                continue
+            if query_tokens:
+                text = f"{row.get('subject', '')} {row.get('predicate', '')} {row.get('object', '')}"
+                fact_tokens = set(self._tokenize_text(text))
+                if not (query_tokens & fact_tokens):
+                    continue
+            filtered.append(row)
+        return {
+            "facts": filtered[-max(1, min(limit, 5000)) :],
+            "conflicts": conflicts,
+            "conflict_count": len(conflicts),
+            "total": len(filtered),
+        }
+
+    def memory_conversations(self, session_id: str = "", limit: int = 500) -> dict[str, Any]:
+        rows = self._read_jsonl(self._conversations_file, limit=max(1, min(limit, 5000)))
+        clean_session = self._sanitize_session_id(session_id)
+        if clean_session:
+            rows = [row for row in rows if str(row.get("session_id", "")) == clean_session]
+        return {
+            "conversations": rows,
+            "session_id": clean_session,
+            "total": len(rows),
+        }
+
+    def chat_sessions(self, limit: int = 120) -> list[dict[str, Any]]:
+        rows = self._read_jsonl(self._conversations_file, limit=20_000)
+        grouped: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            session = str(row.get("session_id", "")).strip()
+            if not session:
+                continue
+            info = grouped.setdefault(
+                session,
+                {
+                    "session_id": session,
+                    "started_at": str(row.get("timestamp_utc", "")),
+                    "last_message_at": str(row.get("timestamp_utc", "")),
+                    "message_count": 0,
+                    "pinned_count": 0,
+                    "intents": {},
+                    "preview": "",
+                },
+            )
+            info["message_count"] = int(info.get("message_count", 0)) + 1
+            stamp = str(row.get("timestamp_utc", ""))
+            if stamp and (not str(info.get("started_at", "")) or stamp < str(info.get("started_at", ""))):
+                info["started_at"] = stamp
+            if stamp and (not str(info.get("last_message_at", "")) or stamp > str(info.get("last_message_at", ""))):
+                info["last_message_at"] = stamp
+            if bool(row.get("pinned", False)):
+                info["pinned_count"] = int(info.get("pinned_count", 0)) + 1
+
+            intent_name = self._normalize_intent(row.get("intent", ""))
+            if intent_name:
+                intent_map = info.get("intents", {})
+                intent_map[intent_name] = int(intent_map.get(intent_name, 0)) + 1
+                info["intents"] = intent_map
+            if str(row.get("role", "")) == "user":
+                preview = str(row.get("text", "")).strip()
+                if preview:
+                    info["preview"] = preview[:180]
+
+        ordered = sorted(grouped.values(), key=lambda item: str(item.get("last_message_at", "")), reverse=True)
+        return ordered[: max(1, min(limit, 500))]
+
+    def confirm_memory_overwrite(
+        self,
+        overwrite_id: str,
+        *,
+        decision: str,
+        actor: str = "web_ui",
+    ) -> tuple[bool, dict[str, Any]]:
+        clean_id = str(overwrite_id).strip()
+        if not clean_id:
+            return False, {"error": "overwrite_id is required."}
+        choice = str(decision).strip().lower()
+        if choice not in {"approve", "reject"}:
+            return False, {"error": "decision must be approve or reject."}
+
+        with self._lock:
+            pending = self._pending_memory_overwrites.get(clean_id)
+            if not pending:
+                return False, {"error": "Overwrite request not found."}
+            if str(pending.get("status", "pending")) != "pending":
+                return False, {"error": "Overwrite request is already resolved."}
+            pending["status"] = "approved" if choice == "approve" else "rejected"
+            pending["decided_at"] = self._now_iso()
+            pending["decided_by"] = actor.strip() or "web_ui"
+
+        if choice == "reject":
+            payload = {
+                "mode": "teach",
+                "status": "rejected",
+                "overwrite_id": clean_id,
+                "message": str(pending.get("message", "")),
+                "actor": actor.strip() or "web_ui",
+                "timestamp_utc": self._now_iso(),
+            }
+            self.publish_event("status", {"type": "memory_teach_overwrite_rejected", "payload": payload})
+            self.publish_event("logs", {"type": "memory_teach_overwrite_rejected", "payload": payload})
+            return True, payload
+
+        payload = self._apply_teach_extract(
+            extracted=pending.get("extracted", {}),
+            message=str(pending.get("message", "")),
+            actor=actor.strip() or "web_ui",
+            session_id=str(pending.get("session_id", "")),
+            allow_overwrite=True,
+            overwrite_id=clean_id,
+            legacy_mode=False,
+        )
+        self.publish_event("status", {"type": "memory_teach_overwrite_confirmed", "payload": payload})
+        self.publish_event("logs", {"type": "memory_teach_overwrite_confirmed", "payload": payload})
+        return True, payload
 
     def submit_approval(
         self,
@@ -930,13 +1229,16 @@ class DavidControlCenter:
         return buff
 
     def memory_snapshot(self) -> dict[str, Any]:
-        payload = self._read_json(self.config.memory_file, default={"facts": [], "lessons": [], "preferences": []})
+        payload = self._read_memory_payload()
         facts = payload.get("facts", []) if isinstance(payload.get("facts"), list) else []
         lessons = payload.get("lessons", []) if isinstance(payload.get("lessons"), list) else []
+        conversations = self._read_jsonl(self._conversations_file, limit=600)
         conflicts = self._detect_memory_conflicts(facts)
         return {
             "facts": facts[-300:],
             "lessons": lessons[-300:],
+            "conversations": conversations[-300:],
+            "sessions": self.chat_sessions(limit=120),
             "conflicts": conflicts,
             "conflict_count": len(conflicts),
         }
@@ -1031,6 +1333,522 @@ class DavidControlCenter:
                     }
                 )
         return warnings
+
+    def _ensure_conversation_store(self) -> None:
+        self._conversations_file.parent.mkdir(parents=True, exist_ok=True)
+        if not self._conversations_file.exists():
+            self._conversations_file.write_text("", encoding="utf-8")
+
+    def _read_memory_payload(self) -> dict[str, Any]:
+        payload = self._read_json(self.config.memory_file, default={"facts": [], "lessons": [], "preferences": []})
+        if not isinstance(payload, dict):
+            payload = {}
+        if not isinstance(payload.get("facts"), list):
+            payload["facts"] = []
+        if not isinstance(payload.get("lessons"), list):
+            payload["lessons"] = []
+        if not isinstance(payload.get("preferences"), list):
+            payload["preferences"] = []
+        if not isinstance(payload.get("conversations"), list):
+            payload["conversations"] = []
+        return payload
+
+    def _write_memory_payload(self, payload: dict[str, Any]) -> None:
+        self._write_json(self.config.memory_file, payload)
+
+    @staticmethod
+    def _normalize_intent(value: Any) -> str:
+        intent = str(value or "").strip().lower()
+        if intent in INTENT_CHOICES:
+            return intent
+        return ""
+
+    @staticmethod
+    def _sanitize_session_id(value: Any) -> str:
+        session = str(value or "").strip()
+        if not session:
+            return ""
+        session = re.sub(r"[^a-zA-Z0-9._:-]", "-", session)
+        return session[:120]
+
+    def _resolve_chat_session_id(self, session_id: str, actor: str) -> str:
+        cleaned = self._sanitize_session_id(session_id)
+        if cleaned:
+            with self._lock:
+                self._chat_session_by_actor[actor] = cleaned
+            return cleaned
+        with self._lock:
+            existing = self._chat_session_by_actor.get(actor, "")
+            if existing:
+                return existing
+            created = f"s_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}_{uuid.uuid4().hex[:8]}"
+            self._chat_session_by_actor[actor] = created
+            return created
+
+    def _append_conversation_turn(
+        self,
+        *,
+        session_id: str,
+        role: str,
+        text: str,
+        intent: str,
+        topics: list[str],
+        confidence: float,
+        actor: str,
+        metadata: dict[str, Any] | None = None,
+        pinned: bool = False,
+    ) -> dict[str, Any]:
+        row = {
+            "message_id": uuid.uuid4().hex,
+            "session_id": session_id,
+            "role": str(role),
+            "text": str(text),
+            "intent": self._normalize_intent(intent) or "chat",
+            "topics": [str(item).strip() for item in topics if str(item).strip()][:12],
+            "confidence": round(max(0.0, min(float(confidence), 1.0)), 3),
+            "actor": actor,
+            "pinned": bool(pinned),
+            "timestamp_utc": self._now_iso(),
+            "metadata": metadata or {},
+        }
+        with self._conversations_file.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, ensure_ascii=True) + "\n")
+        return row
+
+    @classmethod
+    def _tokenize_text(cls, value: str) -> list[str]:
+        return [token for token in re.findall(r"[a-zA-Z0-9_']+", str(value).lower()) if token]
+
+    @classmethod
+    def _extract_topics(cls, text: str, limit: int = 6) -> list[str]:
+        tokens = cls._tokenize_text(text)
+        out: list[str] = []
+        seen: set[str] = set()
+        for token in tokens:
+            if token in INTENT_STOPWORDS or len(token) < 3:
+                continue
+            if token in seen:
+                continue
+            seen.add(token)
+            out.append(token)
+            if len(out) >= max(1, min(limit, 12)):
+                break
+        return out
+
+    @staticmethod
+    def _contains_sensitive_memory_text(text: str) -> bool:
+        lowered = str(text or "").casefold()
+        patterns = (
+            "password",
+            "passphrase",
+            "api key",
+            "api_key",
+            "token",
+            "secret",
+            "private key",
+            "ssh key",
+            "ssn",
+            "social security",
+            "credit card",
+            "cvv",
+            "bank account",
+            "otp",
+        )
+        return any(item in lowered for item in patterns)
+
+    @classmethod
+    def _compose_goal_context(cls, memory_context: str, log_context: str) -> str:
+        base = str(memory_context or "").strip() or "No prior lessons available."
+        logs = str(log_context or "").strip()
+        if not logs:
+            return base
+        return (
+            f"{base}\n\nRecent tail logs context:\n"
+            f"{logs}\n\n"
+            "Use logs to diagnose failures and prioritize minimal fixes related to observed errors."
+        ).strip()
+
+    def _build_goal_log_context(self, *, limit_lines: int = 160, max_chars: int = 7000) -> str:
+        snapshot = self.logs_tail(limit=max(20, min(limit_lines, 600)))
+        if not isinstance(snapshot, dict):
+            return ""
+
+        critical_markers = ("error", "traceback", "exception", "failed", "failure", "timeout")
+        selected: list[str] = []
+        seen: set[str] = set()
+
+        def _append_line(prefix: str, line: str) -> None:
+            clean = str(line).strip()
+            if not clean:
+                return
+            if self._contains_sensitive_memory_text(clean):
+                return
+            row = f"[{prefix}] {clean}"
+            if row in seen:
+                return
+            seen.add(row)
+            selected.append(row)
+
+        for name, rows in snapshot.items():
+            if not isinstance(rows, list):
+                continue
+            for row in rows[-max(20, limit_lines) :]:
+                text = str(row).strip()
+                if not text:
+                    continue
+                lowered = text.casefold()
+                if any(marker in lowered for marker in critical_markers):
+                    _append_line(str(name), text)
+
+        for name, rows in snapshot.items():
+            if not isinstance(rows, list):
+                continue
+            for row in rows[-40:]:
+                _append_line(str(name), str(row))
+
+        if not selected:
+            return ""
+
+        clipped = selected[-max(20, min(limit_lines, 220)) :]
+        text = "\n".join(clipped)
+        if len(text) > max_chars:
+            text = text[-max_chars:]
+            text = f"...[truncated]\n{text}"
+        return text
+
+    @staticmethod
+    def _normalize_fact_row(subject: str, predicate: str, object_value: str) -> dict[str, str] | None:
+        sub = str(subject).strip()
+        pred = re.sub(r"[^a-zA-Z0-9_]+", "_", str(predicate).strip().lower()).strip("_")
+        obj = str(object_value).strip()
+        if not sub or not pred or not obj:
+            return None
+        return {"subject": sub, "predicate": pred, "object": obj}
+
+    def _extract_teach_memory(self, message: str) -> dict[str, Any]:
+        llm = OllamaClient(self.config)
+        memory = LongTermMemory(self.config.memory_file)
+        teacher = MemoryTeacherQA(llm=llm, memory=memory)
+
+        parsed: dict[str, Any] = {"facts": [], "notes": ""}
+        try:
+            parsed = teacher._extract_facts(message)  # type: ignore[attr-defined]
+        except Exception:
+            parsed = {"facts": [], "notes": ""}
+        heuristic = teacher._heuristic_facts(message)  # type: ignore[attr-defined]
+        rows = teacher._merge_fact_rows(parsed.get("facts", []), heuristic)  # type: ignore[attr-defined]
+
+        triples: list[dict[str, str]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            normalized = self._normalize_fact_row(row.get("subject", ""), row.get("predicate", ""), row.get("object", ""))
+            if not normalized:
+                continue
+            key = (
+                normalized["subject"].casefold(),
+                normalized["predicate"].casefold(),
+                normalized["object"].casefold(),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            triples.append(normalized)
+
+        alias_rows: list[dict[str, str]] = []
+        name_match = re.search(r"\bmy name is\s+([a-z][a-z .'-]{1,80})", message, flags=re.IGNORECASE)
+        alias_match = re.search(r"\b(?:also called|aka|also known as)\s+([a-z][a-z .'-]{1,80})", message, flags=re.IGNORECASE)
+        if name_match and alias_match:
+            canonical = name_match.group(1).strip(" .")
+            alias = alias_match.group(1).strip(" .")
+            if canonical and alias and canonical.casefold() != alias.casefold():
+                alias_rows.append({"canonical": canonical, "alias": alias})
+
+        notes = str(parsed.get("notes", "")).strip()
+        return {
+            "triples": triples,
+            "notes": notes,
+            "aliases": alias_rows,
+            "topics": self._extract_topics(message),
+        }
+
+    def _teach_confirmed(
+        self,
+        message: str,
+        *,
+        actor: str,
+        session_id: str,
+        allow_overwrite: bool,
+        legacy_mode: bool,
+    ) -> dict[str, Any]:
+        if self.settings.safe_mode:
+            raise ValueError("Safe mode is enabled. /teach is blocked in read-only mode.")
+        if self._contains_sensitive_memory_text(message):
+            raise ValueError("Sensitive data cannot be stored in memory.")
+        extracted = self._extract_teach_memory(message)
+        return self._apply_teach_extract(
+            extracted=extracted,
+            message=message,
+            actor=actor,
+            session_id=session_id,
+            allow_overwrite=allow_overwrite,
+            overwrite_id="",
+            legacy_mode=legacy_mode,
+        )
+
+    def _apply_teach_extract(
+        self,
+        *,
+        extracted: dict[str, Any],
+        message: str,
+        actor: str,
+        session_id: str,
+        allow_overwrite: bool,
+        overwrite_id: str,
+        legacy_mode: bool,
+    ) -> dict[str, Any]:
+        triples = extracted.get("triples", []) if isinstance(extracted.get("triples"), list) else []
+        notes = str(extracted.get("notes", "")).strip()
+        aliases = extracted.get("aliases", []) if isinstance(extracted.get("aliases"), list) else []
+        topics = extracted.get("topics", []) if isinstance(extracted.get("topics"), list) else []
+
+        payload = self._read_memory_payload()
+        facts = payload.get("facts", []) if isinstance(payload.get("facts"), list) else []
+        facts_by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for row in facts:
+            if not isinstance(row, dict):
+                continue
+            subject = str(row.get("subject", "")).strip()
+            predicate = str(row.get("predicate", "")).strip()
+            if not subject or not predicate:
+                continue
+            facts_by_key.setdefault((subject.casefold(), predicate.casefold()), []).append(row)
+
+        deduped: list[dict[str, str]] = []
+        duplicates: list[dict[str, str]] = []
+        conflicts: list[dict[str, Any]] = []
+        for triple in triples:
+            if not isinstance(triple, dict):
+                continue
+            normalized = self._normalize_fact_row(triple.get("subject", ""), triple.get("predicate", ""), triple.get("object", ""))
+            if not normalized:
+                continue
+            key = (normalized["subject"].casefold(), normalized["predicate"].casefold())
+            current_rows = facts_by_key.get(key, [])
+            exact_match = False
+            conflicting_values: list[str] = []
+            for existing in current_rows:
+                existing_obj = str(existing.get("object", "")).strip()
+                if not existing_obj:
+                    continue
+                if existing_obj.casefold() == normalized["object"].casefold():
+                    exact_match = True
+                    break
+                similarity = difflib.SequenceMatcher(None, existing_obj.casefold(), normalized["object"].casefold()).ratio()
+                if similarity >= 0.94:
+                    exact_match = True
+                    break
+                conflicting_values.append(existing_obj)
+            if exact_match:
+                duplicates.append(normalized)
+                continue
+            if conflicting_values:
+                conflicts.append(
+                    {
+                        "subject": normalized["subject"],
+                        "predicate": normalized["predicate"],
+                        "existing_values": sorted(set(conflicting_values)),
+                        "incoming": normalized["object"],
+                    }
+                )
+            deduped.append(normalized)
+
+        if conflicts and not allow_overwrite:
+            pending_id = overwrite_id or f"ow_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}_{uuid.uuid4().hex[:8]}"
+            with self._lock:
+                self._pending_memory_overwrites[pending_id] = {
+                    "id": pending_id,
+                    "status": "pending",
+                    "message": message,
+                    "actor": actor,
+                    "session_id": session_id,
+                    "created_at": self._now_iso(),
+                    "conflicts": conflicts,
+                    "extracted": extracted,
+                }
+            return {
+                "mode": "teach",
+                "status": "overwrite_confirmation_required",
+                "message": message,
+                "requires_overwrite_confirmation": True,
+                "overwrite_id": pending_id,
+                "stored_facts": [],
+                "stored_count": 0,
+                "deduplicated_count": len(duplicates),
+                "skipped_items": [],
+                "conflicts": conflicts,
+                "notes": notes or "Conflict detected. Confirm overwrite to continue.",
+                "aliases": aliases,
+                "topics": topics,
+                "session_id": session_id,
+                "actor": actor,
+                "timestamp_utc": self._now_iso(),
+            }
+
+        overwrite_keys = {(item["subject"].casefold(), item["predicate"].casefold()) for item in deduped}
+        if conflicts and allow_overwrite and overwrite_keys:
+            facts = [
+                row
+                for row in facts
+                if not (
+                    isinstance(row, dict)
+                    and (str(row.get("subject", "")).casefold(), str(row.get("predicate", "")).casefold()) in overwrite_keys
+                )
+            ]
+
+        now = self._now_iso()
+        stored_facts: list[dict[str, Any]] = []
+        alias_values = [str(item.get("alias", "")).strip() for item in aliases if isinstance(item, dict)]
+        alias_values = [item for item in alias_values if item]
+        for triple in deduped:
+            stored = {
+                "id": uuid.uuid4().hex,
+                "subject": triple["subject"],
+                "predicate": triple["predicate"],
+                "object": triple["object"],
+                "source": "user",
+                "confidence": 1.0,
+                "timestamp": now,
+                "last_updated": now,
+                "notes": notes,
+                "aliases": alias_values,
+                "session_id": session_id,
+                "provenance": {"source": "user", "actor": actor, "last_updated": now},
+            }
+            facts.append(stored)
+            stored_facts.append(stored)
+
+        max_entries = 2000
+        payload["facts"] = facts[-max_entries:]
+        self._write_memory_payload(payload)
+
+        return {
+            "mode": "teach",
+            "status": "stored",
+            "message": message,
+            "requires_confirmation": False,
+            "requires_overwrite_confirmation": False,
+            "overwrite_id": overwrite_id,
+            "stored_facts": stored_facts,
+            "stored_count": len(stored_facts),
+            "deduplicated_count": len(duplicates),
+            "skipped_items": [],
+            "conflicts": conflicts,
+            "notes": notes,
+            "aliases": aliases,
+            "topics": topics,
+            "session_id": session_id,
+            "actor": actor,
+            "timestamp_utc": now,
+            "legacy_mode": bool(legacy_mode),
+        }
+
+    def _ask_memory_first(self, question: str, *, actor: str, session_id: str) -> dict[str, Any]:
+        payload = self._read_memory_payload()
+        facts = payload.get("facts", []) if isinstance(payload.get("facts"), list) else []
+        question_tokens = set(self._tokenize_text(question))
+
+        fact_scores: list[tuple[int, dict[str, Any]]] = []
+        for row in facts:
+            if not isinstance(row, dict):
+                continue
+            text = f"{row.get('subject', '')} {row.get('predicate', '')} {row.get('object', '')}"
+            fact_tokens = set(self._tokenize_text(text))
+            score = len(question_tokens & fact_tokens) if question_tokens else 1
+            if score > 0:
+                fact_scores.append((score, row))
+        fact_scores.sort(key=lambda item: (item[0], str(item[1].get("timestamp", ""))), reverse=True)
+        matched_facts = [row for _, row in fact_scores[:8]]
+
+        conversation_rows = self._read_jsonl(self._conversations_file, limit=2000)
+        conversation_scores: list[tuple[int, dict[str, Any]]] = []
+        for row in conversation_rows:
+            if not isinstance(row, dict) or str(row.get("role", "")) != "user":
+                continue
+            if session_id and str(row.get("session_id", "")) != session_id:
+                continue
+            text = str(row.get("text", ""))
+            tokens = set(self._tokenize_text(text))
+            score = len(question_tokens & tokens) if question_tokens else 0
+            if score > 0:
+                conversation_scores.append((score, row))
+        conversation_scores.sort(key=lambda item: (item[0], str(item[1].get("timestamp_utc", ""))), reverse=True)
+        matched_conversations = [row for _, row in conversation_scores[:5]]
+
+        answer = MEMORY_UNKNOWN_ANSWER
+        lowered = question.casefold()
+        father_fact = None
+        for row in matched_facts:
+            if (
+                str(row.get("subject", "")).casefold() == "david"
+                and str(row.get("predicate", "")).casefold() == "father_name"
+            ):
+                father_fact = row
+                break
+        if father_fact:
+            answer = f"You told me earlier that David's symbolic father name is {father_fact.get('object', '')}."
+        elif matched_facts:
+            first = matched_facts[0]
+            answer = (
+                f"You told me earlier: {first.get('subject', 'unknown')} "
+                f"{str(first.get('predicate', 'fact')).replace('_', ' ')} is {first.get('object', 'unknown')}."
+            )
+        elif matched_conversations:
+            excerpt = str(matched_conversations[0].get("text", "")).strip()
+            answer = f"You told me earlier: {excerpt[:220]}"
+
+        if "father" in lowered or "mother" in lowered or "dad" in lowered:
+            answer = f"{answer} As software, I treat family labels as symbolic memory facts."
+
+        citations: list[dict[str, Any]] = []
+        for fact in matched_facts[:5]:
+            citations.append(
+                {
+                    "type": "fact",
+                    "id": fact.get("id", ""),
+                    "subject": fact.get("subject", ""),
+                    "predicate": fact.get("predicate", ""),
+                    "object": fact.get("object", ""),
+                    "timestamp": fact.get("timestamp", ""),
+                }
+            )
+        for convo in matched_conversations[:3]:
+            citations.append(
+                {
+                    "type": "conversation",
+                    "id": convo.get("message_id", ""),
+                    "session_id": convo.get("session_id", ""),
+                    "excerpt": str(convo.get("text", ""))[:180],
+                    "timestamp": convo.get("timestamp_utc", ""),
+                }
+            )
+
+        return {
+            "mode": "ask",
+            "status": "answered",
+            "question": question,
+            "answer": answer,
+            "matched_facts": matched_facts,
+            "matched_count": len(matched_facts),
+            "matched_conversations": matched_conversations,
+            "conversation_match_count": len(matched_conversations),
+            "citations": citations,
+            "used_memory": {"facts": matched_facts[:5], "conversations": matched_conversations[:3]},
+            "session_id": session_id,
+            "actor": actor,
+            "timestamp_utc": self._now_iso(),
+        }
 
     def _execute_run(
         self,
@@ -1243,7 +2061,9 @@ class DavidControlCenter:
             workspace_target_type=workspace_target_type,
         )
         initial_snapshot = workspace.snapshot()
-        memory_context = memory.render_context(effective_goal)
+        base_memory_context = memory.render_context(effective_goal)
+        log_context = self._build_goal_log_context()
+        memory_context = self._compose_goal_context(base_memory_context, log_context)
         plan = planner.create_plan(
             goal=effective_goal,
             workspace_snapshot=initial_snapshot,
@@ -1260,6 +2080,7 @@ class DavidControlCenter:
                 "coder_model_used": coder_model_used,
                 "critic_model_used": critic_model_used,
                 "tdd_mode": tdd_mode,
+                "logs_context_included": bool(log_context.strip()),
                 **project_meta,
             },
         )
@@ -1322,7 +2143,9 @@ class DavidControlCenter:
             )
 
             workspace_snapshot = workspace.snapshot()
-            memory_context = memory.render_context(effective_goal)
+            base_memory_context = memory.render_context(effective_goal)
+            log_context = self._build_goal_log_context()
+            memory_context = self._compose_goal_context(base_memory_context, log_context)
             coder_output = coder.propose(
                 goal=effective_goal,
                 plan_json=plan.to_dict(),

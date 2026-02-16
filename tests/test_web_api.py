@@ -14,6 +14,8 @@ class FakeCenter:
     def __init__(self) -> None:
         self._subscribers = {}
         self._facts = []
+        self._conversations = []
+        self._pending_overwrites = {}
         self._settings = {
             "safe_mode": False,
             "rate_limit_seconds": 3,
@@ -306,6 +308,149 @@ class FakeCenter:
             "actor": actor,
         }
 
+    def chat_message(self, message, intent="", confirm_save=False, session_id="", actor="web_ui"):
+        text = str(message).strip()
+        session = str(session_id or "session_test_1")
+        chosen = str(intent or "").strip().lower()
+        if chosen not in {"ask", "teach", "goal", "chat"}:
+            if text.endswith("?") or text.lower().startswith(("who", "what", "how", "when", "where", "why")):
+                chosen = "ask"
+            else:
+                chosen = "chat"
+
+        user_turn = {
+            "message_id": f"user_{len(self._conversations) + 1}",
+            "session_id": session,
+            "role": "user",
+            "text": text,
+            "intent": chosen,
+            "timestamp_utc": "2026-01-01T00:00:00+00:00",
+        }
+        self._conversations.append(user_turn)
+
+        if chosen == "ask":
+            response = self.ask_memory(text, actor=actor)
+            assistant_text = str(response.get("answer", ""))
+            kind = "ask"
+        elif chosen == "teach":
+            if not confirm_save:
+                response = {
+                    "mode": "teach",
+                    "status": "confirmation_required",
+                    "message": text,
+                    "triples": [{"subject": "David", "predicate": "father_name", "object": "Charm Thiekshana"}],
+                    "requires_confirmation": True,
+                    "session_id": session,
+                }
+                assistant_text = "Teach confirmation required."
+                kind = "teach"
+            else:
+                teach_payload = self.teach_memory(text, confirm_conflict=False, actor=actor)
+                if teach_payload.get("status") == "conflict":
+                    overwrite_id = f"ow_{len(self._pending_overwrites) + 1}"
+                    self._pending_overwrites[overwrite_id] = {"message": text}
+                    response = {
+                        "mode": "teach",
+                        "status": "overwrite_confirmation_required",
+                        "message": text,
+                        "overwrite_id": overwrite_id,
+                        "conflicts": teach_payload.get("conflicts", []),
+                        "session_id": session,
+                    }
+                    assistant_text = "Overwrite confirmation required."
+                else:
+                    response = teach_payload
+                    response["session_id"] = session
+                    assistant_text = f"Saved {response.get('stored_count', 0)} facts."
+                kind = "teach"
+        elif chosen == "goal":
+            ok, run = self.start_run({"command": f"/goal {text}"})
+            response = {
+                "mode": "goal",
+                "status": "queued" if ok else "error",
+                "run": run,
+                "session_id": session,
+            }
+            assistant_text = "Goal queued." if ok else "Goal failed."
+            kind = "system"
+        else:
+            response = {"mode": "chat", "status": "ok", "reply": "General chat response.", "session_id": session}
+            assistant_text = "General chat response."
+            kind = "system"
+
+        assistant_turn = {
+            "message_id": f"assistant_{len(self._conversations) + 1}",
+            "session_id": session,
+            "role": "assistant",
+            "text": assistant_text,
+            "intent": chosen,
+            "timestamp_utc": "2026-01-01T00:00:00+00:00",
+        }
+        self._conversations.append(assistant_turn)
+
+        return {
+            "mode": "chat",
+            "message": text,
+            "detected_intent": chosen,
+            "selected_intent": chosen,
+            "confirm_save": bool(confirm_save),
+            "session_id": session,
+            "user_turn": user_turn,
+            "assistant_turn": assistant_turn,
+            "response": response,
+            "kind": kind,
+            "timestamp_utc": "2026-01-01T00:00:00+00:00",
+        }
+
+    def memory_facts(self, query="", limit=500):
+        q = str(query or "").lower().strip()
+        facts = list(self._facts)
+        if q:
+            facts = [row for row in facts if q in f"{row.get('subject', '')} {row.get('predicate', '')} {row.get('object', '')}".lower()]
+        conflicts = self.memory_snapshot().get("conflicts", [])
+        return {"facts": facts[:limit], "conflicts": conflicts, "conflict_count": len(conflicts), "total": len(facts)}
+
+    def memory_conversations(self, session_id="", limit=500):
+        sid = str(session_id or "").strip()
+        rows = list(self._conversations)
+        if sid:
+            rows = [row for row in rows if str(row.get("session_id", "")) == sid]
+        return {"conversations": rows[:limit], "session_id": sid, "total": len(rows)}
+
+    def chat_sessions(self, limit=120):
+        sessions = {}
+        for row in self._conversations:
+            sid = str(row.get("session_id", "")).strip()
+            if not sid:
+                continue
+            entry = sessions.setdefault(
+                sid,
+                {
+                    "session_id": sid,
+                    "started_at": row.get("timestamp_utc", ""),
+                    "last_message_at": row.get("timestamp_utc", ""),
+                    "message_count": 0,
+                    "preview": "",
+                },
+            )
+            entry["message_count"] += 1
+            if str(row.get("role")) == "user" and row.get("text"):
+                entry["preview"] = str(row.get("text"))
+            if str(row.get("timestamp_utc", "")) > str(entry.get("last_message_at", "")):
+                entry["last_message_at"] = row.get("timestamp_utc", "")
+        return list(sessions.values())[:limit]
+
+    def confirm_memory_overwrite(self, overwrite_id, decision="approve", actor="web_ui"):
+        oid = str(overwrite_id).strip()
+        if oid not in self._pending_overwrites:
+            return False, {"error": "Overwrite request not found."}
+        if str(decision).lower() != "approve":
+            return True, {"mode": "teach", "status": "rejected", "overwrite_id": oid}
+        pending = self._pending_overwrites.pop(oid)
+        stored = self.teach_memory(pending.get("message", ""), confirm_conflict=True, actor=actor)
+        stored["overwrite_id"] = oid
+        return True, stored
+
     def telemetry_tail(self, limit=100):
         return {"events": [], "metrics": [], "summary": {}, "regressions": []}
 
@@ -483,3 +628,60 @@ def test_teach_endpoint_conflict_confirmation(client):
     confirmed_payload = confirmed.get_json()["data"]
     assert confirmed_payload["status"] == "stored"
     assert confirmed_payload["confirmed_conflict"] is True
+
+
+def test_chat_endpoint_requires_confirm_for_teach(client):
+    response = client.post(
+        "/api/chat",
+        json={"message": "Hi David I am your dad. My Name is Charm Thiekshana.", "intent": "teach", "confirm_save": False},
+    )
+    assert response.status_code == 200
+    payload = response.get_json()["data"]
+    assert payload["response"]["status"] == "confirmation_required"
+
+    facts = client.get("/api/memory/facts")
+    assert facts.status_code == 200
+    assert facts.get_json()["data"]["total"] == 0
+
+
+def test_chat_teach_confirm_and_overwrite_flow(client):
+    first = client.post(
+        "/api/chat",
+        json={"message": "Hi David I am your dad. My Name is Charm Thiekshana.", "intent": "teach", "confirm_save": True},
+    )
+    assert first.status_code == 200
+    assert first.get_json()["data"]["response"]["status"] == "stored"
+
+    second = client.post(
+        "/api/chat",
+        json={"message": "Hi David I am your dad. My Name is Bob.", "intent": "teach", "confirm_save": True},
+    )
+    assert second.status_code == 200
+    second_payload = second.get_json()["data"]["response"]
+    assert second_payload["status"] == "overwrite_confirmation_required"
+    overwrite_id = second_payload["overwrite_id"]
+
+    confirm = client.post(
+        "/api/memory/confirm_overwrite",
+        json={"overwrite_id": overwrite_id, "decision": "approve"},
+    )
+    assert confirm.status_code == 200
+    confirm_payload = confirm.get_json()["data"]
+    assert confirm_payload["status"] == "stored"
+
+
+def test_memory_conversations_and_sessions_endpoints(client):
+    chat = client.post("/api/chat", json={"message": "Who is your father?", "intent": "ask"})
+    assert chat.status_code == 200
+    session_id = chat.get_json()["data"]["session_id"]
+
+    conv = client.get(f"/api/memory/conversations?session_id={session_id}")
+    assert conv.status_code == 200
+    conv_payload = conv.get_json()["data"]
+    assert conv_payload["session_id"] == session_id
+    assert conv_payload["total"] >= 2
+
+    sessions = client.get("/api/chat/sessions")
+    assert sessions.status_code == 200
+    session_rows = sessions.get_json()["data"]
+    assert any(str(item.get("session_id")) == session_id for item in session_rows)

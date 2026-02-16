@@ -76,7 +76,9 @@ class DavidAgent:
         )
 
         initial_snapshot = workspace.snapshot()
-        memory_context = self._memory.render_context(goal)
+        base_memory_context = self._memory.render_context(goal)
+        log_context = self._build_goal_log_context()
+        memory_context = self._compose_goal_context(base_memory_context, log_context)
         plan = self._planner.create_plan(
             goal=goal,
             workspace_snapshot=initial_snapshot,
@@ -93,6 +95,7 @@ class DavidAgent:
                 "coder_model_used": self._config.coder_model,
                 "critic_model_used": self._config.critic_model,
                 "tdd_mode": tdd_mode,
+                "logs_context_included": bool(log_context.strip()),
                 **project_meta,
             },
         )
@@ -101,7 +104,9 @@ class DavidAgent:
         for iteration in range(1, iteration_limit + 1):
             started = time.perf_counter()
             workspace_snapshot = workspace.snapshot()
-            memory_context = self._memory.render_context(goal)
+            base_memory_context = self._memory.render_context(goal)
+            log_context = self._build_goal_log_context()
+            memory_context = self._compose_goal_context(base_memory_context, log_context)
             tdd_phase = "implementation" if (tdd_mode and tdd_red_phase_complete) else ("tests_first" if tdd_mode else "normal")
 
             coder_output = self._coder.propose(
@@ -485,6 +490,83 @@ class DavidAgent:
                 commands_passed=commands_passed,
             )
         )
+
+    @staticmethod
+    def _contains_sensitive_log_text(text: str) -> bool:
+        lowered = str(text or "").casefold()
+        return any(
+            marker in lowered
+            for marker in (
+                "password",
+                "passphrase",
+                "api key",
+                "api_key",
+                "token",
+                "secret",
+                "private key",
+                "ssh key",
+                "ssn",
+                "social security",
+                "credit card",
+                "cvv",
+                "bank account",
+                "otp",
+            )
+        )
+
+    @classmethod
+    def _compose_goal_context(cls, memory_context: str, log_context: str) -> str:
+        base = str(memory_context or "").strip() or "No prior lessons available."
+        logs = str(log_context or "").strip()
+        if not logs:
+            return base
+        return (
+            f"{base}\n\nRecent tail logs context:\n"
+            f"{logs}\n\n"
+            "Use logs to diagnose failures and prioritize minimal fixes related to observed errors."
+        ).strip()
+
+    def _build_goal_log_context(self, *, limit_lines: int = 160, max_chars: int = 7000) -> str:
+        files = [
+            self._config.logs_dir / "telemetry.jsonl",
+            self._config.logs_dir / "web_control_center.log",
+        ]
+        critical_markers = ("error", "traceback", "exception", "failed", "failure", "timeout")
+        selected: list[str] = []
+        seen: set[str] = set()
+
+        def _append(prefix: str, line: str) -> None:
+            clean = str(line).strip()
+            if not clean or self._contains_sensitive_log_text(clean):
+                return
+            row = f"[{prefix}] {clean}"
+            if row in seen:
+                return
+            seen.add(row)
+            selected.append(row)
+
+        for path in files:
+            if not path.exists():
+                continue
+            try:
+                rows = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                continue
+            name = path.name
+            tail = rows[-max(30, min(limit_lines, 500)) :]
+            for row in tail:
+                lowered = str(row).casefold()
+                if any(marker in lowered for marker in critical_markers):
+                    _append(name, row)
+            for row in tail[-40:]:
+                _append(name, row)
+
+        if not selected:
+            return ""
+        text = "\n".join(selected[-max(20, min(limit_lines, 220)) :])
+        if len(text) > max_chars:
+            text = f"...[truncated]\n{text[-max_chars:]}"
+        return text
 
     @staticmethod
     def _render_feedback(critic: CriticOutput, results: list[ExecutionResult]) -> str:

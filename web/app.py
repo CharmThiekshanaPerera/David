@@ -48,6 +48,8 @@ def create_app(
                 "/api/settings",
                 "/api/ask",
                 "/api/teach",
+                "/api/chat",
+                "/api/memory/confirm_overwrite",
             }
             if request.path.startswith("/api/approval/") or request.path.startswith("/api/run/"):
                 protected.add(request.path)
@@ -105,6 +107,28 @@ def create_app(
             return _json_error(str(exc), status=400)
         return jsonify({"ok": True, "data": data})
 
+    @app.post("/api/chat")
+    def api_chat():
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return _json_error("JSON body must be an object.")
+        message = str(payload.get("message", payload.get("text", ""))).strip()
+        intent = str(payload.get("intent", "")).strip().lower()
+        actor = str(payload.get("actor", "web_ui")).strip() or "web_ui"
+        session_id = str(payload.get("session_id", "")).strip()
+        confirm_save = bool(payload.get("confirm_save", False))
+        try:
+            data = center.chat_message(
+                message,
+                intent=intent,
+                confirm_save=confirm_save,
+                session_id=session_id,
+                actor=actor,
+            )
+        except ValueError as exc:
+            return _json_error(str(exc), status=400)
+        return jsonify({"ok": True, "data": data})
+
     @app.post("/api/teach")
     def api_teach():
         payload = request.get_json(silent=True) or {}
@@ -117,6 +141,19 @@ def create_app(
             data = center.teach_memory(message, confirm_conflict=confirm_conflict, actor=actor)
         except ValueError as exc:
             return _json_error(str(exc), status=400)
+        return jsonify({"ok": True, "data": data})
+
+    @app.post("/api/memory/confirm_overwrite")
+    def api_memory_confirm_overwrite():
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return _json_error("JSON body must be an object.")
+        overwrite_id = str(payload.get("overwrite_id", payload.get("id", ""))).strip()
+        decision = str(payload.get("decision", "approve")).strip().lower()
+        actor = str(payload.get("actor", "web_ui")).strip() or "web_ui"
+        ok, data = center.confirm_memory_overwrite(overwrite_id, decision=decision, actor=actor)
+        if not ok:
+            return _json_error(str(data.get("error", "Failed to confirm overwrite.")), status=409)
         return jsonify({"ok": True, "data": data})
 
     @app.post("/api/stop")
@@ -266,6 +303,32 @@ def create_app(
     @app.get("/api/memory")
     def api_memory():
         return jsonify({"ok": True, "data": center.memory_snapshot()})
+
+    @app.get("/api/memory/facts")
+    def api_memory_facts():
+        query = str(request.args.get("query", ""))
+        try:
+            limit = int(request.args.get("limit", "500"))
+        except ValueError:
+            limit = 500
+        return jsonify({"ok": True, "data": center.memory_facts(query=query, limit=limit)})
+
+    @app.get("/api/memory/conversations")
+    def api_memory_conversations():
+        session_id = str(request.args.get("session_id", ""))
+        try:
+            limit = int(request.args.get("limit", "500"))
+        except ValueError:
+            limit = 500
+        return jsonify({"ok": True, "data": center.memory_conversations(session_id=session_id, limit=limit)})
+
+    @app.get("/api/chat/sessions")
+    def api_chat_sessions():
+        try:
+            limit = int(request.args.get("limit", "120"))
+        except ValueError:
+            limit = 120
+        return jsonify({"ok": True, "data": center.chat_sessions(limit=limit)})
 
     @app.get("/api/telemetry/tail")
     def api_telemetry_tail():

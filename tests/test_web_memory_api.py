@@ -120,3 +120,100 @@ def test_api_teach_conflict_requires_confirmation(memory_client) -> None:
     ask_after = client.post("/api/ask", json={"question": "Who is your father?"})
     assert ask_after.status_code == 200
     assert "Bob" in ask_after.get_json()["data"]["answer"]
+
+
+def test_api_chat_teach_requires_confirm_save(memory_client) -> None:
+    client, config = memory_client
+    chat = client.post(
+        "/api/chat",
+        json={"message": "Hi David I am your dad. My Name is Charm Thiekshana.", "intent": "teach", "confirm_save": False},
+    )
+    assert chat.status_code == 200
+    payload = chat.get_json()["data"]
+    assert payload["response"]["status"] == "confirmation_required"
+
+    memory_raw = json.loads(config.memory_file.read_text(encoding="utf-8"))
+    facts = memory_raw.get("facts", [])
+    assert not any(str(item.get("predicate", "")).lower() == "father_name" for item in facts)
+
+
+def test_api_chat_teach_deduplicates_facts(memory_client) -> None:
+    client, config = memory_client
+
+    first = client.post(
+        "/api/chat",
+        json={"message": "Hi David I am your dad. My Name is Charm Thiekshana.", "intent": "teach", "confirm_save": True},
+    )
+    assert first.status_code == 200
+    assert first.get_json()["data"]["response"]["status"] == "stored"
+
+    second = client.post(
+        "/api/chat",
+        json={"message": "Hi David I am your dad. My Name is Charm Thiekshana.", "intent": "teach", "confirm_save": True},
+    )
+    assert second.status_code == 200
+    second_payload = second.get_json()["data"]["response"]
+    assert second_payload["status"] == "stored"
+    assert int(second_payload.get("stored_count", 0)) == 0
+
+    memory_raw = json.loads(config.memory_file.read_text(encoding="utf-8"))
+    father_facts = [
+        item
+        for item in memory_raw.get("facts", [])
+        if str(item.get("subject", "")).lower() == "david" and str(item.get("predicate", "")).lower() == "father_name"
+    ]
+    assert len(father_facts) == 1
+
+
+def test_api_chat_sessions_and_conversations(memory_client) -> None:
+    client, _config = memory_client
+    session_id = "session_memory_test"
+
+    chat = client.post(
+        "/api/chat",
+        json={"message": "Who is your father?", "intent": "ask", "session_id": session_id},
+    )
+    assert chat.status_code == 200
+
+    conversations = client.get(f"/api/memory/conversations?session_id={session_id}")
+    assert conversations.status_code == 200
+    rows = conversations.get_json()["data"]["conversations"]
+    assert len(rows) >= 2
+    assert all(str(item.get("session_id", "")) == session_id for item in rows)
+
+    sessions = client.get("/api/chat/sessions")
+    assert sessions.status_code == 200
+    session_rows = sessions.get_json()["data"]
+    assert any(str(item.get("session_id", "")) == session_id for item in session_rows)
+
+
+def test_api_chat_ask_memory_first_with_citations(memory_client) -> None:
+    client, _config = memory_client
+    teach = client.post(
+        "/api/chat",
+        json={"message": "Hi David I am your dad. My Name is Charm Thiekshana.", "intent": "teach", "confirm_save": True},
+    )
+    assert teach.status_code == 200
+
+    ask = client.post("/api/chat", json={"message": "Who is your father?", "intent": "ask"})
+    assert ask.status_code == 200
+    response = ask.get_json()["data"]["response"]
+    assert "Charm Thiekshana" in str(response.get("answer", ""))
+    citations = response.get("citations", [])
+    assert isinstance(citations, list)
+    assert any(str(item.get("type", "")) == "fact" for item in citations)
+
+
+def test_api_chat_intent_classification(memory_client) -> None:
+    client, _config = memory_client
+
+    ask_like = client.post("/api/chat", json={"message": "Who is your father?"})
+    assert ask_like.status_code == 200
+    ask_payload = ask_like.get_json()["data"]
+    assert ask_payload["detected_intent"] == "ask"
+    assert ask_payload["selected_intent"] == "ask"
+
+    teach_like = client.post("/api/chat", json={"message": "Remember this: my name is Charm Thiekshana"})
+    assert teach_like.status_code == 200
+    teach_payload = teach_like.get_json()["data"]
+    assert teach_payload["detected_intent"] == "teach"

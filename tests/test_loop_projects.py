@@ -147,6 +147,92 @@ def test_loop_goal_writes_inside_project_folder(monkeypatch: pytest.MonkeyPatch,
     assert payload["project_created_new"] is True
 
 
+def test_loop_includes_tail_logs_context(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    (config.logs_dir / "web_control_center.log").write_text(
+        "WARN stale cache\nERROR runtime failure: missing dependency\n",
+        encoding="utf-8",
+    )
+    captured: dict[str, str] = {"planner": "", "coder": ""}
+
+    class FakePlanner:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def create_plan(self, goal, workspace_snapshot, memory_context, tdd_mode=False):
+            captured["planner"] = str(memory_context)
+            return PlanOutput(
+                goal=goal,
+                steps=[PlanStep(id="S1", title="Plan", details="Do work", success_check="pytest")],
+                success_criteria=["pytest passes"],
+            )
+
+    class FakeCoder:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def propose(
+            self,
+            goal,
+            plan_json,
+            workspace_snapshot,
+            memory_context,
+            critic_feedback,
+            iteration,
+            tdd_mode=False,
+            tdd_phase="normal",
+        ):
+            captured["coder"] = str(memory_context)
+            return CoderOutput(
+                summary="add implementation",
+                edits=[CodeEdit(path="src/app.py", content="def run():\n    return 'ok'\n", reason="implement")],
+                commands=["pytest -q"],
+                done=True,
+                done_reason="done",
+            )
+
+    class FakeCritic:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def review(self, goal, plan_json, coder_json, execution_results, tdd_mode=False, tdd_red_phase_complete=False):
+            return CriticOutput(
+                status="success",
+                analysis="done",
+                next_actions=["finish"],
+                lessons=[LessonProposal(lesson="keep changes focused", tags=["quality"])],
+            )
+
+    class FakeExecutor:
+        def __init__(self, workspace_dir, timeout_sec, max_output_chars):
+            self.workspace_dir = workspace_dir
+
+        def run(self, command_specs):
+            return [
+                ExecutionResult(
+                    command=spec.raw,
+                    returncode=0,
+                    stdout="ok",
+                    stderr="",
+                    timed_out=False,
+                    duration_sec=0.01,
+                )
+                for spec in command_specs
+            ]
+
+    monkeypatch.setattr("agent.loop.Planner", FakePlanner)
+    monkeypatch.setattr("agent.loop.Coder", FakeCoder)
+    monkeypatch.setattr("agent.loop.Critic", FakeCritic)
+    monkeypatch.setattr("agent.loop.RestrictedExecutor", FakeExecutor)
+
+    agent = DavidAgent(config)
+    summary = agent.run("Fix failures from logs")
+    assert summary.success is True
+    assert "Recent tail logs context:" in captured["planner"]
+    assert "runtime failure: missing dependency" in captured["planner"]
+    assert "Recent tail logs context:" in captured["coder"]
+
+
 def test_loop_tdd_mode_places_tests_under_project(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     base = _make_config(tmp_path)
     config = replace(base, tdd_mode=True)

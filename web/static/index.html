@@ -1,3 +1,4 @@
+<!-- web/static/index.html -->
 <!doctype html>
 <html lang="en" data-theme="dark">
   <head>
@@ -337,7 +338,7 @@
       <section id="tab-cli" class="tab-panel">
         <article class="card cli-shell">
           <h2>Memory & Chat</h2>
-          <p class="muted">Natural text auto-maps to <code>/ask</code> or <code>/teach</code>. You can still send explicit <code>/goal</code>, <code>/ask</code>, or <code>/teach</code> commands.</p>
+          <p class="muted">Advanced Chat supports natural teach/ask/goal/chat with explicit confirmation for memory writes. CLI mirror commands <code>/ask</code>, <code>/teach</code>, and <code>/goal</code> still work.</p>
 
           <div class="row cli-controls">
             <div class="segmented" role="group" aria-label="Chat intent mode">
@@ -345,40 +346,64 @@
               <button id="chatModeAskBtn" type="button" class="segment-btn" aria-pressed="false">Ask</button>
               <button id="chatModeTeachBtn" type="button" class="segment-btn" aria-pressed="false">Teach</button>
             </div>
-            <label class="field">
-              Goal template (for /goal)
-              <select id="cliTemplateSelect">
-                <option value="">No template</option>
-              </select>
-            </label>
-            <label class="check"><input id="cliTddMode" type="checkbox" /> TDD mode</label>
+            <label class="check"><input id="advancedChatToggle" type="checkbox" checked /> Advanced Chat mode</label>
+            <label class="check"><input id="chatConfirmSave" type="checkbox" /> Confirm Teach save</label>
+          </div>
+
+          <div class="row cli-intent-row">
+            <div id="chatIntentPreview" class="muted">I think this is: Chat</div>
+            <div class="segmented" role="group" aria-label="Advanced intent override">
+              <button id="chatIntentAskBtn" type="button" class="segment-btn">Ask</button>
+              <button id="chatIntentTeachBtn" type="button" class="segment-btn">Teach</button>
+              <button id="chatIntentGoalBtn" type="button" class="segment-btn">Goal</button>
+              <button id="chatIntentChatBtn" type="button" class="segment-btn active">Chat</button>
+            </div>
           </div>
 
           <div class="memory-chat-layout">
             <section class="memory-chat-primary">
               <div class="row memory-chat-input-row">
-                <input id="memoryChatInput" type="text" placeholder="Ask a question or teach a fact..." />
+                <input id="memoryChatInput" type="text" placeholder="Type naturally: ask, teach, goal, or chat..." />
                 <button id="cliSendBtn">Send</button>
               </div>
               <div class="row memory-chat-action-row">
-                <button id="memoryConfirmTeachBtn" class="ghost hidden" type="button">Confirm Conflicting Teach</button>
+                <button id="memoryConfirmTeachBtn" class="ghost hidden" type="button">Confirm Overwrite</button>
+                <button id="chatNewSessionBtn" class="ghost" type="button">New Session</button>
                 <button id="memoryClearHistoryBtn" class="ghost" type="button">Clear Chat</button>
               </div>
 
-              <h3>Conversation</h3>
-              <div id="memoryChatHistory" class="chat-history"></div>
+              <div class="chat-main-grid">
+                <aside class="chat-sessions">
+                  <h3>Sessions</h3>
+                  <div id="chatSessionSummary" class="muted">No active session</div>
+                  <div id="chatSessionsList" class="stack"></div>
+                </aside>
+                <section class="chat-thread">
+                  <h3>Conversation</h3>
+                  <div id="memoryChatHistory" class="chat-history"></div>
+                </section>
+              </div>
 
               <h3>Command Output</h3>
               <pre id="cliOutput" class="code"></pre>
             </section>
 
             <aside class="memory-chat-secondary">
-              <h3>Memory Viewer</h3>
+              <h3>Memory Panel</h3>
               <div class="row memory-chat-search-row">
-                <input id="memoryChatSearch" type="text" placeholder="Search facts (subject, predicate, object)" />
+                <input id="memoryChatSearch" type="text" placeholder="Search facts, conversations, lessons..." />
                 <button id="memoryChatRefreshBtn" class="ghost" type="button">Refresh Memory</button>
               </div>
+              <div class="segmented" role="group" aria-label="Memory tabs">
+                <button id="memoryPanelFactsBtn" type="button" class="segment-btn active">Facts</button>
+                <button id="memoryPanelConversationsBtn" type="button" class="segment-btn">Conversations</button>
+                <button id="memoryPanelLessonsBtn" type="button" class="segment-btn">Lessons</button>
+              </div>
               <div id="memoryChatFacts" class="stack"></div>
+              <div id="memoryPanelConversations" class="stack hidden"></div>
+              <div id="memoryPanelLessons" class="stack hidden"></div>
+              <h3>Explain why David answered this</h3>
+              <div id="memoryExplainView" class="stack"></div>
 
               <h3>Last Execution Output</h3>
               <div id="cliExecPanel" class="stack"></div>
