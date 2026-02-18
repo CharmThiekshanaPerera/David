@@ -215,6 +215,11 @@ Memory file schema (`memory/long_term.json`) now includes explicit factual memor
 }
 ```
 
+Reflection entries are stored in `lessons` with metadata such as:
+- `"kind": "reflection"`
+- `"source": "reflection_engine"`
+- `"reflection_key": "run:<run_id>"` or `"conversation:<message_id>"`
+
 ## Quick Start (WSL)
 
 > If you already created `.venv` in Windows, create a separate WSL virtual environment because Windows and Linux venvs are not interchangeable.
@@ -334,15 +339,17 @@ http://127.0.0.1:8787
 ### Web tabs
 
 - Dashboard: current status, progress, quick run/stop actions, pending approvals.
+- Dashboard includes a Growth Timeline with milestone drill-down across sessions/projects (lessons, reflections, run outcomes, memory growth, TDD completions, and iterations-until-green trends).
 - Runs: run history, timeline, retry failed runs, explain-failure panel.
 - Diff Viewer: per-iteration workspace patch view.
 - Memory: facts/lessons + memory conflict detector.
 - Telemetry: success/error metrics and iteration-duration chart.
 - Logs: tail view of web + telemetry logs.
 - Settings: safe mode, rate limit, iteration override, risk thresholds, planner/coder/critic model config, default TDD mode, and Companion mode.
-- Memory & Chat: Advanced Chat mode with natural intent detection (`Teach` / `Ask` / `Goal` / `Chat`), confirm-gated memory writes, session history, memory citations, and searchable Facts/Conversations/Lessons tabs.
+- Memory & Chat: Advanced Chat mode with natural intent detection (`Teach` / `Ask` / `Goal` / `Chat`), confirm-gated memory writes, session history, memory citations, and searchable Facts/Conversations/Lessons/Reflections tabs.
 - Companion mode (enabled by default) adds warm memory-first responses for `/ask` and web chat, with transparent AI identity and lesson-aware recall.
 - Goal runs are log-aware: David automatically reads recent tail logs and uses them as extra context when planning/coding fixes.
+- Reflection Engine: after terminal goal runs and meaningful conversations, David appends timestamped reflection lessons (append-only) and reuses them before future goals.
 
 ### Goal templates
 
@@ -372,7 +379,8 @@ Use the `Memory & Chat` tab to interact naturally while keeping memory writes ex
 5. Memory panel has searchable tabs:
    - `Facts` (with conflict indicators, aliases, provenance metadata),
    - `Conversations`,
-   - `Lessons`.
+   - `Lessons`,
+   - `Reflections` (internal learning history, timestamped and preserved).
 6. `Explain why David answered this` shows citations for memory facts/conversation snippets and relevant lessons used in the answer.
 7. Companion behavior safeguards:
    - David stays transparent that he is an AI companion and not a real human child.

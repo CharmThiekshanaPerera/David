@@ -10,6 +10,7 @@ const state = {
   selectedRunDetails: null,
   selectedRunFiles: null,
   telemetry: null,
+  growthData: null,
   settings: null,
   logs: null,
   approvals: [],
@@ -33,6 +34,7 @@ const state = {
     tddMode: false,
   },
   chatMode: "auto",
+  parentTeachingMode: false,
   advancedChatMode: true,
   detectedChatIntent: "chat",
   detectedChatConfidence: 0,
@@ -53,6 +55,7 @@ const state = {
   selectedGoalWorkspacePath: "",
   goalRunScope: "new",
   workspaceTargetsTruncated: false,
+  selectedGrowthMilestoneId: "",
   previewTreeQuery: "",
   previewTreeExpandAll: false,
   theme: localStorage.getItem("dcc_theme") === "light" ? "light" : "dark",
@@ -91,6 +94,10 @@ const el = {
   statusList: document.getElementById("statusList"),
   artifactList: document.getElementById("artifactList"),
   activityFeed: document.getElementById("activityFeed"),
+  growthSummary: document.getElementById("growthSummary"),
+  growthTimeline: document.getElementById("growthTimeline"),
+  growthMilestoneDetails: document.getElementById("growthMilestoneDetails"),
+  growthRefreshBtn: document.getElementById("growthRefreshBtn"),
   previewSummary: document.getElementById("previewSummary"),
   fileTree: document.getElementById("fileTree"),
   filePreview: document.getElementById("filePreview"),
@@ -114,7 +121,9 @@ const el = {
   diffSummary: document.getElementById("diffSummary"),
   diffView: document.getElementById("diffView"),
   factsView: document.getElementById("factsView"),
+  valuesView: document.getElementById("valuesView"),
   lessonsView: document.getElementById("lessonsView"),
+  projectBrainView: document.getElementById("projectBrainView"),
   memoryConflicts: document.getElementById("memoryConflicts"),
   telemetrySummary: document.getElementById("telemetrySummary"),
   durationChart: document.getElementById("durationChart"),
@@ -129,6 +138,7 @@ const el = {
   settingMultiFile: document.getElementById("settingMultiFile"),
   settingPreviewDefault: document.getElementById("settingPreviewDefault"),
   settingCompanionMode: document.getElementById("settingCompanionMode"),
+  settingParentTeachingMode: document.getElementById("settingParentTeachingMode"),
   settingPlannerModel: document.getElementById("settingPlannerModel"),
   settingCoderModel: document.getElementById("settingCoderModel"),
   settingCriticModel: document.getElementById("settingCriticModel"),
@@ -145,6 +155,7 @@ const el = {
   chatModeTeachBtn: document.getElementById("chatModeTeachBtn"),
   advancedChatToggle: document.getElementById("advancedChatToggle"),
   chatConfirmSave: document.getElementById("chatConfirmSave"),
+  parentTeachingMode: document.getElementById("parentTeachingMode"),
   chatIntentPreview: document.getElementById("chatIntentPreview"),
   chatIntentAskBtn: document.getElementById("chatIntentAskBtn"),
   chatIntentTeachBtn: document.getElementById("chatIntentTeachBtn"),
@@ -164,10 +175,14 @@ const el = {
   memoryChatRefreshBtn: document.getElementById("memoryChatRefreshBtn"),
   memoryChatFacts: document.getElementById("memoryChatFacts"),
   memoryPanelFactsBtn: document.getElementById("memoryPanelFactsBtn"),
+  memoryPanelValuesBtn: document.getElementById("memoryPanelValuesBtn"),
   memoryPanelConversationsBtn: document.getElementById("memoryPanelConversationsBtn"),
   memoryPanelLessonsBtn: document.getElementById("memoryPanelLessonsBtn"),
+  memoryPanelReflectionsBtn: document.getElementById("memoryPanelReflectionsBtn"),
+  memoryPanelValues: document.getElementById("memoryPanelValues"),
   memoryPanelConversations: document.getElementById("memoryPanelConversations"),
   memoryPanelLessons: document.getElementById("memoryPanelLessons"),
+  memoryPanelReflections: document.getElementById("memoryPanelReflections"),
   memoryExplainView: document.getElementById("memoryExplainView"),
   cliOutput: document.getElementById("cliOutput"),
   cliExecPanel: document.getElementById("cliExecPanel"),
@@ -1450,7 +1465,11 @@ function renderFileTree(summary) {
 function renderMemory(data) {
   const snapshot = data && typeof data === "object" ? data : {};
   const facts = Array.isArray(snapshot.facts) ? snapshot.facts : [];
-  const lessons = Array.isArray(snapshot.lessons) ? snapshot.lessons : [];
+  const values = Array.isArray(snapshot.values) ? snapshot.values : [];
+  const projects = Array.isArray(snapshot.projects) ? snapshot.projects : [];
+  const lessons = Array.isArray(snapshot.lessons)
+    ? snapshot.lessons.filter((row) => String(row?.kind || "").toLowerCase() !== "reflection")
+    : [];
   const conflicts = Array.isArray(snapshot.conflicts) ? snapshot.conflicts : [];
 
   if (el.factsView) {
@@ -1470,6 +1489,39 @@ function renderMemory(data) {
           .slice(-120)
           .reverse()
           .map((l) => `<div><strong>${escapeHtml(l.lesson || "")}</strong><br/><span class="muted">goal=${escapeHtml(l.goal || "")}</span></div>`)
+          .join("");
+  }
+
+  if (el.valuesView) {
+    el.valuesView.innerHTML = !values.length
+      ? '<p class="muted">No values stored yet.</p>'
+      : values
+          .slice(-120)
+          .reverse()
+          .map(
+            (v) =>
+              `<div><strong>${escapeHtml(v.category_label || v.category || "Values")}</strong>: ${escapeHtml(
+                v.principle || ""
+              )}<br/><span class="muted">${escapeHtml(v.application || "")}</span></div>`
+          )
+          .join("");
+  }
+
+  if (el.projectBrainView) {
+    el.projectBrainView.innerHTML = !projects.length
+      ? '<p class="muted">No project summaries stored yet.</p>'
+      : projects
+          .slice(-160)
+          .reverse()
+          .map((p) => {
+            const weaknesses = Array.isArray(p.known_weaknesses) ? p.known_weaknesses : [];
+            const firstWeakness = weaknesses.length ? weaknesses[0] : "No major weaknesses recorded yet.";
+            return `<div><strong>${escapeHtml(p.project_slug || p.project_relative_path || "project")}</strong><br/><span class="muted">${escapeHtml(
+              p.project_relative_path || p.project_path || "-"
+            )}</span><br/>${escapeHtml(p.architecture_summary || "-")}<br/><span class="muted">Testing: ${escapeHtml(
+              p.testing_approach || "-"
+            )}</span><br/><span class="muted">Weakness: ${escapeHtml(firstWeakness)}</span></div>`;
+          })
           .join("");
   }
 
@@ -1553,7 +1605,9 @@ function renderMemoryConversationsPanel() {
 
 function renderMemoryLessonsPanel() {
   if (!el.memoryPanelLessons) return;
-  const lessons = Array.isArray(state.memoryData?.lessons) ? state.memoryData.lessons : [];
+  const lessons = Array.isArray(state.memoryData?.lessons)
+    ? state.memoryData.lessons.filter((row) => String(row?.kind || "").toLowerCase() !== "reflection")
+    : [];
   const query = (el.memoryChatSearch?.value || "").trim().toLowerCase();
   const filtered = lessons.filter((row) => {
     if (!query) return true;
@@ -1572,6 +1626,59 @@ function renderMemoryLessonsPanel() {
         <div><strong>${escapeHtml(row.lesson || "")}</strong></div>
         <div><span class="muted">Goal:</span> ${escapeHtml(row.goal || "-")}</div>
         <div><span class="muted">Tags:</span> ${escapeHtml((row.tags || []).join(", ") || "-")}</div>
+      </div>`
+    )
+    .join("");
+}
+
+function renderMemoryValuesPanel() {
+  if (!el.memoryPanelValues) return;
+  const values = Array.isArray(state.memoryData?.values) ? state.memoryData.values : [];
+  const query = (el.memoryChatSearch?.value || "").trim().toLowerCase();
+  const filtered = values.filter((row) => {
+    if (!query) return true;
+    const text = `${row.category || ""} ${row.category_label || ""} ${row.principle || ""} ${row.application || ""}`.toLowerCase();
+    return text.includes(query);
+  });
+  if (!filtered.length) {
+    el.memoryPanelValues.innerHTML = '<p class="muted">No values matched your search.</p>';
+    return;
+  }
+  el.memoryPanelValues.innerHTML = filtered
+    .slice(-160)
+    .reverse()
+    .map(
+      (row) => `<div class="memory-fact-row">
+        <div><strong>${escapeHtml(row.category_label || row.category || "Values")}</strong></div>
+        <div><span class="muted">Principle:</span> ${escapeHtml(row.principle || "-")}</div>
+        <div><span class="muted">Application:</span> ${escapeHtml(row.application || "-")}</div>
+        <div><span class="muted">When:</span> ${escapeHtml(fmtDate(row.timestamp_utc || ""))}</div>
+      </div>`
+    )
+    .join("");
+}
+
+function renderMemoryReflectionsPanel() {
+  if (!el.memoryPanelReflections) return;
+  const reflections = Array.isArray(state.memoryData?.reflections) ? state.memoryData.reflections : [];
+  const query = (el.memoryChatSearch?.value || "").trim().toLowerCase();
+  const filtered = reflections.filter((row) => {
+    if (!query) return true;
+    const text = `${row.lesson || ""} ${row.goal || ""} ${(row.tags || []).join(" ")} ${row.context || ""}`.toLowerCase();
+    return text.includes(query);
+  });
+  if (!filtered.length) {
+    el.memoryPanelReflections.innerHTML = '<p class="muted">No reflections matched your search.</p>';
+    return;
+  }
+  el.memoryPanelReflections.innerHTML = filtered
+    .slice(-160)
+    .reverse()
+    .map(
+      (row) => `<div class="memory-fact-row">
+        <div><strong>${escapeHtml(row.lesson || "")}</strong></div>
+        <div><span class="muted">Context:</span> ${escapeHtml(row.goal || "-")}</div>
+        <div><span class="muted">When:</span> ${escapeHtml(fmtDate(row.timestamp_utc || ""))}</div>
       </div>`
     )
     .join("");
@@ -1600,6 +1707,21 @@ function renderExplainWhy() {
           fmtDate(item.timestamp || "")
         )}</div></div>`;
       }
+      if (item.type === "value") {
+        return `<div class="memory-fact-row"><div><strong>${escapeHtml(item.category_label || item.category || "Values")}</strong></div><div><span class="muted">principle:</span> ${escapeHtml(
+          item.principle || "-"
+        )}</div><div><span class="muted">application:</span> ${escapeHtml(item.application || "-")}</div><div class="muted">value · ${escapeHtml(
+          fmtDate(item.timestamp || "")
+        )}</div></div>`;
+      }
+      if (item.type === "project") {
+        const weaknesses = Array.isArray(item.known_weaknesses) ? item.known_weaknesses : [];
+        return `<div class="memory-fact-row"><div><strong>${escapeHtml(item.project_slug || item.project_relative_path || "project")}</strong></div><div><span class="muted">architecture:</span> ${escapeHtml(
+          item.architecture_summary || "-"
+        )}</div><div><span class="muted">testing:</span> ${escapeHtml(item.testing_approach || "-")}</div><div><span class="muted">known weakness:</span> ${escapeHtml(
+          weaknesses[0] || "-"
+        )}</div><div class="muted">project brain · ${escapeHtml(fmtDate(item.timestamp || ""))}</div></div>`;
+      }
       return `<div class="memory-fact-row"><div>${escapeHtml(item.excerpt || item.id || "")}</div><div class="muted">conversation · ${escapeHtml(
         fmtDate(item.timestamp || "")
       )}</div></div>`;
@@ -1608,12 +1730,14 @@ function renderExplainWhy() {
 }
 
 function setMemoryPanelTab(tabName) {
-  const tab = ["facts", "conversations", "lessons"].includes(tabName) ? tabName : "facts";
+  const tab = ["facts", "values", "conversations", "lessons", "reflections"].includes(tabName) ? tabName : "facts";
   state.memoryPanelTab = tab;
   const rows = [
     [el.memoryPanelFactsBtn, tab === "facts"],
+    [el.memoryPanelValuesBtn, tab === "values"],
     [el.memoryPanelConversationsBtn, tab === "conversations"],
     [el.memoryPanelLessonsBtn, tab === "lessons"],
+    [el.memoryPanelReflectionsBtn, tab === "reflections"],
   ];
   rows.forEach(([node, active]) => {
     if (!node) return;
@@ -1621,12 +1745,16 @@ function setMemoryPanelTab(tabName) {
     node.setAttribute("aria-pressed", active ? "true" : "false");
   });
   if (el.memoryChatFacts) el.memoryChatFacts.classList.toggle("hidden", tab !== "facts");
+  if (el.memoryPanelValues) el.memoryPanelValues.classList.toggle("hidden", tab !== "values");
   if (el.memoryPanelConversations) el.memoryPanelConversations.classList.toggle("hidden", tab !== "conversations");
   if (el.memoryPanelLessons) el.memoryPanelLessons.classList.toggle("hidden", tab !== "lessons");
+  if (el.memoryPanelReflections) el.memoryPanelReflections.classList.toggle("hidden", tab !== "reflections");
 
   renderMemoryChatFacts();
+  renderMemoryValuesPanel();
   renderMemoryConversationsPanel();
   renderMemoryLessonsPanel();
+  renderMemoryReflectionsPanel();
   renderExplainWhy();
 }
 
@@ -1674,6 +1802,83 @@ function renderActivityFeed(events) {
     : filtered
         .map((event) => `<div class="timeline-item"><strong>${escapeHtml(event.event_type || event.type || "event")}</strong><div class="muted">${escapeHtml(fmtDate(event.timestamp_utc || Date.now()))}</div></div>`)
         .join("");
+}
+
+function renderGrowthMilestoneDetails() {
+  if (!el.growthMilestoneDetails) return;
+  const rows = Array.isArray(state.growthData?.milestones) ? state.growthData.milestones : [];
+  if (!rows.length) {
+    el.growthMilestoneDetails.innerHTML = '<p class="muted">Select a milestone to view learned details.</p>';
+    return;
+  }
+  const selected =
+    rows.find((item) => String(item?.id || "") === String(state.selectedGrowthMilestoneId || "")) || rows[rows.length - 1];
+  state.selectedGrowthMilestoneId = String(selected?.id || "");
+  const learned = Array.isArray(selected?.learned) ? selected.learned : [];
+  const metrics = selected?.metrics && typeof selected.metrics === "object" ? selected.metrics : {};
+  el.growthMilestoneDetails.innerHTML = `
+    <div class="memory-fact-row">
+      <div><strong>${escapeHtml(selected?.title || "Milestone")}</strong></div>
+      <div><span class="muted">When:</span> ${escapeHtml(fmtDate(selected?.timestamp_utc || ""))}</div>
+      <div><span class="muted">Category:</span> ${escapeHtml(selected?.category || "-")}</div>
+      <div><span class="muted">Details:</span> ${escapeHtml(selected?.details || "-")}</div>
+      <div><span class="muted">Learned:</span> ${escapeHtml(learned.join(" | ") || "-")}</div>
+      <div><span class="muted">Success rate:</span> ${escapeHtml(String(metrics.success_rate ?? "-"))}</div>
+      <div><span class="muted">TDD successes:</span> ${escapeHtml(String(metrics.tdd_success_count ?? "-"))}</div>
+      <div><span class="muted">Avg iterations until green:</span> ${escapeHtml(String(metrics.avg_iterations_until_green ?? "-"))}</div>
+      <div><span class="muted">Memory size:</span> ${escapeHtml(String(metrics.memory_size_total ?? "-"))}</div>
+    </div>
+  `;
+}
+
+function renderGrowthTimeline(data) {
+  if (!el.growthTimeline || !el.growthSummary) return;
+  const payload = data && typeof data === "object" ? data : {};
+  state.growthData = payload;
+  const summary = payload.summary && typeof payload.summary === "object" ? payload.summary : {};
+  const milestones = Array.isArray(payload.milestones) ? payload.milestones : [];
+
+  kvList(el.growthSummary, [
+    ["Goal runs", summary.goal_runs_total ?? 0],
+    ["Successful runs", summary.goal_runs_success ?? 0],
+    ["TDD completions", summary.tdd_success_count ?? 0],
+    ["Avg iterations to green", summary.avg_iterations_until_green ?? "-"],
+    ["Memory size", summary.memory_size_total ?? 0],
+    ["Facts / Lessons / Reflections", `${summary.facts ?? 0} / ${summary.lessons ?? 0} / ${summary.reflections ?? 0}`],
+  ]);
+
+  if (!state.selectedGrowthMilestoneId && milestones.length) {
+    state.selectedGrowthMilestoneId = String(milestones[milestones.length - 1]?.id || "");
+  }
+
+  if (!milestones.length) {
+    el.growthTimeline.innerHTML = '<p class="muted">No growth milestones yet.</p>';
+    renderGrowthMilestoneDetails();
+    return;
+  }
+
+  el.growthTimeline.innerHTML = milestones
+    .slice()
+    .reverse()
+    .map((item) => {
+      const id = String(item?.id || "");
+      const active = id === String(state.selectedGrowthMilestoneId || "");
+      const status = item?.category || "milestone";
+      return `<button type="button" class="growth-milestone ${active ? "active" : ""}" data-growth-id="${escapeHtml(id)}">
+        <span class="growth-milestone-title">${escapeHtml(item?.title || "Milestone")}</span>
+        <span class="growth-milestone-meta">${escapeHtml(fmtDate(item?.timestamp_utc || ""))} · ${escapeHtml(status)}</span>
+      </button>`;
+    })
+    .join("");
+
+  el.growthTimeline.querySelectorAll("button[data-growth-id]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.selectedGrowthMilestoneId = String(button.getAttribute("data-growth-id") || "");
+      renderGrowthTimeline(state.growthData || {});
+    });
+  });
+
+  renderGrowthMilestoneDetails();
 }
 
 function renderTelemetry(data) {
@@ -1743,8 +1948,15 @@ function renderSettings(data) {
   if (el.settingCompanionMode) {
     el.settingCompanionMode.checked = safeData.companion_mode !== false;
   }
+  if (el.settingParentTeachingMode) {
+    el.settingParentTeachingMode.checked = !!safeData.parent_teaching_mode;
+  }
   if (el.settingTddMode) {
     el.settingTddMode.checked = !!safeData.tdd_mode;
+  }
+  state.parentTeachingMode = !!safeData.parent_teaching_mode;
+  if (el.parentTeachingMode) {
+    el.parentTeachingMode.checked = state.parentTeachingMode;
   }
 
   const modelDefaults = [
@@ -1790,6 +2002,7 @@ function renderSettings(data) {
     ["Critic model", safeData.critic_model || safeData.critic_model_default || "-"],
     ["Default TDD mode", fmtBool(safeData.tdd_mode)],
     ["Companion mode", fmtBool(safeData.companion_mode !== false)],
+    ["Parent Teaching Mode", fmtBool(safeData.parent_teaching_mode)],
     ["Allowed commands", (safeData.allowed_commands || []).join(", ")],
     ["Workspace", safeData.workspace_dir || "-"],
     ["Default max iterations", safeData.max_iterations_default || 0],
@@ -1964,6 +2177,10 @@ async function refreshTelemetry() {
   renderTelemetry(await api("/api/telemetry/tail?limit=250"));
 }
 
+async function refreshGrowth() {
+  renderGrowthTimeline(await api("/api/growth_timeline?limit=240"));
+}
+
 async function refreshLogs() {
   renderLogs(await api("/api/logs/tail?limit=400"));
 }
@@ -2076,6 +2293,11 @@ function setupSSE() {
           }
         }
         await refreshMemory().catch(() => {});
+        await refreshGrowth().catch(() => {});
+      }
+      const growthEventTypes = new Set(["run_success", "run_failed", "run_stopped", "run_rejected", "memory_reflection_saved"]);
+      if (growthEventTypes.has(String(payload?.type || ""))) {
+        await refreshGrowth().catch(() => {});
       }
       if (payload?.meta) {
         state.status = payload.meta;
@@ -2214,6 +2436,7 @@ async function handleAdvancedChat(rawMessage) {
       message: text,
       intent: selectedIntent,
       confirm_save: confirmSave,
+      parent_teaching_mode: (!!el.parentTeachingMode?.checked) || state.parentTeachingMode,
       session_id: state.selectedChatSessionId || "",
       actor: "web_ui",
     }),
@@ -2268,6 +2491,12 @@ async function handleAdvancedChat(rawMessage) {
     setupRunStream(response.run.run_id);
     await refreshRuns();
     await refreshStatus();
+  } else if (responseStatus === "parent_teaching_clarify_required") {
+    state.pendingOverwriteId = "";
+    if (el.memoryConfirmTeachBtn) {
+      el.memoryConfirmTeachBtn.classList.add("hidden");
+      el.memoryConfirmTeachBtn.textContent = "Confirm Overwrite";
+    }
   } else {
     state.pendingOverwriteId = "";
     if (el.memoryConfirmTeachBtn) {
@@ -2440,6 +2669,7 @@ function wireActions() {
   });
 
   el.refreshLogsBtn.addEventListener("click", () => refreshLogs().catch((e) => setMessage(e.message)));
+  el.growthRefreshBtn?.addEventListener("click", () => refreshGrowth().catch((e) => setMessage(e.message)));
   el.logsSearch.addEventListener("input", () => renderLogs(state.logs || {}));
   el.logsLevelFilter.addEventListener("change", () => renderLogs(state.logs || {}));
 
@@ -2453,6 +2683,7 @@ function wireActions() {
         risky_multi_file_threshold: Number(el.settingMultiFile.value || 4),
         run_preview_default: !!el.settingPreviewDefault.checked,
         companion_mode: el.settingCompanionMode ? !!el.settingCompanionMode.checked : true,
+        parent_teaching_mode: el.settingParentTeachingMode ? !!el.settingParentTeachingMode.checked : false,
         planner_model: el.settingPlannerModel?.value || "",
         coder_model: el.settingCoderModel?.value || "",
         critic_model: el.settingCriticModel?.value || "",
@@ -2518,17 +2749,24 @@ function wireActions() {
 
   el.memoryChatSearch?.addEventListener("input", () => {
     renderMemoryChatFacts();
+    renderMemoryValuesPanel();
     renderMemoryConversationsPanel();
     renderMemoryLessonsPanel();
+    renderMemoryReflectionsPanel();
   });
 
   el.memoryPanelFactsBtn?.addEventListener("click", () => setMemoryPanelTab("facts"));
+  el.memoryPanelValuesBtn?.addEventListener("click", () => setMemoryPanelTab("values"));
   el.memoryPanelConversationsBtn?.addEventListener("click", () => setMemoryPanelTab("conversations"));
   el.memoryPanelLessonsBtn?.addEventListener("click", () => setMemoryPanelTab("lessons"));
+  el.memoryPanelReflectionsBtn?.addEventListener("click", () => setMemoryPanelTab("reflections"));
 
   el.advancedChatToggle?.addEventListener("change", () => {
     state.advancedChatMode = !!el.advancedChatToggle.checked;
     showToast(state.advancedChatMode ? "Advanced Chat enabled." : "Advanced Chat disabled.");
+  });
+  el.parentTeachingMode?.addEventListener("change", () => {
+    state.parentTeachingMode = !!el.parentTeachingMode.checked;
   });
   el.chatIntentAskBtn?.addEventListener("click", () => setAdvancedIntent("ask"));
   el.chatIntentTeachBtn?.addEventListener("click", () => setAdvancedIntent("teach"));
@@ -2683,6 +2921,7 @@ async function bootstrap() {
     safeRefresh("approvals", refreshApprovals),
     safeRefresh("runs", refreshRuns),
     safeRefresh("memory", refreshMemory),
+    safeRefresh("growth", refreshGrowth),
     safeRefresh("telemetry", refreshTelemetry),
     safeRefresh("logs", refreshLogs),
     safeRefresh("workspace", refreshWorkspaceTargets),
@@ -2709,6 +2948,7 @@ async function bootstrap() {
   }, STREAM_RETRY_MS);
 
   setInterval(() => refreshMemory().catch(() => {}), 6000);
+  setInterval(() => refreshGrowth().catch(() => {}), 7000);
   setInterval(() => refreshTelemetry().catch(() => {}), 5000);
 }
 

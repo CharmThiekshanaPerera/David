@@ -117,11 +117,13 @@ def create_app(
         actor = str(payload.get("actor", "web_ui")).strip() or "web_ui"
         session_id = str(payload.get("session_id", "")).strip()
         confirm_save = bool(payload.get("confirm_save", False))
+        parent_teaching_mode = bool(payload.get("parent_teaching_mode", False))
         try:
             data = center.chat_message(
                 message,
                 intent=intent,
                 confirm_save=confirm_save,
+                parent_teaching_mode=parent_teaching_mode,
                 session_id=session_id,
                 actor=actor,
             )
@@ -337,6 +339,14 @@ def create_app(
         except ValueError:
             limit = 100
         return jsonify({"ok": True, "data": center.telemetry_tail(limit=limit)})
+
+    @app.get("/api/growth_timeline")
+    def api_growth_timeline():
+        try:
+            limit = int(request.args.get("limit", "120"))
+        except ValueError:
+            limit = 120
+        return jsonify({"ok": True, "data": center.growth_timeline(limit=limit)})
 
     @app.get("/api/logs/tail")
     def api_logs_tail():

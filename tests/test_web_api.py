@@ -24,6 +24,7 @@ class FakeCenter:
             "risky_multi_file_threshold": 4,
             "run_preview_default": False,
             "companion_mode": True,
+            "parent_teaching_mode": False,
             "model": "qwen2.5-coder:1.5b",
             "planner_model": "qwen2.5-coder:1.5b",
             "coder_model": "qwen2.5-coder:1.5b",
@@ -231,7 +232,18 @@ class FakeCenter:
             )
             if len(values) > 1:
                 conflicts.append({"subject": subject, "predicate": predicate, "values": values})
-        return {"facts": list(self._facts), "lessons": [], "conflicts": conflicts, "conflict_count": len(conflicts)}
+        return {
+            "facts": list(self._facts),
+            "values": [],
+            "projects": [],
+            "lessons": [],
+            "reflections": [],
+            "conflicts": conflicts,
+            "conflict_count": len(conflicts),
+            "values_count": 0,
+            "project_count": 0,
+            "reflection_count": 0,
+        }
 
     def ask_memory(self, question, actor="web_ui"):
         q = str(question).strip()
@@ -309,7 +321,15 @@ class FakeCenter:
             "actor": actor,
         }
 
-    def chat_message(self, message, intent="", confirm_save=False, session_id="", actor="web_ui"):
+    def chat_message(
+        self,
+        message,
+        intent="",
+        confirm_save=False,
+        parent_teaching_mode=False,
+        session_id="",
+        actor="web_ui",
+    ):
         text = str(message).strip()
         session = str(session_id or "session_test_1")
         chosen = str(intent or "").strip().lower()
@@ -395,6 +415,7 @@ class FakeCenter:
             "detected_intent": chosen,
             "selected_intent": chosen,
             "confirm_save": bool(confirm_save),
+            "parent_teaching_mode": bool(parent_teaching_mode),
             "session_id": session,
             "user_turn": user_turn,
             "assistant_turn": assistant_turn,
@@ -454,6 +475,40 @@ class FakeCenter:
 
     def telemetry_tail(self, limit=100):
         return {"events": [], "metrics": [], "summary": {}, "regressions": []}
+
+    def growth_timeline(self, limit=120):
+        return {
+            "milestones": [
+                {
+                    "id": "run:run_test_1",
+                    "timestamp_utc": "2026-01-01T00:00:00+00:00",
+                    "category": "project_success",
+                    "title": "Successful Project Completion",
+                    "details": "Run completed with passing tests.",
+                    "learned": ["Keep tests green and focused."],
+                    "metrics": {
+                        "goal_runs_total": 1,
+                        "goal_runs_success": 1,
+                        "success_rate": 1.0,
+                        "tdd_success_count": 0,
+                        "avg_iterations_until_green": None,
+                        "memory_size_total": len(self._facts),
+                    },
+                }
+            ],
+            "summary": {
+                "goal_runs_total": 1,
+                "goal_runs_success": 1,
+                "success_rate": 1.0,
+                "tdd_success_count": 0,
+                "avg_iterations_until_green": None,
+                "facts": len(self._facts),
+                "lessons": 0,
+                "reflections": 0,
+                "memory_size_total": len(self._facts),
+                "milestone_count": 1,
+            },
+        }
 
     def logs_tail(self, limit=200):
         return {"web_control_center.log": []}
@@ -523,6 +578,16 @@ def test_models_endpoint(client):
     payload = response.get_json()
     assert payload["ok"] is True
     assert "qwen2.5-coder:1.5b" in payload["data"]["models"]
+
+
+def test_growth_timeline_endpoint(client):
+    response = client.get("/api/growth_timeline?limit=50")
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["ok"] is True
+    data = payload["data"]
+    assert data["summary"]["goal_runs_total"] == 1
+    assert data["milestones"][0]["category"] == "project_success"
 
 
 def test_run_files_and_timeline_endpoints(client):
@@ -652,6 +717,21 @@ def test_chat_endpoint_requires_confirm_for_teach(client):
     facts = client.get("/api/memory/facts")
     assert facts.status_code == 200
     assert facts.get_json()["data"]["total"] == 0
+
+
+def test_chat_endpoint_forwards_parent_teaching_mode(client):
+    response = client.post(
+        "/api/chat",
+        json={
+            "message": "Always value patience.",
+            "intent": "teach",
+            "confirm_save": True,
+            "parent_teaching_mode": True,
+        },
+    )
+    assert response.status_code == 200
+    payload = response.get_json()["data"]
+    assert payload["parent_teaching_mode"] is True
 
 
 def test_chat_teach_confirm_and_overwrite_flow(client):

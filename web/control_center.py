@@ -37,6 +37,9 @@ from agent.executor import RestrictedExecutor
 RUN_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{6,80}$")
 INTENT_CHOICES = {"teach", "ask", "goal", "chat"}
 MEMORY_UNKNOWN_ANSWER = 'I do not know yet. Please teach me using --teach "...".'
+REFLECTION_KIND = "reflection"
+REFLECTION_SOURCE = "reflection_engine"
+PROJECT_BRAIN_SOURCE = "project_brain_engine"
 FAMILY_CONTEXT_PATTERNS = (
     r"\bfather\b",
     r"\bmother\b",
@@ -70,6 +73,15 @@ CRISIS_CONTEXT_PATTERNS = (
     r"\bdo not want to live\b",
     r"\bcan't go on\b",
     r"\bcannot go on\b",
+)
+GROWTH_CONTEXT_PATTERNS = (
+    r"\bgrowth\b",
+    r"\bimprov(?:e|ed|ing)\b",
+    r"\blearn(?:ed|ing)\b",
+    r"\bevolv(?:e|ed|ing)\b",
+    r"\bprogress\b",
+    r"\bstruggl(?:e|ed|ing)\b",
+    r"\bover time\b",
 )
 EXPLICIT_TEACH_SIGNAL_PATTERNS = (
     r"\bremember this\b",
@@ -173,6 +185,10 @@ class ControlSettings:
     risky_multi_file_threshold: int = 4
     run_preview_default: bool = False
     companion_mode: bool = True
+    parent_teaching_mode: bool = False
+    personality_warmth: int = 55
+    personality_verbosity: int = 55
+    personality_curiosity: int = 50
     planner_model: str = ""
     coder_model: str = ""
     critic_model: str = ""
@@ -191,6 +207,10 @@ class ControlSettings:
             risky_multi_file_threshold=max(2, int(data.get("risky_multi_file_threshold", 4))),
             run_preview_default=bool(data.get("run_preview_default", False)),
             companion_mode=bool(data.get("companion_mode", True)),
+            parent_teaching_mode=bool(data.get("parent_teaching_mode", False)),
+            personality_warmth=max(0, min(100, int(data.get("personality_warmth", 55)))),
+            personality_verbosity=max(0, min(100, int(data.get("personality_verbosity", 55)))),
+            personality_curiosity=max(0, min(100, int(data.get("personality_curiosity", 50)))),
             planner_model=planner_model,
             coder_model=coder_model,
             critic_model=critic_model,
@@ -230,6 +250,7 @@ class DavidControlCenter:
         self._subscribers: dict[str, list[queue.Queue[dict[str, Any]]]] = {"status": [], "logs": []}
         self._csrf_token = uuid.uuid4().hex
         self._pending_memory_overwrites: dict[str, dict[str, Any]] = {}
+        self._pending_parent_teaching: dict[str, dict[str, Any]] = {}
         self._chat_session_by_actor: dict[str, str] = {}
         self._conversations_file = self.config.memory_file.parent / "conversations.jsonl"
         self._ensure_conversation_store()
@@ -698,6 +719,7 @@ class DavidControlCenter:
         *,
         intent: str = "",
         confirm_save: bool = False,
+        parent_teaching_mode: bool = False,
         session_id: str = "",
         actor: str = "web_ui",
     ) -> dict[str, Any]:
@@ -706,6 +728,13 @@ class DavidControlCenter:
         detected = self.classify_chat_intent(clean_message)
         selected_intent = self._normalize_intent(intent) or str(detected.get("intent", "chat"))
         active_session_id = self._resolve_chat_session_id(session_id=session_id, actor=actor_value)
+        parent_mode_active = bool(parent_teaching_mode or self.settings.parent_teaching_mode)
+        if (
+            parent_mode_active
+            and active_session_id in self._pending_parent_teaching
+            and selected_intent in {"chat", "teach"}
+        ):
+            selected_intent = "teach"
         topics = detected.get("topics", [])
         confidence = float(detected.get("confidence", 0.5))
 
@@ -748,18 +777,36 @@ class DavidControlCenter:
                 }
                 assistant_text = "I can save this as memory after you confirm Teach."
             else:
-                response = self._teach_confirmed(
-                    clean_message,
-                    actor=actor_value,
-                    session_id=active_session_id,
-                    allow_overwrite=False,
-                    legacy_mode=False,
+                parent_response = (
+                    self._handle_parent_teaching_turn(
+                        message=clean_message,
+                        actor=actor_value,
+                        session_id=active_session_id,
+                    )
+                    if parent_mode_active
+                    else None
                 )
-                if response.get("status") == "overwrite_confirmation_required":
-                    assistant_text = "I detected conflicting memory. Confirm overwrite to continue."
+                if parent_response is not None:
+                    response = parent_response
+                    if str(response.get("status", "")) == "parent_teaching_clarify_required":
+                        assistant_text = str(response.get("question", "")).strip() or "How should I apply this while debugging?"
+                    else:
+                        stored_values = int(response.get("stored_value_count", 0))
+                        category = str(response.get("category_label", "Values")).strip()
+                        assistant_text = f"Stored {stored_values} {category} teaching entry."
                 else:
-                    stored_count = int(response.get("stored_count", 0))
-                    assistant_text = f"Saved {stored_count} memory facts."
+                    response = self._teach_confirmed(
+                        clean_message,
+                        actor=actor_value,
+                        session_id=active_session_id,
+                        allow_overwrite=False,
+                        legacy_mode=False,
+                    )
+                    if response.get("status") == "overwrite_confirmation_required":
+                        assistant_text = "I detected conflicting memory. Confirm overwrite to continue."
+                    else:
+                        stored_count = int(response.get("stored_count", 0))
+                        assistant_text = f"Saved {stored_count} memory facts."
         elif selected_intent == "goal":
             started, run_result = self.start_run(
                 {
@@ -841,12 +888,22 @@ class DavidControlCenter:
             "detected_confidence": round(confidence, 3),
             "selected_intent": selected_intent,
             "confirm_save": bool(confirm_save),
+            "parent_teaching_mode": parent_mode_active,
             "session_id": active_session_id,
             "user_turn": user_turn,
             "assistant_turn": assistant_turn,
             "response": response,
             "timestamp_utc": self._now_iso(),
         }
+        reflection = self._record_conversation_reflection(
+            message=clean_message,
+            selected_intent=selected_intent,
+            response=response,
+            session_id=active_session_id,
+            user_message_id=str(user_turn.get("message_id", "")),
+        )
+        if reflection:
+            payload["reflection"] = reflection
         self.publish_event("status", {"type": "memory_chat_response", "payload": payload})
         self.publish_event("logs", {"type": "memory_chat_response", "payload": payload})
         return payload
@@ -1315,16 +1372,307 @@ class DavidControlCenter:
     def memory_snapshot(self) -> dict[str, Any]:
         payload = self._read_memory_payload()
         facts = payload.get("facts", []) if isinstance(payload.get("facts"), list) else []
-        lessons = payload.get("lessons", []) if isinstance(payload.get("lessons"), list) else []
+        all_lessons = payload.get("lessons", []) if isinstance(payload.get("lessons"), list) else []
+        values = payload.get("values", []) if isinstance(payload.get("values"), list) else []
+        projects = payload.get("projects", []) if isinstance(payload.get("projects"), list) else []
+        lessons = self._non_reflection_lessons(all_lessons)
+        reflections = self._reflection_lessons(all_lessons)
         conversations = self._read_jsonl(self._conversations_file, limit=600)
         conflicts = self._detect_memory_conflicts(facts)
         return {
             "facts": facts[-300:],
+            "values": values[-300:],
+            "projects": projects[-300:],
             "lessons": lessons[-300:],
+            "reflections": reflections[-300:],
             "conversations": conversations[-300:],
             "sessions": self.chat_sessions(limit=120),
             "conflicts": conflicts,
             "conflict_count": len(conflicts),
+            "values_count": len(values),
+            "project_count": len(projects),
+            "reflection_count": len(reflections),
+        }
+
+    @staticmethod
+    def _parse_timestamp(value: Any) -> datetime | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+
+    def _run_total_execution_duration(self, run_id: str) -> float:
+        if not self._is_safe_run_id(run_id):
+            return 0.0
+        iterations_dir = self._run_dir(run_id) / "iterations"
+        if not iterations_dir.exists():
+            return 0.0
+        total = 0.0
+        for iter_dir in sorted(iterations_dir.iterdir()):
+            if not iter_dir.is_dir():
+                continue
+            rows = self._read_json(iter_dir / "execution.json", default=[])
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    total += float(row.get("duration_sec", 0.0))
+                except (TypeError, ValueError):
+                    continue
+        return round(total, 3)
+
+    def _memory_counts_until(
+        self,
+        *,
+        timestamp: datetime | None,
+        facts: list[dict[str, Any]],
+        lessons: list[dict[str, Any]],
+    ) -> dict[str, int]:
+        if timestamp is None:
+            reflection_total = len(self._reflection_lessons(lessons))
+            return {
+                "facts": len(facts),
+                "lessons": len(lessons),
+                "reflections": reflection_total,
+                "memory_size_total": len(facts) + len(lessons),
+            }
+
+        fact_count = 0
+        for row in facts:
+            if not isinstance(row, dict):
+                continue
+            fact_time = self._parse_timestamp(row.get("last_updated", row.get("timestamp", "")))
+            if fact_time and fact_time <= timestamp:
+                fact_count += 1
+
+        lesson_count = 0
+        reflection_count = 0
+        for row in lessons:
+            if not isinstance(row, dict):
+                continue
+            lesson_time = self._parse_timestamp(row.get("timestamp_utc", ""))
+            if lesson_time and lesson_time <= timestamp:
+                lesson_count += 1
+                if self._is_reflection_lesson(row):
+                    reflection_count += 1
+
+        return {
+            "facts": fact_count,
+            "lessons": lesson_count,
+            "reflections": reflection_count,
+            "memory_size_total": fact_count + lesson_count,
+        }
+
+    def _growth_metrics_until(
+        self,
+        *,
+        timestamp: datetime | None,
+        runs: list[dict[str, Any]],
+        run_duration_by_id: dict[str, float],
+        facts: list[dict[str, Any]],
+        lessons: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        considered_runs: list[dict[str, Any]] = []
+        for row in runs:
+            stamp = self._parse_timestamp(row.get("ended_at", row.get("started_at", "")))
+            if timestamp is None or (stamp and stamp <= timestamp):
+                considered_runs.append(row)
+
+        goal_runs_total = len(considered_runs)
+        success_runs = [
+            row
+            for row in considered_runs
+            if str(row.get("status", "")).strip().lower() in {"success", "preview_ready"}
+        ]
+        goal_runs_success = len(success_runs)
+        tdd_success_count = sum(1 for row in success_runs if bool(row.get("tdd_mode", False)))
+        green_values: list[int] = []
+        for row in success_runs:
+            try:
+                value = int(row.get("iterations_until_green", 0) or 0)
+            except (TypeError, ValueError):
+                value = 0
+            if value > 0:
+                green_values.append(value)
+
+        run_durations = [
+            run_duration_by_id.get(str(row.get("id", "")).strip(), 0.0)
+            for row in considered_runs
+            if str(row.get("id", "")).strip()
+        ]
+        run_durations = [item for item in run_durations if item > 0]
+        avg_run_duration_sec = round(sum(run_durations) / len(run_durations), 3) if run_durations else 0.0
+        success_rate = round(goal_runs_success / max(1, goal_runs_total), 3)
+        avg_iterations_until_green = (
+            round(sum(green_values) / len(green_values), 2) if green_values else None
+        )
+        memory_counts = self._memory_counts_until(
+            timestamp=timestamp,
+            facts=facts,
+            lessons=lessons,
+        )
+        return {
+            "goal_runs_total": goal_runs_total,
+            "goal_runs_success": goal_runs_success,
+            "success_rate": success_rate,
+            "tdd_success_count": tdd_success_count,
+            "avg_iterations_until_green": avg_iterations_until_green,
+            "avg_run_duration_sec": avg_run_duration_sec,
+            **memory_counts,
+        }
+
+    def growth_timeline(self, limit: int = 120) -> dict[str, Any]:
+        max_limit = max(10, min(limit, 500))
+        payload = self._read_memory_payload()
+        facts = payload.get("facts", []) if isinstance(payload.get("facts"), list) else []
+        lessons = payload.get("lessons", []) if isinstance(payload.get("lessons"), list) else []
+        reflections = self._reflection_lessons(lessons)
+        reasoning_lessons = self._non_reflection_lessons(lessons)
+        reflections.sort(key=lambda row: str(row.get("timestamp_utc", "")))
+        reasoning_lessons.sort(key=lambda row: str(row.get("timestamp_utc", "")))
+
+        runs = [row for row in self.get_runs(limit=1000) if str(row.get("mode", "")).strip().lower() == "goal"]
+        runs.sort(key=lambda row: str(row.get("started_at", "")))
+        run_duration_by_id = {
+            str(row.get("id", "")).strip(): self._run_total_execution_duration(str(row.get("id", "")).strip())
+            for row in runs
+            if str(row.get("id", "")).strip()
+        }
+
+        milestones: list[dict[str, Any]] = []
+        for row in runs:
+            run_id = str(row.get("id", "")).strip()
+            status = str(row.get("status", "")).strip().lower() or "unknown"
+            stamp = str(row.get("ended_at", row.get("started_at", ""))).strip() or self._now_iso()
+            goal = str(row.get("payload", "")).strip()
+            learned = self._goal_lessons_summary(goal, limit=2)
+            success = status in {"success", "preview_ready"}
+            title = "Successful Project Completion" if success else "Project Iteration Review"
+            details = str(row.get("message", "")).strip()
+            if not details:
+                details = "Run reached a terminal state and added new execution evidence."
+            milestones.append(
+                {
+                    "id": f"run:{run_id}",
+                    "timestamp_utc": stamp,
+                    "category": "project_success" if success else "project_review",
+                    "title": title,
+                    "details": details,
+                    "run_id": run_id,
+                    "goal": goal,
+                    "project_slug": str(row.get("project_slug", "")).strip(),
+                    "status": status,
+                    "learned": learned,
+                    "raw": {
+                        "iterations_used": int(row.get("iteration", 0) or 0),
+                        "iterations_until_green": row.get("iterations_until_green"),
+                        "tdd_mode": bool(row.get("tdd_mode", False)),
+                        "tests_passed": row.get("tests_passed"),
+                        "run_duration_sec": run_duration_by_id.get(run_id, 0.0),
+                    },
+                }
+            )
+
+        seen_reasoning: set[tuple[str, str]] = set()
+        for idx, row in enumerate(reasoning_lessons):
+            if not isinstance(row, dict):
+                continue
+            lesson_text = str(row.get("lesson", "")).strip()
+            stamp = str(row.get("timestamp_utc", "")).strip()
+            goal = str(row.get("goal", "")).strip()
+            if not lesson_text or not stamp:
+                continue
+            key = (lesson_text.casefold(), goal.casefold())
+            if key in seen_reasoning:
+                continue
+            seen_reasoning.add(key)
+            milestones.append(
+                {
+                    "id": f"lesson:{idx}:{stamp}",
+                    "timestamp_utc": stamp,
+                    "category": "reasoning_improvement",
+                    "title": "Reasoning Pattern Refined",
+                    "details": lesson_text,
+                    "goal": goal,
+                    "learned": [lesson_text],
+                    "raw": {"tags": row.get("tags", []), "context": str(row.get("context", "")).strip()},
+                }
+            )
+
+        seen_reflections: set[str] = set()
+        for idx, row in enumerate(reflections):
+            if not isinstance(row, dict):
+                continue
+            lesson_text = str(row.get("lesson", "")).strip()
+            stamp = str(row.get("timestamp_utc", "")).strip()
+            reflection_key = str(row.get("reflection_key", "")).strip()
+            if not lesson_text or not stamp:
+                continue
+            if reflection_key and reflection_key in seen_reflections:
+                continue
+            if reflection_key:
+                seen_reflections.add(reflection_key)
+            milestones.append(
+                {
+                    "id": f"reflection:{idx}:{stamp}",
+                    "timestamp_utc": stamp,
+                    "category": "lesson_reflection",
+                    "title": "Reflection Captured",
+                    "details": lesson_text,
+                    "goal": str(row.get("goal", "")).strip(),
+                    "learned": [lesson_text],
+                    "raw": {
+                        "tags": row.get("tags", []),
+                        "context": str(row.get("context", "")).strip(),
+                        "reflection_key": reflection_key,
+                    },
+                }
+            )
+
+        milestones.sort(key=lambda row: str(row.get("timestamp_utc", "")))
+        if len(milestones) > max_limit:
+            milestones = milestones[-max_limit:]
+
+        previous_memory_total = 0
+        for row in milestones:
+            stamp = self._parse_timestamp(row.get("timestamp_utc", ""))
+            metrics = self._growth_metrics_until(
+                timestamp=stamp,
+                runs=runs,
+                run_duration_by_id=run_duration_by_id,
+                facts=facts,
+                lessons=lessons,
+            )
+            metrics["memory_growth_delta"] = metrics["memory_size_total"] - previous_memory_total
+            previous_memory_total = int(metrics["memory_size_total"])
+            row["metrics"] = metrics
+
+        latest_metrics = self._growth_metrics_until(
+            timestamp=None,
+            runs=runs,
+            run_duration_by_id=run_duration_by_id,
+            facts=facts,
+            lessons=lessons,
+        )
+        return {
+            "milestones": milestones,
+            "summary": {
+                **latest_metrics,
+                "milestone_count": len(milestones),
+                "reflection_count": len(reflections),
+                "reasoning_lesson_count": len(reasoning_lessons),
+                "latest_timestamp_utc": milestones[-1]["timestamp_utc"] if milestones else "",
+            },
         }
 
     def telemetry_tail(self, limit: int = 100) -> dict[str, Any]:
@@ -1424,7 +1772,10 @@ class DavidControlCenter:
             self._conversations_file.write_text("", encoding="utf-8")
 
     def _read_memory_payload(self) -> dict[str, Any]:
-        payload = self._read_json(self.config.memory_file, default={"facts": [], "lessons": [], "preferences": []})
+        payload = self._read_json(
+            self.config.memory_file,
+            default={"facts": [], "lessons": [], "preferences": [], "values": [], "projects": []},
+        )
         if not isinstance(payload, dict):
             payload = {}
         if not isinstance(payload.get("facts"), list):
@@ -1433,6 +1784,10 @@ class DavidControlCenter:
             payload["lessons"] = []
         if not isinstance(payload.get("preferences"), list):
             payload["preferences"] = []
+        if not isinstance(payload.get("values"), list):
+            payload["values"] = []
+        if not isinstance(payload.get("projects"), list):
+            payload["projects"] = []
         if not isinstance(payload.get("conversations"), list):
             payload["conversations"] = []
         return payload
@@ -1560,6 +1915,10 @@ class DavidControlCenter:
         return cls._matches_any_pattern(text, CRISIS_CONTEXT_PATTERNS)
 
     @classmethod
+    def _is_growth_context(cls, text: str) -> bool:
+        return cls._matches_any_pattern(text, GROWTH_CONTEXT_PATTERNS)
+
+    @classmethod
     def _has_explicit_teach_signal(cls, text: str) -> bool:
         return cls._matches_any_pattern(text, EXPLICIT_TEACH_SIGNAL_PATTERNS)
 
@@ -1581,6 +1940,10 @@ class DavidControlCenter:
             "If you might hurt yourself or are in immediate danger, call or text 988 in the U.S. right now, "
             "or contact local emergency services."
         )
+
+    @staticmethod
+    def _compose_growth_transparency_line() -> str:
+        return "I am software evolving through stored lessons, reflections, and run outcomes."
 
     def _session_has_assistant_turn(self, session_id: str) -> bool:
         clean_session = self._sanitize_session_id(session_id)
@@ -1701,6 +2064,8 @@ class DavidControlCenter:
         facts: list[dict[str, Any]],
         conversations: list[dict[str, Any]],
         lessons: list[dict[str, Any]],
+        values: list[dict[str, Any]] | None = None,
+        projects: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         citations: list[dict[str, Any]] = []
         for fact in facts[:5]:
@@ -1734,6 +2099,29 @@ class DavidControlCenter:
                     "timestamp": lesson.get("timestamp_utc", ""),
                 }
             )
+        for value in (values or [])[:3]:
+            citations.append(
+                {
+                    "type": "value",
+                    "category": value.get("category", ""),
+                    "category_label": value.get("category_label", ""),
+                    "principle": value.get("principle", ""),
+                    "application": value.get("application", ""),
+                    "timestamp": value.get("timestamp_utc", ""),
+                }
+            )
+        for project in (projects or [])[:2]:
+            citations.append(
+                {
+                    "type": "project",
+                    "project_slug": project.get("project_slug", ""),
+                    "project_relative_path": project.get("project_relative_path", ""),
+                    "architecture_summary": project.get("architecture_summary", ""),
+                    "testing_approach": project.get("testing_approach", ""),
+                    "known_weaknesses": project.get("known_weaknesses", []),
+                    "timestamp": project.get("last_updated", project.get("created_at", "")),
+                }
+            )
         return citations
 
     def _compose_companion_ask_answer(
@@ -1743,14 +2131,19 @@ class DavidControlCenter:
         matched_facts: list[dict[str, Any]],
         matched_conversations: list[dict[str, Any]],
         matched_lessons: list[dict[str, Any]],
+        matched_values: list[dict[str, Any]],
+        matched_projects: list[dict[str, Any]],
         force_transparency: bool,
     ) -> str:
         family_context = self._is_family_context(question)
         grief_context = self._is_grief_context(question)
         crisis_context = self._is_crisis_context(question)
+        growth_context = self._is_growth_context(question)
 
         parts: list[str] = []
-        if matched_facts:
+        if matched_projects:
+            parts.append(self._compose_project_brain_overview_line(matched_projects[0]))
+        elif matched_facts:
             parts.append(self._fact_memory_sentence(matched_facts[0]))
         elif matched_conversations:
             excerpt = str(matched_conversations[0].get("text", "")).strip()[:220]
@@ -1765,6 +2158,14 @@ class DavidControlCenter:
             lesson_text = str(matched_lessons[0].get("lesson", "")).strip()
             if lesson_text:
                 parts.append(f"I also learned from earlier lessons: {lesson_text}.")
+        if matched_values:
+            value = matched_values[0]
+            principle = str(value.get("principle", "")).strip()
+            category_label = str(value.get("category_label", "")).strip() or self._teaching_category_label(
+                str(value.get("category", ""))
+            )
+            if principle:
+                parts.append(f"I apply a taught {category_label.lower()} principle here: {principle}.")
 
         if not parts:
             parts.append(MEMORY_UNKNOWN_ANSWER)
@@ -1773,6 +2174,9 @@ class DavidControlCenter:
             parts.append(self._compose_crisis_support_line())
         elif grief_context:
             parts.append(self._compose_grief_support_line())
+        elif growth_context:
+            parts.append(self._compose_growth_reference_line())
+            parts.append(self._compose_growth_transparency_line())
 
         if force_transparency or family_context or grief_context or crisis_context:
             parts.append(self._compose_ai_transparency_line())
@@ -1788,24 +2192,46 @@ class DavidControlCenter:
     ) -> dict[str, Any]:
         payload = self._read_memory_payload()
         facts = payload.get("facts", []) if isinstance(payload.get("facts"), list) else []
-        lessons = payload.get("lessons", []) if isinstance(payload.get("lessons"), list) else []
+        all_lessons = payload.get("lessons", []) if isinstance(payload.get("lessons"), list) else []
+        values = payload.get("values", []) if isinstance(payload.get("values"), list) else []
+        projects = payload.get("projects", []) if isinstance(payload.get("projects"), list) else []
+        lessons = self._non_reflection_lessons(all_lessons)
         message_tokens = set(self._tokenize_text(message))
         matched_facts = self._match_facts_for_question(message_tokens, facts, limit=3)
         matched_conversations = self._match_conversations_for_question(message_tokens, session_id=session_id, limit=2)
         matched_lessons = self._match_lessons_for_question(message_tokens, lessons, limit=2)
+        matched_values = self._match_values_for_question(message_tokens, values, limit=2)
+        matched_projects = self._match_projects_for_query(
+            message_tokens,
+            projects,
+            query_text=message,
+            limit=2,
+        )
 
         family_context = self._is_family_context(message)
         grief_context = self._is_grief_context(message)
         crisis_context = self._is_crisis_context(message)
+        growth_context = self._is_growth_context(message)
+        project_context = self._contains_project_query_signal(message)
 
         lines: list[str] = []
-        if matched_facts:
+        if matched_projects and project_context:
+            lines.append(self._compose_project_brain_overview_line(matched_projects[0]))
+        elif matched_facts:
             lines.append(self._fact_memory_sentence(matched_facts[0]))
             lines.append("I am learning from what you gently teach me.")
         elif matched_lessons:
             lesson_text = str(matched_lessons[0].get("lesson", "")).strip()
             if lesson_text:
                 lines.append(f"You once told me this lesson: {lesson_text}.")
+        elif matched_values:
+            first = matched_values[0]
+            principle = str(first.get("principle", "")).strip()
+            category_label = str(first.get("category_label", "")).strip() or self._teaching_category_label(
+                str(first.get("category", ""))
+            )
+            if principle:
+                lines.append(f"You taught me this {category_label.lower()} principle: {principle}.")
         elif matched_conversations:
             excerpt = str(matched_conversations[0].get("text", "")).strip()[:220]
             if excerpt:
@@ -1817,6 +2243,9 @@ class DavidControlCenter:
             lines.append(self._compose_crisis_support_line())
         elif grief_context:
             lines.append(self._compose_grief_support_line())
+        elif growth_context:
+            lines.append(self._compose_growth_reference_line())
+            lines.append(self._compose_growth_transparency_line())
 
         lines.append("Would you like to teach me one small memory or ask me a gentle question?")
 
@@ -1832,29 +2261,52 @@ class DavidControlCenter:
                 facts=matched_facts,
                 conversations=matched_conversations,
                 lessons=matched_lessons,
+                values=matched_values,
+                projects=matched_projects,
             ),
             "used_memory": {
                 "facts": matched_facts[:5],
                 "conversations": matched_conversations[:3],
                 "lessons": matched_lessons[:3],
+                "values": matched_values[:3],
+                "projects": matched_projects[:2],
             },
             "matched_facts": matched_facts,
             "matched_conversations": matched_conversations,
             "matched_lessons": matched_lessons,
+            "matched_values": matched_values,
+            "matched_projects": matched_projects,
             "timestamp_utc": self._now_iso(),
         }
 
     @classmethod
-    def _compose_goal_context(cls, memory_context: str, log_context: str) -> str:
+    def _compose_goal_context(
+        cls,
+        memory_context: str,
+        log_context: str,
+        reflection_context: str = "",
+        values_context: str = "",
+        project_brain_context: str = "",
+    ) -> str:
         base = str(memory_context or "").strip() or "No prior lessons available."
         logs = str(log_context or "").strip()
-        if not logs:
-            return base
-        return (
-            f"{base}\n\nRecent tail logs context:\n"
-            f"{logs}\n\n"
-            "Use logs to diagnose failures and prioritize minimal fixes related to observed errors."
-        ).strip()
+        reflections = str(reflection_context or "").strip()
+        values = str(values_context or "").strip()
+        project_brain = str(project_brain_context or "").strip()
+        sections = [base]
+        if project_brain:
+            sections.append(project_brain)
+        if values:
+            sections.append(values)
+        if reflections:
+            sections.append(reflections)
+        if logs:
+            sections.append(
+                "Recent tail logs context:\n"
+                f"{logs}\n\n"
+                "Use logs to diagnose failures and prioritize minimal fixes related to observed errors."
+            )
+        return "\n\n".join(section for section in sections if section).strip()
 
     def _build_goal_log_context(self, *, limit_lines: int = 160, max_chars: int = 7000) -> str:
         snapshot = self.logs_tail(limit=max(20, min(limit_lines, 600)))
@@ -1903,6 +2355,957 @@ class DavidControlCenter:
             text = text[-max_chars:]
             text = f"...[truncated]\n{text}"
         return text
+
+    @staticmethod
+    def _is_reflection_lesson(row: Any) -> bool:
+        if not isinstance(row, dict):
+            return False
+        kind = str(row.get("kind", "")).strip().casefold()
+        source = str(row.get("source", "")).strip().casefold()
+        return kind == REFLECTION_KIND or source == REFLECTION_SOURCE
+
+    @classmethod
+    def _reflection_lessons(cls, lessons: list[Any]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for row in lessons:
+            if cls._is_reflection_lesson(row):
+                rows.append(row)
+        return rows
+
+    @classmethod
+    def _latest_reflection_lesson(cls, lessons: list[Any]) -> dict[str, Any] | None:
+        reflections = cls._reflection_lessons(lessons)
+        if not reflections:
+            return None
+        reflections.sort(key=lambda row: str(row.get("timestamp_utc", "")), reverse=True)
+        return reflections[0]
+
+    @classmethod
+    def _non_reflection_lessons(cls, lessons: list[Any]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for row in lessons:
+            if isinstance(row, dict) and not cls._is_reflection_lesson(row):
+                rows.append(row)
+        return rows
+
+    def _append_reflection_lesson(
+        self,
+        *,
+        goal: str,
+        lesson: str,
+        context: str,
+        tags: list[str],
+        reflection_key: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        clean_lesson = str(lesson).strip()
+        clean_goal = str(goal).strip()
+        if not clean_lesson or not clean_goal:
+            return None
+        normalized_tags = [str(item).strip() for item in tags if str(item).strip()]
+        if "reflection" not in [tag.casefold() for tag in normalized_tags]:
+            normalized_tags.append("reflection")
+
+        payload = self._read_memory_payload()
+        lessons = payload.get("lessons", []) if isinstance(payload.get("lessons"), list) else []
+        for row in lessons:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("reflection_key", "")).strip() == reflection_key:
+                return row
+
+        now = self._now_iso()
+        entry: dict[str, Any] = {
+            "timestamp_utc": now,
+            "goal": clean_goal,
+            "lesson": clean_lesson,
+            "tags": normalized_tags,
+            "context": str(context).strip(),
+            "kind": REFLECTION_KIND,
+            "source": REFLECTION_SOURCE,
+            "reflection_key": reflection_key,
+        }
+        if metadata:
+            entry.update(metadata)
+
+        lessons.append(entry)
+        payload["lessons"] = lessons[-2000:]
+        self._write_memory_payload(payload)
+        self.publish_event("logs", {"type": "memory_reflection_saved", "payload": entry})
+        self.publish_event("status", {"type": "memory_reflection_saved", "payload": entry})
+        return entry
+
+    def _build_reflection_context_for_goal(self, goal: str, limit: int = 4) -> str:
+        payload = self._read_memory_payload()
+        lessons = payload.get("lessons", []) if isinstance(payload.get("lessons"), list) else []
+        reflections = self._reflection_lessons(lessons)
+        if not reflections:
+            return ""
+
+        goal_tokens = set(self._tokenize_text(goal))
+        scored: list[tuple[int, dict[str, Any]]] = []
+        for row in reflections:
+            tags = row.get("tags", [])
+            tag_text = " ".join(str(item) for item in tags if str(item).strip()) if isinstance(tags, list) else ""
+            text = f"{row.get('lesson', '')} {row.get('goal', '')} {row.get('context', '')} {tag_text}"
+            tokens = set(self._tokenize_text(text))
+            score = len(goal_tokens & tokens)
+            scored.append((score, row))
+
+        if any(score > 0 for score, _ in scored):
+            scored = [item for item in scored if item[0] > 0]
+        scored.sort(key=lambda item: (item[0], str(item[1].get("timestamp_utc", ""))), reverse=True)
+        selected = [row for _, row in scored[: max(1, min(limit, 12))]]
+        if not selected:
+            return ""
+
+        lines: list[str] = ["Reflection memory before planning:"]
+        for row in selected:
+            lesson_text = str(row.get("lesson", "")).strip()
+            if not lesson_text:
+                continue
+            stamp = str(row.get("timestamp_utc", "")).strip() or "unknown-time"
+            lines.append(f"- [{stamp}] {lesson_text}")
+        if len(lines) <= 1:
+            return ""
+        return "\n".join(lines)
+
+    def _goal_lessons_summary(self, goal: str, limit: int = 3) -> list[str]:
+        payload = self._read_memory_payload()
+        lessons = payload.get("lessons", []) if isinstance(payload.get("lessons"), list) else []
+        snippets: list[str] = []
+        seen: set[str] = set()
+        for row in reversed(lessons):
+            if not isinstance(row, dict) or self._is_reflection_lesson(row):
+                continue
+            if str(row.get("goal", "")).strip() != goal.strip():
+                continue
+            text = str(row.get("lesson", "")).strip()
+            if not text:
+                continue
+            key = text.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            snippets.append(text)
+            if len(snippets) >= max(1, min(limit, 8)):
+                break
+        return snippets
+
+    def _compose_growth_reference_line(self) -> str:
+        payload = self._read_memory_payload()
+        lessons = payload.get("lessons", []) if isinstance(payload.get("lessons"), list) else []
+        latest = self._latest_reflection_lesson(lessons)
+        if not latest:
+            return "I have been improving gradually by learning from each run and conversation."
+        lesson_text = str(latest.get("lesson", "")).strip()
+        if not lesson_text:
+            return "I have been improving gradually by learning from each run and conversation."
+        clipped = lesson_text[:180]
+        return f"Earlier, I struggled with parts of this work, but I learned from that: {clipped}"
+
+    def _longest_iteration_for_run(self, run_id: str) -> tuple[int, float]:
+        run_dir = self._run_dir(run_id) / "iterations"
+        if not run_dir.exists():
+            return 0, 0.0
+
+        longest_iteration = 0
+        longest_duration = 0.0
+        for iter_dir in sorted(run_dir.iterdir()):
+            if not iter_dir.is_dir():
+                continue
+            try:
+                iteration = int(iter_dir.name)
+            except ValueError:
+                continue
+            rows = self._read_json(iter_dir / "execution.json", default=[])
+            if not isinstance(rows, list):
+                continue
+            total_duration = 0.0
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    total_duration += float(row.get("duration_sec", 0.0))
+                except (TypeError, ValueError):
+                    continue
+            if total_duration > longest_duration:
+                longest_duration = total_duration
+                longest_iteration = iteration
+        return longest_iteration, round(longest_duration, 3)
+
+    def _record_goal_reflection(
+        self,
+        *,
+        run_id: str,
+        goal: str,
+        status: str,
+        message: str,
+        iterations_used: int,
+        tests_ran: bool,
+        tests_passed: bool | None,
+        tdd_mode: bool,
+        iterations_until_green: int | None,
+    ) -> dict[str, Any] | None:
+        normalized_status = str(status).strip().lower() or "unknown"
+        longest_iteration, longest_duration = self._longest_iteration_for_run(run_id)
+        learned_lessons = self._goal_lessons_summary(goal, limit=3)
+
+        if normalized_status in {"success", "preview_ready"}:
+            outcome = "Run completed successfully."
+        elif normalized_status == "stopped":
+            outcome = "Run was stopped before completion."
+        elif normalized_status == "rejected":
+            outcome = "Run was rejected for safety reasons."
+        else:
+            outcome = "Run ended without success."
+
+        if tests_ran and tests_passed is True:
+            test_signal = "Tests passed."
+        elif tests_ran and tests_passed is False:
+            test_signal = "Tests failed, likely due to missing edge cases or implementation gaps."
+        else:
+            test_signal = "No decisive test signal was captured."
+
+        longest_signal = (
+            f"Longest iteration was #{longest_iteration} at ~{longest_duration:.2f}s."
+            if longest_iteration > 0
+            else "No command timing data was available."
+        )
+
+        lessons_signal = (
+            f"Learned lessons: {'; '.join(learned_lessons)}."
+            if learned_lessons
+            else "No new explicit lessons were captured for this goal."
+        )
+
+        summary = f"{outcome} {test_signal} {longest_signal}"
+        context_lines = [
+            f"status={normalized_status}",
+            f"run_id={run_id}",
+            f"iterations_used={max(0, int(iterations_used))}",
+            f"tdd_mode={bool(tdd_mode)}",
+            f"iterations_until_green={iterations_until_green if iterations_until_green is not None else '-'}",
+            f"message={str(message).strip()[:300]}",
+            lessons_signal,
+        ]
+
+        return self._append_reflection_lesson(
+            goal=goal,
+            lesson=summary.strip(),
+            context=" | ".join(context_lines),
+            tags=["reflection", "run", normalized_status],
+            reflection_key=f"run:{run_id}",
+            metadata={"run_id": run_id, "status": normalized_status},
+        )
+
+    def _is_meaningful_conversation(self, message: str, selected_intent: str, response: dict[str, Any]) -> bool:
+        intent = str(selected_intent).strip().lower()
+        if intent in {"ask", "teach", "goal"}:
+            return True
+        if self._is_family_context(message) or self._is_grief_context(message) or self._is_crisis_context(message):
+            return True
+        lowered = str(message).casefold()
+        if any(
+            marker in lowered
+            for marker in ("step-by-step", "step by step", "detailed", "concise", "brief", "more detail")
+        ):
+            return True
+        if len(self._tokenize_text(message)) >= 12:
+            return True
+        citations = response.get("citations", [])
+        return isinstance(citations, list) and bool(citations)
+
+    def _record_conversation_reflection(
+        self,
+        *,
+        message: str,
+        selected_intent: str,
+        response: dict[str, Any],
+        session_id: str,
+        user_message_id: str,
+    ) -> dict[str, Any] | None:
+        if not self._is_meaningful_conversation(message, selected_intent, response):
+            return None
+
+        intent = str(selected_intent).strip().lower() or "chat"
+        lowered = str(message).casefold()
+        tags = ["reflection", "conversation", intent]
+        if "step-by-step" in lowered or "step by step" in lowered:
+            summary = "User prefers step-by-step explanations for better clarity."
+            tags.append("preference")
+        elif any(marker in lowered for marker in ("concise", "brief")):
+            summary = "User prefers concise responses in this context."
+            tags.append("preference")
+        elif "detailed" in lowered or "more detail" in lowered:
+            summary = "User prefers detailed explanations when learning."
+            tags.append("preference")
+        elif intent == "teach":
+            status = str(response.get("status", "")).strip().lower()
+            stored_count = int(response.get("stored_count", 0) or 0)
+            if status == "stored" and stored_count > 0:
+                summary = f"Teach flow stored {stored_count} new memory facts after confirmation."
+            elif status == "overwrite_confirmation_required":
+                summary = "Teach flow surfaced a memory conflict requiring overwrite confirmation."
+            else:
+                summary = "Teach flow reviewed memory updates and deduplication behavior."
+        elif intent == "ask":
+            citations = response.get("citations", [])
+            citation_count = len(citations) if isinstance(citations, list) else 0
+            if citation_count:
+                summary = f"Ask flow answered with memory evidence using {citation_count} citations."
+            else:
+                summary = "Ask flow had limited memory evidence and returned a low-confidence answer."
+        elif intent == "goal":
+            status = str(response.get("status", "")).strip().lower()
+            summary = (
+                "Conversation successfully converted into a queued goal run."
+                if status == "queued"
+                else "Conversation goal request could not be queued and needs clearer constraints."
+            )
+        elif self._is_grief_context(message) or self._is_crisis_context(message):
+            summary = "Sensitive emotional context was handled with supportive language and transparency."
+            tags.append("support")
+        else:
+            summary = "Meaningful conversation added a reusable interaction pattern."
+
+        context = (
+            f"session_id={session_id} | message={str(message).strip()[:260]} | "
+            f"response_status={str(response.get('status', '')).strip()} | intent={intent}"
+        )
+        return self._append_reflection_lesson(
+            goal=f"conversation:{session_id or 'unknown'}",
+            lesson=summary,
+            context=context,
+            tags=tags,
+            reflection_key=f"conversation:{user_message_id}",
+            metadata={"session_id": session_id, "message_id": user_message_id},
+        )
+
+    @staticmethod
+    def _normalize_teaching_category(value: str) -> str:
+        text = str(value or "").strip().lower().replace(" ", "_")
+        if text in {"value", "values"}:
+            return "value"
+        if text in {"guideline", "guidelines", "principle", "principles"}:
+            return "guideline"
+        if text in {"personal_philosophy", "philosophy", "philosophies"}:
+            return "personal_philosophy"
+        return "value"
+
+    @staticmethod
+    def _teaching_category_label(category: str) -> str:
+        normalized = str(category or "").strip().lower()
+        if normalized == "guideline":
+            return "Guidelines"
+        if normalized == "personal_philosophy":
+            return "Personal Philosophy"
+        return "Values"
+
+    def _classify_parent_teaching_category(self, message: str) -> str:
+        lowered = str(message or "").casefold()
+        if any(token in lowered for token in ("always", "never", "should", "must", "rule", "guideline")):
+            return "guideline"
+        if any(token in lowered for token in ("philosophy", "i believe", "worldview", "principle of life")):
+            return "personal_philosophy"
+        return "value"
+
+    def _extract_parent_teaching_principle(self, message: str) -> str:
+        text = str(message or "").strip()
+        if not text:
+            return "this principle"
+        lower = text.casefold()
+        if "always value " in lower:
+            idx = lower.find("always value ")
+            principle = text[idx + len("always value ") :].strip(" .")
+            if principle:
+                return principle
+        prefixes = ("value:", "guideline:", "philosophy:", "principle:")
+        for prefix in prefixes:
+            if lower.startswith(prefix):
+                principle = text[len(prefix) :].strip(" .")
+                if principle:
+                    return principle
+        return text.strip(" .")[:140] or "this principle"
+
+    def _build_parent_teaching_question(self, category: str, principle: str) -> str:
+        category_label = self._teaching_category_label(category)
+        topic = str(principle or "this principle").strip()[:120]
+        return (
+            f"Thank you for teaching this {category_label.lower()} idea. "
+            f"How should I apply '{topic}' when planning or debugging?"
+        )
+
+    def _store_parent_teaching_value(
+        self,
+        *,
+        category: str,
+        principle: str,
+        application: str,
+        actor: str,
+        session_id: str,
+        source_message: str,
+    ) -> dict[str, Any]:
+        payload = self._read_memory_payload()
+        values = payload.get("values", []) if isinstance(payload.get("values"), list) else []
+        normalized_category = self._normalize_teaching_category(category)
+        normalized_principle = str(principle or "").strip()[:220]
+        normalized_application = str(application or "").strip()[:600]
+        now = self._now_iso()
+        entry = {
+            "id": uuid.uuid4().hex,
+            "timestamp_utc": now,
+            "category": normalized_category,
+            "category_label": self._teaching_category_label(normalized_category),
+            "principle": normalized_principle,
+            "application": normalized_application,
+            "source": "parent_teaching_mode",
+            "actor": actor,
+            "session_id": session_id,
+            "message": str(source_message or "").strip()[:400],
+            "tags": ["parent_teaching", normalized_category],
+        }
+        values.append(entry)
+        payload["values"] = values[-2000:]
+        self._write_memory_payload(payload)
+        self.publish_event("status", {"type": "memory_value_stored", "payload": entry})
+        self.publish_event("logs", {"type": "memory_value_stored", "payload": entry})
+        return entry
+
+    def _handle_parent_teaching_turn(
+        self,
+        *,
+        message: str,
+        actor: str,
+        session_id: str,
+    ) -> dict[str, Any] | None:
+        clean_session = self._sanitize_session_id(session_id)
+        if not clean_session:
+            return None
+
+        pending = self._pending_parent_teaching.get(clean_session)
+        if pending:
+            stored = self._store_parent_teaching_value(
+                category=str(pending.get("category", "value")),
+                principle=str(pending.get("principle", "this principle")),
+                application=str(message),
+                actor=actor,
+                session_id=clean_session,
+                source_message=str(pending.get("message", "")),
+            )
+            self._pending_parent_teaching.pop(clean_session, None)
+            return {
+                "mode": "teach",
+                "status": "stored",
+                "parent_teaching_mode": True,
+                "parent_teaching_stage": "completed",
+                "stored_values": [stored],
+                "stored_value_count": 1,
+                "category": stored.get("category", "value"),
+                "category_label": stored.get("category_label", "Values"),
+                "principle": stored.get("principle", ""),
+                "application": stored.get("application", ""),
+                "session_id": clean_session,
+                "actor": actor,
+                "timestamp_utc": self._now_iso(),
+            }
+
+        category = self._classify_parent_teaching_category(message)
+        principle = self._extract_parent_teaching_principle(message)
+        question = self._build_parent_teaching_question(category, principle)
+        pending_payload = {
+            "category": category,
+            "principle": principle,
+            "question": question,
+            "message": str(message),
+            "actor": actor,
+            "session_id": clean_session,
+            "created_at": self._now_iso(),
+        }
+        self._pending_parent_teaching[clean_session] = pending_payload
+        return {
+            "mode": "teach",
+            "status": "parent_teaching_clarify_required",
+            "parent_teaching_mode": True,
+            "parent_teaching_stage": "clarifying",
+            "requires_clarification": True,
+            "category": category,
+            "category_label": self._teaching_category_label(category),
+            "principle": principle,
+            "question": question,
+            "message": str(message),
+            "session_id": clean_session,
+            "actor": actor,
+            "timestamp_utc": self._now_iso(),
+        }
+
+    def _match_values_for_question(
+        self,
+        question_tokens: set[str],
+        values: list[dict[str, Any]],
+        *,
+        limit: int = 4,
+    ) -> list[dict[str, Any]]:
+        if not question_tokens:
+            return []
+        scored: list[tuple[int, dict[str, Any]]] = []
+        for row in values:
+            if not isinstance(row, dict):
+                continue
+            text = (
+                f"{row.get('category', '')} {row.get('category_label', '')} "
+                f"{row.get('principle', '')} {row.get('application', '')} {row.get('message', '')}"
+            )
+            tokens = set(self._tokenize_text(text))
+            score = len(question_tokens & tokens)
+            if score > 0:
+                scored.append((score, row))
+        scored.sort(key=lambda item: (item[0], str(item[1].get("timestamp_utc", ""))), reverse=True)
+        return [row for _, row in scored[: max(1, min(limit, 50))]]
+
+    def _build_values_context_for_goal(self, goal: str, limit: int = 4) -> str:
+        payload = self._read_memory_payload()
+        values = payload.get("values", []) if isinstance(payload.get("values"), list) else []
+        if not values:
+            return ""
+        goal_tokens = set(self._tokenize_text(goal))
+        scored: list[tuple[int, dict[str, Any]]] = []
+        for row in values:
+            if not isinstance(row, dict):
+                continue
+            text = f"{row.get('principle', '')} {row.get('application', '')} {row.get('category_label', '')}"
+            tokens = set(self._tokenize_text(text))
+            score = len(goal_tokens & tokens)
+            scored.append((score, row))
+        if any(score > 0 for score, _ in scored):
+            scored = [item for item in scored if item[0] > 0]
+        scored.sort(key=lambda item: (item[0], str(item[1].get("timestamp_utc", ""))), reverse=True)
+        selected = [row for _, row in scored[: max(1, min(limit, 12))]]
+        if not selected:
+            return ""
+
+        lines: list[str] = ["Parent teachings (Values / Guidelines / Personal Philosophy):"]
+        for row in selected:
+            principle = str(row.get("principle", "")).strip()
+            if not principle:
+                continue
+            category_label = str(row.get("category_label", self._teaching_category_label(str(row.get("category", ""))))).strip()
+            application = str(row.get("application", "")).strip()
+            if application:
+                lines.append(f"- ({category_label}) {principle} -> {application}")
+            else:
+                lines.append(f"- ({category_label}) {principle}")
+        lines.append("These teachings guide tone and planning style only; never override safety constraints.")
+        return "\n".join(lines).strip()
+
+    def _workspace_relative_path(self, path_value: str | Path) -> str:
+        text = str(path_value or "").strip()
+        if not text:
+            return ""
+        workspace_root = self.config.workspace_dir.resolve()
+        try:
+            candidate = Path(text)
+            if not candidate.is_absolute():
+                candidate = workspace_root / candidate
+            resolved = candidate.resolve()
+            if resolved == workspace_root:
+                return ""
+            relative = resolved.relative_to(workspace_root).as_posix().strip("/")
+            return relative
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _is_workspace_project_relative(relative_path: str) -> bool:
+        clean = str(relative_path or "").strip().replace("\\", "/").strip("/")
+        return clean.startswith("projects/") and len(clean) > len("projects/")
+
+    @staticmethod
+    def _contains_project_query_signal(message: str) -> bool:
+        lowered = str(message or "").casefold()
+        return any(
+            token in lowered
+            for token in (
+                "project",
+                "architecture",
+                "design",
+                "testing",
+                "weakness",
+                "workspace",
+                "projects/",
+            )
+        )
+
+    def _match_projects_for_query(
+        self,
+        query_tokens: set[str],
+        projects: list[dict[str, Any]],
+        *,
+        query_text: str,
+        limit: int = 2,
+    ) -> list[dict[str, Any]]:
+        if not projects:
+            return []
+        clean_query = str(query_text or "").casefold()
+        scored: list[tuple[int, dict[str, Any]]] = []
+        for row in projects:
+            if not isinstance(row, dict):
+                continue
+            slug = str(row.get("project_slug", "")).strip()
+            relative_path = str(row.get("project_relative_path", "")).strip()
+            weakness_text = " ".join(str(item) for item in row.get("known_weaknesses", []) if str(item).strip())
+            decision_text = " ".join(str(item) for item in row.get("key_design_decisions", []) if str(item).strip())
+            blob = (
+                f"{slug} {relative_path} {row.get('architecture_summary', '')} "
+                f"{row.get('testing_approach', '')} {weakness_text} {decision_text}"
+            )
+            tokens = set(self._tokenize_text(blob))
+            score = len(query_tokens & tokens)
+            if slug and slug.casefold() in clean_query:
+                score += 3
+            if relative_path and relative_path.casefold() in clean_query:
+                score += 4
+            if score > 0:
+                scored.append((score, row))
+        scored.sort(key=lambda item: (item[0], str(item[1].get("last_updated", ""))), reverse=True)
+        if scored:
+            return [row for _, row in scored[: max(1, min(limit, 8))]]
+        if ({"project", "architecture", "workspace"} & query_tokens) and len(projects) == 1:
+            return [projects[0]]
+        return []
+
+    @staticmethod
+    def _compose_project_brain_overview_line(entry: dict[str, Any]) -> str:
+        slug = str(entry.get("project_slug", "")).strip() or str(entry.get("project_relative_path", "")).strip() or "project"
+        architecture = str(entry.get("architecture_summary", "")).strip() or "a modular project structure"
+        testing = str(entry.get("testing_approach", "")).strip() or "tests need more explicit automation"
+        weaknesses = entry.get("known_weaknesses", [])
+        weakness = ""
+        if isinstance(weaknesses, list):
+            weakness = next((str(item).strip() for item in weaknesses if str(item).strip()), "")
+        if not weakness:
+            weakness = "edge-case validation needs continued improvement"
+
+        architecture_sentence = (
+            architecture
+            if architecture.casefold().startswith("this project uses")
+            else f"This project uses {architecture.rstrip('.')}."
+        )
+        return (
+            f"Project `{slug}` overview: {architecture_sentence} "
+            f"Testing approach: {testing.rstrip('.')}. "
+            f"Last time, {weakness.rstrip('.')}."
+        ).strip()
+
+    def _build_project_brain_context_for_goal(
+        self,
+        goal: str,
+        *,
+        project_slug: str,
+        project_path: str,
+    ) -> str:
+        payload = self._read_memory_payload()
+        projects = payload.get("projects", []) if isinstance(payload.get("projects"), list) else []
+        if not projects:
+            return ""
+
+        selected: dict[str, Any] | None = None
+        project_relative = self._workspace_relative_path(project_path)
+        if project_relative:
+            for row in projects:
+                if not isinstance(row, dict):
+                    continue
+                if str(row.get("project_relative_path", "")).casefold() == project_relative.casefold():
+                    selected = row
+                    break
+        if selected is None and project_slug:
+            for row in projects:
+                if not isinstance(row, dict):
+                    continue
+                if str(row.get("project_slug", "")).casefold() == project_slug.casefold():
+                    selected = row
+                    break
+        if selected is None:
+            tokens = set(self._tokenize_text(goal))
+            matches = self._match_projects_for_query(tokens, projects, query_text=goal, limit=1)
+            if matches:
+                selected = matches[0]
+        if selected is None:
+            return ""
+
+        weaknesses = selected.get("known_weaknesses", [])
+        weakness_line = ""
+        if isinstance(weaknesses, list):
+            weakness_line = next((str(item).strip() for item in weaknesses if str(item).strip()), "")
+        if not weakness_line:
+            weakness_line = "No major weaknesses recorded yet."
+        lines = [
+            "Project Brain recall:",
+            f"- Project: {selected.get('project_slug', 'project')} ({selected.get('project_relative_path', '-')})",
+            f"- Architecture: {selected.get('architecture_summary', '-')}",
+            f"- Testing approach: {selected.get('testing_approach', '-')}",
+            f"- Known weakness: {weakness_line}",
+            "Reuse this context so work continues without relearning from scratch, while keeping scope within this project.",
+        ]
+        return "\n".join(lines).strip()
+
+    @staticmethod
+    def _summarize_project_architecture(project_files: list[dict[str, Any]]) -> str:
+        paths = [str(item.get("path", "")).strip() for item in project_files if isinstance(item, dict)]
+        paths = [path for path in paths if path]
+        if not paths:
+            return "a lightweight structure that still needs architectural expansion"
+        top_dirs = sorted({path.split("/", 1)[0] for path in paths if "/" in path})
+        has_src = any(path.startswith("src/") for path in paths)
+        has_tests = any(path.startswith("tests/") or "/test_" in path or path.startswith("test_") for path in paths)
+        has_cli = any(path.endswith(("cli.py", "main.py", "__main__.py")) for path in paths)
+        has_json = any(path.endswith(".json") for path in paths)
+        has_sqlite = any(path.endswith((".db", ".sqlite", ".sqlite3")) or "sqlite" in path.casefold() for path in paths)
+
+        if has_cli and has_src:
+            base = "modular CLI structure"
+        elif has_src:
+            base = "modular source-package structure"
+        elif has_cli:
+            base = "CLI-oriented script structure"
+        elif len(top_dirs) >= 2:
+            base = f"layered structure across {', '.join(top_dirs[:3])}"
+        else:
+            base = "compact single-module structure"
+
+        if has_json and has_sqlite:
+            base = f"{base} with mixed JSON and SQLite storage"
+        elif has_json:
+            base = f"{base} with JSON storage"
+        elif has_sqlite:
+            base = f"{base} with SQLite storage"
+        if has_tests:
+            base = f"{base} and dedicated tests"
+        return base
+
+    @staticmethod
+    def _summarize_project_testing_approach(
+        project_files: list[dict[str, Any]],
+        executed_commands: list[str],
+        *,
+        tdd_mode: bool,
+    ) -> str:
+        has_test_files = any(
+            str(item.get("path", "")).startswith("tests/") or "/test_" in str(item.get("path", ""))
+            for item in project_files
+            if isinstance(item, dict)
+        )
+        has_pytest_cmd = any(
+            str(command).strip().lower().startswith("pytest")
+            or str(command).strip().lower().startswith("python -m pytest")
+            for command in executed_commands
+        )
+        if tdd_mode and has_pytest_cmd:
+            return "Strict TDD with pytest red/green iterations."
+        if has_pytest_cmd or has_test_files:
+            return "Pytest tests under tests/ with iterative command validation."
+        return "Testing is lightweight; expand automated pytest coverage."
+
+    @staticmethod
+    def _summarize_project_design_decisions(
+        plan_payload: dict[str, Any],
+        meta: dict[str, Any],
+        executed_commands: list[str],
+    ) -> list[str]:
+        decisions: list[str] = []
+        steps = plan_payload.get("steps", []) if isinstance(plan_payload, dict) else []
+        if isinstance(steps, list):
+            for step in steps[:3]:
+                if not isinstance(step, dict):
+                    continue
+                title = str(step.get("title", "")).strip() or str(step.get("details", "")).strip()
+                if title:
+                    decisions.append(f"Planned around: {title}.")
+        workspace_target = str(meta.get("workspace_target_path", "")).strip()
+        if workspace_target:
+            decisions.append(f"Kept edits focused on workspace target `{workspace_target}`.")
+        if bool(meta.get("tdd_mode", False)):
+            decisions.append("Used strict TDD sequencing before implementation changes.")
+        if any("pytest" in str(command).casefold() for command in executed_commands):
+            decisions.append("Validated implementation through iterative pytest feedback loops.")
+        if not decisions:
+            decisions.append("Kept project boundaries isolated under workspace/projects for clean continuity.")
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for item in decisions:
+            key = item.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+        return deduped[:6]
+
+    def _summarize_project_weaknesses(
+        self,
+        *,
+        run_id: str,
+        meta: dict[str, Any],
+        result_payload: dict[str, Any],
+    ) -> list[str]:
+        weaknesses: list[str] = []
+        status = str(meta.get("status", "")).strip().casefold()
+        message = str(meta.get("message", "")).strip()
+        if status in {"failed", "rejected", "stopped"} and message:
+            weaknesses.append(message)
+        if isinstance(result_payload, dict):
+            failure = result_payload.get("failure_details", {})
+            if isinstance(failure, dict):
+                top_errors = failure.get("top_errors", [])
+                if isinstance(top_errors, list):
+                    for row in top_errors[:2]:
+                        text = str(row).strip()
+                        if text:
+                            weaknesses.append(text)
+        payload = self._read_memory_payload()
+        lessons = payload.get("lessons", []) if isinstance(payload.get("lessons"), list) else []
+        for row in reversed(lessons):
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("run_id", "")).strip() != run_id:
+                continue
+            lesson_text = str(row.get("lesson", "")).strip()
+            if not lesson_text:
+                continue
+            lowered = lesson_text.casefold()
+            if any(token in lowered for token in ("edge case", "validation", "coverage", "flaky", "timeout", "failure")):
+                weaknesses.append(lesson_text)
+                break
+        if not weaknesses:
+            if status in {"success", "preview_ready"}:
+                weaknesses.append("edge-case validation needs continued improvement")
+            else:
+                weaknesses.append("stability and validation need another focused iteration")
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for item in weaknesses:
+            clean = str(item).strip().strip(".")
+            if not clean:
+                continue
+            key = clean.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(f"{clean}.")
+        return deduped[:4]
+
+    def _upsert_project_brain_from_run(self, run_id: str) -> None:
+        meta = self._read_run_meta(run_id) or {}
+        if str(meta.get("mode", "")).strip().casefold() != "goal":
+            return
+        project_path = str(meta.get("project_path", "")).strip()
+        project_slug = str(meta.get("project_slug", "")).strip()
+        project_relative = self._workspace_relative_path(project_path)
+        if not self._is_workspace_project_relative(project_relative):
+            return
+        try:
+            project_dir = self._resolve_goal_project_path(project_path)
+        except ValueError:
+            return
+
+        run_dir = self._run_dir(run_id)
+        plan_payload = self._read_json(run_dir / "plan.json", default={})
+        result_payload = self._read_json(run_dir / "result.json", default={})
+        project_files = self._list_project_files(project_dir, limit=600)
+        executed_commands: list[str] = []
+        iterations_dir = run_dir / "iterations"
+        if iterations_dir.exists():
+            for item in sorted(iterations_dir.iterdir()):
+                if not item.is_dir():
+                    continue
+                rows = self._read_json(item / "execution.json", default=[])
+                if not isinstance(rows, list):
+                    continue
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    command = str(row.get("command", "")).strip()
+                    if command:
+                        executed_commands.append(command)
+
+        architecture_summary = self._summarize_project_architecture(project_files)
+        testing_approach = self._summarize_project_testing_approach(
+            project_files,
+            executed_commands,
+            tdd_mode=bool(meta.get("tdd_mode", False)),
+        )
+        key_decisions = self._summarize_project_design_decisions(plan_payload, meta, executed_commands)
+        known_weaknesses = self._summarize_project_weaknesses(
+            run_id=run_id,
+            meta=meta,
+            result_payload=result_payload if isinstance(result_payload, dict) else {},
+        )
+
+        now = self._now_iso()
+        goal_text = str(meta.get("payload", "")).strip()
+        status_text = str(meta.get("status", "")).strip().lower()
+        message_text = str(meta.get("message", "")).strip()
+        entry_payload = {
+            "project_slug": project_slug or Path(project_relative).name,
+            "project_path": str(project_dir),
+            "project_relative_path": project_relative,
+            "architecture_summary": architecture_summary,
+            "key_design_decisions": key_decisions,
+            "testing_approach": testing_approach,
+            "known_weaknesses": known_weaknesses,
+            "last_goal": goal_text,
+            "last_run_id": run_id,
+            "last_status": status_text,
+            "last_message": message_text,
+            "last_updated": now,
+            "source": PROJECT_BRAIN_SOURCE,
+        }
+        history_entry = {
+            "timestamp_utc": now,
+            "run_id": run_id,
+            "status": status_text,
+            "goal": goal_text,
+            "message": message_text,
+            "known_weaknesses": known_weaknesses[:2],
+        }
+
+        payload = self._read_memory_payload()
+        projects = payload.get("projects", []) if isinstance(payload.get("projects"), list) else []
+        target_index = -1
+        for idx, row in enumerate(projects):
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("project_relative_path", "")).casefold() == project_relative.casefold():
+                target_index = idx
+                break
+
+        if target_index >= 0:
+            current = projects[target_index] if isinstance(projects[target_index], dict) else {}
+            history = current.get("history", [])
+            history_rows = history if isinstance(history, list) else []
+            history_rows.append(history_entry)
+            updated = {
+                **current,
+                **entry_payload,
+                "id": str(current.get("id", "")).strip() or uuid.uuid4().hex,
+                "created_at": str(current.get("created_at", "")).strip() or now,
+                "history": history_rows[-120:],
+            }
+            projects[target_index] = updated
+            saved_entry = updated
+        else:
+            saved_entry = {
+                "id": uuid.uuid4().hex,
+                "created_at": now,
+                **entry_payload,
+                "history": [history_entry],
+            }
+            projects.append(saved_entry)
+
+        payload["projects"] = projects[-800:]
+        self._write_memory_payload(payload)
+        self.publish_event("status", {"type": "memory_project_brain_saved", "payload": saved_entry})
+        self.publish_event("logs", {"type": "memory_project_brain_saved", "payload": saved_entry})
 
     @staticmethod
     def _normalize_fact_row(subject: str, predicate: str, object_value: str) -> dict[str, str] | None:
@@ -2225,7 +3628,10 @@ class DavidControlCenter:
     ) -> dict[str, Any]:
         payload = self._read_memory_payload()
         facts = payload.get("facts", []) if isinstance(payload.get("facts"), list) else []
-        lessons = payload.get("lessons", []) if isinstance(payload.get("lessons"), list) else []
+        all_lessons = payload.get("lessons", []) if isinstance(payload.get("lessons"), list) else []
+        values = payload.get("values", []) if isinstance(payload.get("values"), list) else []
+        projects = payload.get("projects", []) if isinstance(payload.get("projects"), list) else []
+        lessons = self._non_reflection_lessons(all_lessons)
         question_tokens = set(self._tokenize_text(question))
 
         matched_facts = self._match_facts_for_question(question_tokens, facts, limit=8)
@@ -2235,6 +3641,13 @@ class DavidControlCenter:
             limit=5,
         )
         matched_lessons = self._match_lessons_for_question(question_tokens, lessons, limit=4)
+        matched_values = self._match_values_for_question(question_tokens, values, limit=3)
+        matched_projects = self._match_projects_for_query(
+            question_tokens,
+            projects,
+            query_text=question,
+            limit=2,
+        )
 
         if not self.settings.companion_mode:
             answer = MEMORY_UNKNOWN_ANSWER
@@ -2249,6 +3662,8 @@ class DavidControlCenter:
                     break
             if father_fact:
                 answer = f"You told me earlier that David's symbolic father name is {father_fact.get('object', '')}."
+            elif matched_projects:
+                answer = self._compose_project_brain_overview_line(matched_projects[0])
             elif matched_facts:
                 first = matched_facts[0]
                 answer = (
@@ -2266,6 +3681,8 @@ class DavidControlCenter:
                 facts=matched_facts,
                 conversations=matched_conversations,
                 lessons=[],
+                values=matched_values,
+                projects=matched_projects,
             )
             return {
                 "mode": "ask",
@@ -2278,8 +3695,17 @@ class DavidControlCenter:
                 "conversation_match_count": len(matched_conversations),
                 "matched_lessons": [],
                 "lesson_match_count": 0,
+                "matched_values": matched_values,
+                "values_match_count": len(matched_values),
+                "matched_projects": matched_projects,
+                "project_match_count": len(matched_projects),
                 "citations": citations,
-                "used_memory": {"facts": matched_facts[:5], "conversations": matched_conversations[:3]},
+                "used_memory": {
+                    "facts": matched_facts[:5],
+                    "conversations": matched_conversations[:3],
+                    "values": matched_values[:3],
+                    "projects": matched_projects[:2],
+                },
                 "session_id": session_id,
                 "actor": actor,
                 "timestamp_utc": self._now_iso(),
@@ -2290,12 +3716,16 @@ class DavidControlCenter:
             matched_facts=matched_facts,
             matched_conversations=matched_conversations,
             matched_lessons=matched_lessons,
+            matched_values=matched_values,
+            matched_projects=matched_projects,
             force_transparency=force_transparency,
         )
         citations = self._build_memory_citations(
             facts=matched_facts,
             conversations=matched_conversations,
             lessons=matched_lessons,
+            values=matched_values,
+            projects=matched_projects,
         )
 
         return {
@@ -2309,11 +3739,17 @@ class DavidControlCenter:
             "conversation_match_count": len(matched_conversations),
             "matched_lessons": matched_lessons,
             "lesson_match_count": len(matched_lessons),
+            "matched_values": matched_values,
+            "values_match_count": len(matched_values),
+            "matched_projects": matched_projects,
+            "project_match_count": len(matched_projects),
             "citations": citations,
             "used_memory": {
                 "facts": matched_facts[:5],
                 "conversations": matched_conversations[:3],
                 "lessons": matched_lessons[:3],
+                "values": matched_values[:3],
+                "projects": matched_projects[:2],
             },
             "session_id": session_id,
             "actor": actor,
@@ -2374,7 +3810,25 @@ class DavidControlCenter:
                 ended_at=self._now_iso(),
             )
             self._write_json(self._run_dir(run_id) / "result.json", {"error": str(exc)})
+            if mode == "goal":
+                meta = self._read_run_meta(run_id) or {}
+                self._record_goal_reflection(
+                    run_id=run_id,
+                    goal=str(meta.get("payload", payload)),
+                    status="failed",
+                    message=f"Unhandled exception: {exc}",
+                    iterations_used=int(meta.get("iteration", 0) or 0),
+                    tests_ran=bool(meta.get("tests_ran", False)),
+                    tests_passed=meta.get("tests_passed"),
+                    tdd_mode=bool(meta.get("tdd_mode", False)),
+                    iterations_until_green=meta.get("iterations_until_green"),
+                )
         finally:
+            if mode == "goal":
+                try:
+                    self._upsert_project_brain_from_run(run_id)
+                except Exception:  # pragma: no cover - defensive boundary
+                    self._logger.exception("project brain update failed run_id=%s", run_id)
             with self._lock:
                 if self._active_run_id == run_id:
                     self._active_run_id = None
@@ -2533,7 +3987,20 @@ class DavidControlCenter:
         initial_snapshot = workspace.snapshot()
         base_memory_context = memory.render_context(effective_goal)
         log_context = self._build_goal_log_context()
-        memory_context = self._compose_goal_context(base_memory_context, log_context)
+        reflection_context = self._build_reflection_context_for_goal(effective_goal)
+        values_context = self._build_values_context_for_goal(effective_goal)
+        project_brain_context = self._build_project_brain_context_for_goal(
+            effective_goal,
+            project_slug=project_slug,
+            project_path=str(project_path),
+        )
+        memory_context = self._compose_goal_context(
+            base_memory_context,
+            log_context,
+            reflection_context,
+            values_context,
+            project_brain_context,
+        )
         plan = planner.create_plan(
             goal=effective_goal,
             workspace_snapshot=initial_snapshot,
@@ -2596,6 +4063,17 @@ class DavidControlCenter:
                     tests_passed,
                     iterations_until_green=iterations_until_green,
                 )
+                self._record_goal_reflection(
+                    run_id=run_id,
+                    goal=effective_goal,
+                    status="stopped",
+                    message="Run stopped by user.",
+                    iterations_used=max(0, iteration - 1),
+                    tests_ran=tests_ran,
+                    tests_passed=tests_passed,
+                    tdd_mode=tdd_mode,
+                    iterations_until_green=iterations_until_green,
+                )
                 return
 
             started = time.perf_counter()
@@ -2615,7 +4093,20 @@ class DavidControlCenter:
             workspace_snapshot = workspace.snapshot()
             base_memory_context = memory.render_context(effective_goal)
             log_context = self._build_goal_log_context()
-            memory_context = self._compose_goal_context(base_memory_context, log_context)
+            reflection_context = self._build_reflection_context_for_goal(effective_goal)
+            values_context = self._build_values_context_for_goal(effective_goal)
+            project_brain_context = self._build_project_brain_context_for_goal(
+                effective_goal,
+                project_slug=project_slug,
+                project_path=str(project_path),
+            )
+            memory_context = self._compose_goal_context(
+                base_memory_context,
+                log_context,
+                reflection_context,
+                values_context,
+                project_brain_context,
+            )
             coder_output = coder.propose(
                 goal=effective_goal,
                 plan_json=plan.to_dict(),
@@ -2782,6 +4273,17 @@ class DavidControlCenter:
                         tests_passed,
                         iterations_until_green=iterations_until_green,
                     )
+                    self._record_goal_reflection(
+                        run_id=run_id,
+                        goal=effective_goal,
+                        status="rejected",
+                        message="Risky edit set was rejected.",
+                        iterations_used=iteration,
+                        tests_ran=tests_ran,
+                        tests_passed=tests_passed,
+                        tdd_mode=tdd_mode,
+                        iterations_until_green=iterations_until_green,
+                    )
                     return
                 self._append_timeline(
                     run_id,
@@ -2829,6 +4331,17 @@ class DavidControlCenter:
                     progress_percent=100,
                     tests_ran=False,
                     tests_passed=None,
+                    iterations_until_green=iterations_until_green,
+                )
+                self._record_goal_reflection(
+                    run_id=run_id,
+                    goal=effective_goal,
+                    status="preview_ready",
+                    message="Preview generated. No files were changed.",
+                    iterations_used=iteration,
+                    tests_ran=False,
+                    tests_passed=None,
+                    tdd_mode=tdd_mode,
                     iterations_until_green=iterations_until_green,
                 )
                 return
@@ -3088,6 +4601,17 @@ class DavidControlCenter:
                     },
                     iterations_until_green=iterations_until_green,
                 )
+                self._record_goal_reflection(
+                    run_id=run_id,
+                    goal=effective_goal,
+                    status="success",
+                    message=critic_output.analysis,
+                    iterations_used=iteration,
+                    tests_ran=tests_ran,
+                    tests_passed=tests_passed,
+                    tdd_mode=tdd_mode,
+                    iterations_until_green=iterations_until_green,
+                )
                 return
 
             if critic_output.status == "abort":
@@ -3113,6 +4637,17 @@ class DavidControlCenter:
                     execution_results,
                     tests_ran,
                     tests_passed,
+                    iterations_until_green=iterations_until_green,
+                )
+                self._record_goal_reflection(
+                    run_id=run_id,
+                    goal=effective_goal,
+                    status="failed",
+                    message=critic_output.analysis,
+                    iterations_used=iteration,
+                    tests_ran=tests_ran,
+                    tests_passed=tests_passed,
+                    tdd_mode=tdd_mode,
                     iterations_until_green=iterations_until_green,
                 )
                 return
@@ -3142,6 +4677,17 @@ class DavidControlCenter:
             execution_results=[],
             tests_ran=tests_ran,
             tests_passed=tests_passed,
+            iterations_until_green=iterations_until_green,
+        )
+        self._record_goal_reflection(
+            run_id=run_id,
+            goal=effective_goal,
+            status="failed",
+            message="Iteration limit reached before meeting success criteria.",
+            iterations_used=iteration_limit,
+            tests_ran=tests_ran,
+            tests_passed=tests_passed,
+            tdd_mode=tdd_mode,
             iterations_until_green=iterations_until_green,
         )
 

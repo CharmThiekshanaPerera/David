@@ -219,6 +219,67 @@ def test_api_chat_intent_classification(memory_client) -> None:
     assert teach_payload["detected_intent"] == "teach"
 
 
+def test_parent_teaching_mode_requires_clarification_then_stores_value(memory_client) -> None:
+    client, _config = memory_client
+    session_id = "session_parent_teach_1"
+
+    first = client.post(
+        "/api/chat",
+        json={
+            "message": "Always value patience.",
+            "intent": "teach",
+            "confirm_save": True,
+            "parent_teaching_mode": True,
+            "session_id": session_id,
+        },
+    )
+    assert first.status_code == 200
+    first_response = first.get_json()["data"]["response"]
+    assert first_response["status"] == "parent_teaching_clarify_required"
+    assert first_response["requires_clarification"] is True
+    assert "How should I apply" in str(first_response.get("question", ""))
+
+    second = client.post(
+        "/api/chat",
+        json={
+            "message": "Apply patience by investigating failures step by step before editing code.",
+            "intent": "teach",
+            "confirm_save": True,
+            "parent_teaching_mode": True,
+            "session_id": session_id,
+        },
+    )
+    assert second.status_code == 200
+    second_response = second.get_json()["data"]["response"]
+    assert second_response["status"] == "stored"
+    assert second_response["parent_teaching_stage"] == "completed"
+    assert int(second_response.get("stored_value_count", 0)) == 1
+
+    snapshot = client.get("/api/memory")
+    assert snapshot.status_code == 200
+    data = snapshot.get_json()["data"]
+    assert int(data.get("values_count", 0)) >= 1
+    assert any("patience" in str(item.get("principle", "")).lower() for item in data.get("values", []))
+
+
+def test_meaningful_chat_writes_reflection(memory_client) -> None:
+    client, _config = memory_client
+
+    chat = client.post(
+        "/api/chat",
+        json={"message": "Please explain this step-by-step so I can follow clearly.", "intent": "chat"},
+    )
+    assert chat.status_code == 200
+
+    snapshot = client.get("/api/memory")
+    assert snapshot.status_code == 200
+    payload = snapshot.get_json()["data"]
+    reflections = payload.get("reflections", [])
+    assert any("step-by-step" in str(item.get("lesson", "")).lower() for item in reflections)
+    assert int(payload.get("reflection_count", 0)) >= 1
+    assert all(str(item.get("kind", "")).lower() != "reflection" for item in payload.get("lessons", []))
+
+
 def test_api_settings_companion_mode_default_true(memory_client) -> None:
     client, _config = memory_client
     settings = client.get("/api/settings")
@@ -237,6 +298,18 @@ def test_api_settings_toggle_companion_mode(memory_client) -> None:
     refreshed = client.get("/api/settings")
     assert refreshed.status_code == 200
     assert refreshed.get_json()["data"]["companion_mode"] is False
+
+
+def test_api_settings_toggle_parent_teaching_mode(memory_client) -> None:
+    client, _config = memory_client
+
+    updated = client.post("/api/settings", json={"parent_teaching_mode": True})
+    assert updated.status_code == 200
+    assert updated.get_json()["data"]["parent_teaching_mode"] is True
+
+    refreshed = client.get("/api/settings")
+    assert refreshed.status_code == 200
+    assert refreshed.get_json()["data"]["parent_teaching_mode"] is True
 
 
 def test_companion_ask_starts_with_you_once_told_me(memory_client) -> None:
@@ -359,6 +432,30 @@ def test_companion_chat_sensitive_turn_repeats_transparency(memory_client) -> No
     assert "I am an AI companion in your Dashboard" in third_reply
 
 
+def test_companion_growth_chat_references_learning(memory_client) -> None:
+    client, config = memory_client
+    memory_payload = json.loads(config.memory_file.read_text(encoding="utf-8"))
+    memory_payload["lessons"] = [
+        {
+            "timestamp_utc": "2026-02-01T00:00:00+00:00",
+            "goal": "run:demo",
+            "lesson": "Tests failed due to missing edge case, then passed after structure refinement.",
+            "tags": ["reflection", "run", "testing"],
+            "context": "status=success",
+            "kind": "reflection",
+            "source": "reflection_engine",
+            "reflection_key": "run:demo",
+        }
+    ]
+    config.memory_file.write_text(json.dumps(memory_payload) + "\n", encoding="utf-8")
+
+    chat = client.post("/api/chat", json={"message": "How have you grown over time?", "intent": "chat"})
+    assert chat.status_code == 200
+    reply = str(chat.get_json()["data"]["response"]["reply"])
+    assert "Earlier, I struggled" in reply
+    assert "software evolving through stored lessons" in reply
+
+
 def test_companion_grief_message_with_remember_defaults_to_chat(memory_client) -> None:
     client, _config = memory_client
     chat = client.post("/api/chat", json={"message": "Please remember I feel grief and loss today."})
@@ -462,3 +559,49 @@ def test_teach_heuristics_capture_birthday_saying_goal_and_routine(memory_client
     assert "favorite_saying" in predicates
     assert "shared_goal" in predicates
     assert "shared_routine" in predicates
+
+
+def test_project_brain_recall_returns_architecture_overview(memory_client) -> None:
+    client, config = memory_client
+    project_dir = config.workspace_dir / "projects" / "demo_project"
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    memory_payload = json.loads(config.memory_file.read_text(encoding="utf-8"))
+    memory_payload["projects"] = [
+        {
+            "id": "project_brain_demo_project",
+            "created_at": "2026-02-01T00:00:00+00:00",
+            "last_updated": "2026-02-12T00:00:00+00:00",
+            "project_slug": "demo_project",
+            "project_path": str(project_dir),
+            "project_relative_path": "projects/demo_project",
+            "architecture_summary": "modular CLI structure with JSON storage and dedicated tests",
+            "key_design_decisions": ["Planned around: Keep CLI and storage concerns separated."],
+            "testing_approach": "Pytest tests under tests/ with iterative command validation.",
+            "known_weaknesses": ["edge-case validation needed improvement."],
+            "last_goal": "Revisit demo project",
+            "last_run_id": "run_demo_prev",
+            "last_status": "success",
+            "last_message": "done",
+            "source": "project_brain_engine",
+            "history": [],
+        }
+    ]
+    config.memory_file.write_text(json.dumps(memory_payload) + "\n", encoding="utf-8")
+
+    ask = client.post(
+        "/api/chat",
+        json={"message": "Summarize demo_project architecture and weaknesses.", "intent": "ask"},
+    )
+    assert ask.status_code == 200
+    response = ask.get_json()["data"]["response"]
+    answer = str(response.get("answer", ""))
+    assert "modular CLI structure with JSON storage" in answer
+    assert "edge-case validation needed improvement" in answer.lower()
+    citations = response.get("citations", [])
+    assert any(str(item.get("type", "")) == "project" for item in citations)
+
+    snapshot = client.get("/api/memory")
+    assert snapshot.status_code == 200
+    snapshot_payload = snapshot.get_json()["data"]
+    assert int(snapshot_payload.get("project_count", 0)) >= 1

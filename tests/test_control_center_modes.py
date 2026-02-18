@@ -230,6 +230,334 @@ def test_goal_uses_tail_logs_as_context(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert "Recent tail logs context:" in captured["coder"]
 
 
+def test_goal_context_includes_reflections(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    memory_payload = json.loads(config.memory_file.read_text(encoding="utf-8"))
+    memory_payload["lessons"] = [
+        {
+            "timestamp_utc": "2026-02-01T00:00:00+00:00",
+            "goal": "conversation:s_reflect",
+            "lesson": "User prefers step-by-step explanations for better clarity.",
+            "tags": ["reflection", "conversation", "preference"],
+            "context": "session_id=s_reflect",
+            "kind": "reflection",
+            "source": "reflection_engine",
+            "reflection_key": "conversation:user_msg_1",
+        }
+    ]
+    config.memory_file.write_text(json.dumps(memory_payload) + "\n", encoding="utf-8")
+    center = DavidControlCenter(config=config, data_root=tmp_path / "data")
+    captured: dict[str, str] = {"planner": ""}
+
+    class FakePlanner:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def create_plan(self, goal, workspace_snapshot, memory_context, tdd_mode=False):
+            captured["planner"] = str(memory_context)
+            return PlanOutput(
+                goal=goal,
+                steps=[PlanStep(id="S1", title="Plan", details="Do work.", success_check="tests pass")],
+                success_criteria=["tests pass"],
+            )
+
+    class FakeCoder:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def propose(self, goal, plan_json, workspace_snapshot, memory_context, critic_feedback, iteration, tdd_mode=False, tdd_phase="normal"):
+            return CoderOutput(
+                summary="single pass",
+                edits=[CodeEdit(path="app.py", content="print('ok')\n", reason="implement")],
+                commands=["pytest -q"],
+                done=True,
+                done_reason="done",
+            )
+
+    class FakeCritic:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def review(self, goal, plan_json, coder_json, execution_results, tdd_mode=False, tdd_red_phase_complete=False):
+            return CriticOutput(
+                status="success",
+                analysis="all good",
+                next_actions=["finish"],
+                lessons=[LessonProposal(lesson="keep tests green", tags=["testing"])],
+            )
+
+    class FakeExecutor:
+        def __init__(self, workspace_dir, timeout_sec, max_output_chars):
+            self.workspace_dir = workspace_dir
+
+        def run(self, command_specs):
+            return [
+                ExecutionResult(
+                    command=spec.raw,
+                    returncode=0,
+                    stdout="ok",
+                    stderr="",
+                    timed_out=False,
+                    duration_sec=0.01,
+                )
+                for spec in command_specs
+            ]
+
+    monkeypatch.setattr("web.control_center.Planner", FakePlanner)
+    monkeypatch.setattr("web.control_center.Coder", FakeCoder)
+    monkeypatch.setattr("web.control_center.Critic", FakeCritic)
+    monkeypatch.setattr("web.control_center.RestrictedExecutor", FakeExecutor)
+
+    ok, start = center.start_run({"command": "/goal build feature with tests"})
+    assert ok is True
+    run = _wait_for_terminal(center, start["run_id"])
+    assert run["meta"]["status"] == "success"
+    assert "Reflection memory before planning:" in captured["planner"]
+    assert "step-by-step explanations" in captured["planner"].lower()
+
+
+def test_goal_context_includes_parent_teaching_values(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    memory_payload = json.loads(config.memory_file.read_text(encoding="utf-8"))
+    memory_payload["values"] = [
+        {
+            "id": "v_1",
+            "timestamp_utc": "2026-02-01T00:00:00+00:00",
+            "category": "guideline",
+            "category_label": "Guidelines",
+            "principle": "Always value patience.",
+            "application": "Investigate failing tests step by step before changing code.",
+            "source": "parent_teaching_mode",
+            "actor": "web_ui",
+            "session_id": "session_parent_values",
+            "message": "Always value patience.",
+            "tags": ["parent_teaching", "guideline"],
+        }
+    ]
+    config.memory_file.write_text(json.dumps(memory_payload) + "\n", encoding="utf-8")
+    center = DavidControlCenter(config=config, data_root=tmp_path / "data")
+    captured: dict[str, str] = {"planner": "", "coder": ""}
+
+    class FakePlanner:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def create_plan(self, goal, workspace_snapshot, memory_context, tdd_mode=False):
+            captured["planner"] = str(memory_context)
+            return PlanOutput(
+                goal=goal,
+                steps=[PlanStep(id="S1", title="Plan", details="Do work.", success_check="tests pass")],
+                success_criteria=["tests pass"],
+            )
+
+    class FakeCoder:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def propose(self, goal, plan_json, workspace_snapshot, memory_context, critic_feedback, iteration, tdd_mode=False, tdd_phase="normal"):
+            captured["coder"] = str(memory_context)
+            return CoderOutput(
+                summary="single pass",
+                edits=[CodeEdit(path="app.py", content="print('ok')\n", reason="implement")],
+                commands=["pytest -q"],
+                done=True,
+                done_reason="done",
+            )
+
+    class FakeCritic:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def review(self, goal, plan_json, coder_json, execution_results, tdd_mode=False, tdd_red_phase_complete=False):
+            return CriticOutput(
+                status="success",
+                analysis="all good",
+                next_actions=["finish"],
+                lessons=[LessonProposal(lesson="keep tests green", tags=["testing"])],
+            )
+
+    class FakeExecutor:
+        def __init__(self, workspace_dir, timeout_sec, max_output_chars):
+            self.workspace_dir = workspace_dir
+
+        def run(self, command_specs):
+            return [
+                ExecutionResult(
+                    command=spec.raw,
+                    returncode=0,
+                    stdout="ok",
+                    stderr="",
+                    timed_out=False,
+                    duration_sec=0.01,
+                )
+                for spec in command_specs
+            ]
+
+    monkeypatch.setattr("web.control_center.Planner", FakePlanner)
+    monkeypatch.setattr("web.control_center.Coder", FakeCoder)
+    monkeypatch.setattr("web.control_center.Critic", FakeCritic)
+    monkeypatch.setattr("web.control_center.RestrictedExecutor", FakeExecutor)
+
+    ok, start = center.start_run({"command": "/goal fix failing tests with patience"})
+    assert ok is True
+    run = _wait_for_terminal(center, start["run_id"])
+    assert run["meta"]["status"] == "success"
+    assert "Parent teachings (Values / Guidelines / Personal Philosophy):" in captured["planner"]
+    assert "Always value patience." in captured["planner"]
+    assert "never override safety constraints" in captured["planner"]
+    assert "Parent teachings (Values / Guidelines / Personal Philosophy):" in captured["coder"]
+
+
+def test_goal_run_records_reflection_lesson(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    center = DavidControlCenter(config=config, data_root=tmp_path / "data")
+
+    class FakePlanner:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def create_plan(self, goal, workspace_snapshot, memory_context, tdd_mode=False):
+            return PlanOutput(
+                goal=goal,
+                steps=[PlanStep(id="S1", title="Plan", details="Do work.", success_check="tests pass")],
+                success_criteria=["tests pass"],
+            )
+
+    class FakeCoder:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def propose(self, goal, plan_json, workspace_snapshot, memory_context, critic_feedback, iteration, tdd_mode=False, tdd_phase="normal"):
+            return CoderOutput(
+                summary="single pass",
+                edits=[CodeEdit(path="app.py", content="print('ok')\n", reason="implement")],
+                commands=["pytest -q"],
+                done=True,
+                done_reason="done",
+            )
+
+    class FakeCritic:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def review(self, goal, plan_json, coder_json, execution_results, tdd_mode=False, tdd_red_phase_complete=False):
+            return CriticOutput(
+                status="success",
+                analysis="all good",
+                next_actions=["finish"],
+                lessons=[LessonProposal(lesson="keep tests green", tags=["testing"])],
+            )
+
+    class FakeExecutor:
+        def __init__(self, workspace_dir, timeout_sec, max_output_chars):
+            self.workspace_dir = workspace_dir
+
+        def run(self, command_specs):
+            return [
+                ExecutionResult(
+                    command=spec.raw,
+                    returncode=0,
+                    stdout="ok",
+                    stderr="",
+                    timed_out=False,
+                    duration_sec=0.01,
+                )
+                for spec in command_specs
+            ]
+
+    monkeypatch.setattr("web.control_center.Planner", FakePlanner)
+    monkeypatch.setattr("web.control_center.Coder", FakeCoder)
+    monkeypatch.setattr("web.control_center.Critic", FakeCritic)
+    monkeypatch.setattr("web.control_center.RestrictedExecutor", FakeExecutor)
+
+    ok, start = center.start_run({"command": "/goal capture reflection"})
+    assert ok is True
+    run = _wait_for_terminal(center, start["run_id"])
+    assert run["meta"]["status"] == "success"
+
+    payload = json.loads(config.memory_file.read_text(encoding="utf-8"))
+    reflections = [
+        row
+        for row in payload.get("lessons", [])
+        if isinstance(row, dict) and str(row.get("kind", "")).lower() == "reflection"
+    ]
+    assert any(str(row.get("run_id", "")) == start["run_id"] for row in reflections)
+    assert any("Run completed successfully." in str(row.get("lesson", "")) for row in reflections)
+
+
+def test_growth_timeline_aggregates_runs_and_memory(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    center = DavidControlCenter(config=config, data_root=tmp_path / "data")
+
+    memory_payload = json.loads(config.memory_file.read_text(encoding="utf-8"))
+    memory_payload["facts"] = [
+        {
+            "id": "f1",
+            "subject": "User",
+            "predicate": "favorite_style",
+            "object": "step_by_step",
+            "timestamp": "2026-02-01T00:00:00+00:00",
+            "last_updated": "2026-02-01T00:00:00+00:00",
+        }
+    ]
+    memory_payload["lessons"] = [
+        {
+            "timestamp_utc": "2026-02-02T00:00:00+00:00",
+            "goal": "build task",
+            "lesson": "Keep tests small and focused.",
+            "tags": ["testing"],
+            "context": "critic",
+        },
+        {
+            "timestamp_utc": "2026-02-03T00:00:00+00:00",
+            "goal": "run:demo",
+            "lesson": "Run completed successfully. Tests passed. Longest iteration was #1 at ~0.02s.",
+            "tags": ["reflection", "run", "success"],
+            "context": "status=success",
+            "kind": "reflection",
+            "source": "reflection_engine",
+            "reflection_key": "run:run_demo_1",
+        },
+    ]
+    config.memory_file.write_text(json.dumps(memory_payload) + "\n", encoding="utf-8")
+
+    run_dir = center.runs_root / "run_demo_1"
+    (run_dir / "iterations" / "001").mkdir(parents=True, exist_ok=True)
+    (run_dir / "meta.json").write_text(
+        json.dumps(
+            {
+                "id": "run_demo_1",
+                "mode": "goal",
+                "payload": "Build demo",
+                "status": "success",
+                "started_at": "2026-02-03T00:00:00+00:00",
+                "ended_at": "2026-02-03T00:01:00+00:00",
+                "project_slug": "build_demo",
+                "message": "All tests passed.",
+                "tdd_mode": True,
+                "iterations_until_green": 2,
+                "iteration": 2,
+                "tests_passed": True,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / "iterations" / "001" / "execution.json").write_text(
+        json.dumps([{"duration_sec": 0.02, "command": "pytest -q", "returncode": 0, "timed_out": False}]) + "\n",
+        encoding="utf-8",
+    )
+
+    timeline = center.growth_timeline(limit=120)
+    summary = timeline["summary"]
+    assert summary["goal_runs_total"] >= 1
+    assert summary["goal_runs_success"] >= 1
+    assert summary["tdd_success_count"] >= 1
+    assert summary["memory_size_total"] >= 2
+    assert any(item["category"] == "project_success" for item in timeline["milestones"])
+    assert any(item["category"] == "lesson_reflection" for item in timeline["milestones"])
+
+
 def test_tdd_mode_tests_first_then_green(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     center = DavidControlCenter(config=config, data_root=tmp_path / "data")
@@ -501,6 +829,197 @@ def test_goal_run_targets_selected_workspace_folder(monkeypatch: pytest.MonkeyPa
     assert meta["workspace_target_type"] == "folder"
     assert meta["project_path"] == str(target_dir)
     assert (target_dir / "main.py").exists()
+
+
+def test_goal_run_updates_project_brain_memory(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    center = DavidControlCenter(config=config, data_root=tmp_path / "data")
+
+    class FastPlanner:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def create_plan(self, goal, workspace_snapshot, memory_context, tdd_mode=False):
+            return PlanOutput(
+                goal=goal,
+                steps=[PlanStep(id="S1", title="Create CLI module", details="Add entry point", success_check="ok")],
+                success_criteria=["ok"],
+            )
+
+    class FastCoder:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def propose(self, goal, plan_json, workspace_snapshot, memory_context, critic_feedback, iteration, tdd_mode=False, tdd_phase="normal"):
+            return CoderOutput(
+                summary="project brain seed",
+                edits=[
+                    CodeEdit(path="main.py", content="print('hello')\n", reason="entry"),
+                    CodeEdit(path="tests/test_main.py", content="def test_ok():\n    assert True\n", reason="tests"),
+                ],
+                commands=["pytest -q"],
+                done=True,
+                done_reason="done",
+            )
+
+    class FastCritic:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def review(self, goal, plan_json, coder_json, execution_results, tdd_mode=False, tdd_red_phase_complete=False):
+            return CriticOutput(
+                status="success",
+                analysis="Project completed with passing tests.",
+                next_actions=["finish"],
+                lessons=[LessonProposal(lesson="Watch edge-case validation.", tags=["testing", "edge-case"])],
+            )
+
+    class FastExecutor:
+        def __init__(self, workspace_dir, timeout_sec, max_output_chars):
+            self.workspace_dir = workspace_dir
+
+        def run(self, command_specs):
+            return [
+                ExecutionResult(
+                    command=spec.raw,
+                    returncode=0,
+                    stdout="ok",
+                    stderr="",
+                    timed_out=False,
+                    duration_sec=0.01,
+                )
+                for spec in command_specs
+            ]
+
+    monkeypatch.setattr("web.control_center.Planner", FastPlanner)
+    monkeypatch.setattr("web.control_center.Coder", FastCoder)
+    monkeypatch.setattr("web.control_center.Critic", FastCritic)
+    monkeypatch.setattr("web.control_center.RestrictedExecutor", FastExecutor)
+
+    ok, started = center.start_run({"command": "/goal build project brain sample"})
+    assert ok is True
+    run = _wait_for_terminal(center, started["run_id"])
+    assert run["meta"]["status"] == "success"
+
+    payload = json.loads(config.memory_file.read_text(encoding="utf-8"))
+    projects = payload.get("projects", [])
+    assert isinstance(projects, list)
+    assert projects
+    entry = projects[-1]
+    assert str(entry.get("project_relative_path", "")).startswith("projects/")
+    assert str(entry.get("architecture_summary", "")).strip()
+    assert isinstance(entry.get("key_design_decisions"), list)
+    assert entry.get("key_design_decisions")
+    assert "test" in str(entry.get("testing_approach", "")).lower()
+    assert isinstance(entry.get("known_weaknesses"), list)
+    assert entry.get("known_weaknesses")
+
+
+def test_goal_context_includes_project_brain_for_revisit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    target_dir = config.workspace_dir / "projects" / "existing_app"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    (target_dir / "main.py").write_text("print('existing')\n", encoding="utf-8")
+    (target_dir / "tests").mkdir(parents=True, exist_ok=True)
+    (target_dir / "tests" / "test_main.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+
+    memory_payload = json.loads(config.memory_file.read_text(encoding="utf-8"))
+    memory_payload["projects"] = [
+        {
+            "id": "project_memory_existing_app",
+            "created_at": "2026-02-01T00:00:00+00:00",
+            "last_updated": "2026-02-01T00:00:00+00:00",
+            "project_slug": "existing_app",
+            "project_path": str(target_dir),
+            "project_relative_path": "projects/existing_app",
+            "architecture_summary": "modular CLI structure with JSON storage and dedicated tests",
+            "key_design_decisions": ["Planned around: Keep modules isolated."],
+            "testing_approach": "Pytest tests under tests/ with iterative command validation.",
+            "known_weaknesses": ["Edge-case validation needed improvement."],
+            "last_goal": "Earlier revisit",
+            "last_run_id": "run_prev",
+            "last_status": "success",
+            "last_message": "done",
+            "source": "project_brain_engine",
+            "history": [],
+        }
+    ]
+    config.memory_file.write_text(json.dumps(memory_payload) + "\n", encoding="utf-8")
+    center = DavidControlCenter(config=config, data_root=tmp_path / "data")
+    captured: dict[str, str] = {"planner": ""}
+
+    class FastPlanner:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def create_plan(self, goal, workspace_snapshot, memory_context, tdd_mode=False):
+            captured["planner"] = str(memory_context)
+            return PlanOutput(
+                goal=goal,
+                steps=[PlanStep(id="S1", title="Plan", details="One step", success_check="ok")],
+                success_criteria=["ok"],
+            )
+
+    class FastCoder:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def propose(self, goal, plan_json, workspace_snapshot, memory_context, critic_feedback, iteration, tdd_mode=False, tdd_phase="normal"):
+            return CoderOutput(
+                summary="targeted run",
+                edits=[CodeEdit(path="main.py", content="print('targeted')\n", reason="implement")],
+                commands=["pytest -q"],
+                done=True,
+                done_reason="done",
+            )
+
+    class FastCritic:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def review(self, goal, plan_json, coder_json, execution_results, tdd_mode=False, tdd_red_phase_complete=False):
+            return CriticOutput(
+                status="success",
+                analysis="done",
+                next_actions=["finish"],
+                lessons=[LessonProposal(lesson="targeted", tags=["workspace"])],
+            )
+
+    class FastExecutor:
+        def __init__(self, workspace_dir, timeout_sec, max_output_chars):
+            self.workspace_dir = workspace_dir
+
+        def run(self, command_specs):
+            return [
+                ExecutionResult(
+                    command=spec.raw,
+                    returncode=0,
+                    stdout="ok",
+                    stderr="",
+                    timed_out=False,
+                    duration_sec=0.01,
+                )
+                for spec in command_specs
+            ]
+
+    monkeypatch.setattr("web.control_center.Planner", FastPlanner)
+    monkeypatch.setattr("web.control_center.Coder", FastCoder)
+    monkeypatch.setattr("web.control_center.Critic", FastCritic)
+    monkeypatch.setattr("web.control_center.RestrictedExecutor", FastExecutor)
+
+    ok, started = center.start_run(
+        {
+            "mode": "goal",
+            "payload": "Revisit existing app and improve validation.",
+            "workspace_target_path": "projects/existing_app",
+        }
+    )
+    assert ok is True
+    run = _wait_for_terminal(center, started["run_id"])
+    assert run["meta"]["status"] == "success"
+    assert "Project Brain recall:" in captured["planner"]
+    assert "modular CLI structure with JSON storage" in captured["planner"]
+    assert "Edge-case validation needed improvement." in captured["planner"]
 
 
 def test_get_run_files_syncs_full_workspace_listing(tmp_path: Path) -> None:

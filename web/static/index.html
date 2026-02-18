@@ -76,6 +76,7 @@
           <p class="muted">
             David is an AI companion in this Dashboard. He remembers teachings from Facts, Conversations, and Lessons, and reflects care through attention and helpfulness.
             He does not replace human relationships, and grief support always encourages connection with real people and support systems.
+            Reflection entries are timestamped and preserved so growth is transparent.
           </p>
         </article>
 
@@ -156,6 +157,20 @@
             <pre id="filePreview" class="code">Select a file from the list.</pre>
           </article>
         </div>
+
+        <article class="card dashboard-growth-card">
+          <div class="row">
+            <h2>Growth Timeline</h2>
+            <button id="growthRefreshBtn" class="ghost" type="button">Refresh Growth</button>
+          </div>
+          <p class="muted">
+            A calm, structured view of how David improves across sessions and projects through lessons, reflections, and run outcomes.
+          </p>
+          <ul class="kv" id="growthSummary"></ul>
+          <div id="growthTimeline" class="growth-timeline"></div>
+          <h3>Milestone Details</h3>
+          <div id="growthMilestoneDetails" class="stack"></div>
+        </article>
       </section>
 
       <section id="tab-runs" class="tab-panel">
@@ -232,8 +247,18 @@
             <div id="factsView" class="scroll"></div>
           </article>
           <article class="card">
+            <h2>Values</h2>
+            <div id="valuesView" class="scroll"></div>
+          </article>
+        </div>
+        <div class="grid two">
+          <article class="card">
             <h2>Lessons</h2>
             <div id="lessonsView" class="scroll"></div>
+          </article>
+          <article class="card">
+            <h2>Project Brain</h2>
+            <div id="projectBrainView" class="scroll"></div>
           </article>
         </div>
         <article class="card">
@@ -337,6 +362,7 @@
             </label>
             <label class="check"><input id="settingPreviewDefault" type="checkbox" /> Preview mode default</label>
             <label class="check"><input id="settingCompanionMode" type="checkbox" checked /> Companion mode</label>
+            <label class="check"><input id="settingParentTeachingMode" type="checkbox" /> Parent Teaching Mode default</label>
           </div>
           <button id="saveSettingsBtn">Save Settings</button>
           <ul class="kv" id="settingsInfo"></ul>
@@ -356,6 +382,7 @@
             </div>
             <label class="check"><input id="advancedChatToggle" type="checkbox" checked /> Advanced Chat mode</label>
             <label class="check"><input id="chatConfirmSave" type="checkbox" /> Confirm Teach save</label>
+            <label class="check"><input id="parentTeachingMode" type="checkbox" /> Parent Teaching Mode</label>
           </div>
 
           <div class="row cli-intent-row">
@@ -399,17 +426,21 @@
             <aside class="memory-chat-secondary">
               <h3>Memory Panel</h3>
               <div class="row memory-chat-search-row">
-                <input id="memoryChatSearch" type="text" placeholder="Search facts, conversations, lessons..." />
+                <input id="memoryChatSearch" type="text" placeholder="Search facts, values, conversations, lessons, reflections..." />
                 <button id="memoryChatRefreshBtn" class="ghost" type="button">Refresh Memory</button>
               </div>
               <div class="segmented" role="group" aria-label="Memory tabs">
                 <button id="memoryPanelFactsBtn" type="button" class="segment-btn active">Facts</button>
+                <button id="memoryPanelValuesBtn" type="button" class="segment-btn">Values</button>
                 <button id="memoryPanelConversationsBtn" type="button" class="segment-btn">Conversations</button>
                 <button id="memoryPanelLessonsBtn" type="button" class="segment-btn">Lessons</button>
+                <button id="memoryPanelReflectionsBtn" type="button" class="segment-btn">Reflections</button>
               </div>
               <div id="memoryChatFacts" class="stack"></div>
+              <div id="memoryPanelValues" class="stack hidden"></div>
               <div id="memoryPanelConversations" class="stack hidden"></div>
               <div id="memoryPanelLessons" class="stack hidden"></div>
+              <div id="memoryPanelReflections" class="stack hidden"></div>
               <h3>Explain why David answered this</h3>
               <div id="memoryExplainView" class="stack"></div>
 
