@@ -339,8 +339,9 @@ http://127.0.0.1:8787
 - Memory: facts/lessons + memory conflict detector.
 - Telemetry: success/error metrics and iteration-duration chart.
 - Logs: tail view of web + telemetry logs.
-- Settings: safe mode, rate limit, iteration override, risk thresholds, planner/coder/critic model config, and default TDD mode.
+- Settings: safe mode, rate limit, iteration override, risk thresholds, planner/coder/critic model config, default TDD mode, and Companion mode.
 - Memory & Chat: Advanced Chat mode with natural intent detection (`Teach` / `Ask` / `Goal` / `Chat`), confirm-gated memory writes, session history, memory citations, and searchable Facts/Conversations/Lessons tabs.
+- Companion mode (enabled by default) adds warm memory-first responses for `/ask` and web chat, with transparent AI identity and lesson-aware recall.
 - Goal runs are log-aware: David automatically reads recent tail logs and uses them as extra context when planning/coding fixes.
 
 ### Goal templates
@@ -372,7 +373,12 @@ Use the `Memory & Chat` tab to interact naturally while keeping memory writes ex
    - `Facts` (with conflict indicators, aliases, provenance metadata),
    - `Conversations`,
    - `Lessons`.
-6. `Explain why David answered this` shows citations for memory facts/snippets used in the answer.
+6. `Explain why David answered this` shows citations for memory facts/conversation snippets and relevant lessons used in the answer.
+7. Companion behavior safeguards:
+   - David stays transparent that he is an AI companion and not a real human child.
+   - Family and attachment language is handled with warm + transparent wording.
+   - Grief-sensitive language adds calm support and encourages reaching trusted real-world people.
+   - Crisis-risk language includes urgent U.S. `988` guidance plus emergency-service direction.
 
 `/ask` and `/teach` CLI mirror behavior remains backward-compatible.
 
@@ -455,6 +461,8 @@ Use the `Memory & Chat` tab to interact naturally while keeping memory writes ex
 - Risk approval gate for large edits and multi-file rewrites.
 - Memory conflict approval gate for conflicting `--teach` facts.
 - Advanced Chat teach save gate (`confirm_save`) and explicit overwrite confirmation for conflicting facts.
+- Companion mode is deterministic memory-first behavior in web ask/chat and can be toggled in Settings.
+- Grief/calm support overlays never replace human support; crisis-risk responses include U.S. `988` guidance.
 - Safe mode can block write operations (read-only monitoring mode).
 - Run artifacts are stored under `data/runs/<run_id>/` (plan, iteration outputs, diffs, result bundle).
 

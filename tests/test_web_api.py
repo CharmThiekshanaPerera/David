@@ -23,6 +23,7 @@ class FakeCenter:
             "risky_large_edit_bytes": 50000,
             "risky_multi_file_threshold": 4,
             "run_preview_default": False,
+            "companion_mode": True,
             "model": "qwen2.5-coder:1.5b",
             "planner_model": "qwen2.5-coder:1.5b",
             "coder_model": "qwen2.5-coder:1.5b",
@@ -583,16 +584,25 @@ def test_replay_compare_and_audit_endpoints(client):
 
 def test_sse_endpoints_available(client):
     status_stream = client.get("/api/stream/status", buffered=False)
-    assert status_stream.status_code == 200
-    assert status_stream.mimetype == "text/event-stream"
+    try:
+        assert status_stream.status_code == 200
+        assert status_stream.mimetype == "text/event-stream"
+    finally:
+        status_stream.close()
 
     logs_stream = client.get("/api/stream/logs", buffered=False)
-    assert logs_stream.status_code == 200
-    assert logs_stream.mimetype == "text/event-stream"
+    try:
+        assert logs_stream.status_code == 200
+        assert logs_stream.mimetype == "text/event-stream"
+    finally:
+        logs_stream.close()
 
     run_stream = client.get("/api/stream/run/run_test_1", buffered=False)
-    assert run_stream.status_code == 200
-    assert run_stream.mimetype == "text/event-stream"
+    try:
+        assert run_stream.status_code == 200
+        assert run_stream.mimetype == "text/event-stream"
+    finally:
+        run_stream.close()
 
 
 def test_approval_endpoint(client):

@@ -110,6 +110,7 @@ python -m web.server --host 127.0.0.1 --port 8787
 - `risky_large_edit_bytes`: threshold for approval gate.
 - `risky_multi_file_threshold`: threshold for approval gate.
 - `run_preview_default`: default preview behavior.
+- `companion_mode`: enables warm memory-first web ask/chat behavior with transparent AI identity.
 
 ## CLI Mirror
 
@@ -117,6 +118,17 @@ python -m web.server --host 127.0.0.1 --port 8787
   - `/goal Create a TODO app`
   - `/ask Who is your father?`
   - `/teach My name is Charm Thiekshana.`
+
+## Memory & Companion Chat
+
+- In Advanced Chat, intent can be auto-detected or overridden (`Ask`, `Teach`, `Goal`, `Chat`).
+- Teach writes remain explicit and gated by confirmation/overwrite checks.
+- With `companion_mode=true`:
+  - `/api/ask` and web `chat` responses are memory-first and cite Facts/Conversations/Lessons.
+  - Responses use transparent AI wording (David is an AI companion, not a real child).
+  - Family/attachment topics use warm + transparent phrasing.
+  - Grief-sensitive messages add calm support and encourage real-world connection.
+  - Crisis-risk phrases include U.S. `988` guidance plus emergency-service direction.
 
 ## 5. API Endpoints
 
@@ -144,6 +156,7 @@ python -m web.server --host 127.0.0.1 --port 8787
 - File edits remain under `workspace/` via existing SafetyGuard rules.
 - Risky edit operations require explicit approve/reject.
 - Memory conflict writes from `/teach` require explicit approve/reject.
+- Companion responses are deterministic overlays on top of memory retrieval; they do not bypass safety gates.
 - User input is treated as untrusted data.
 
 ## 7. How To Test the Web UI (Step-by-Step + Samples)

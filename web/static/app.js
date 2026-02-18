@@ -128,6 +128,7 @@ const el = {
   settingLargeEdit: document.getElementById("settingLargeEdit"),
   settingMultiFile: document.getElementById("settingMultiFile"),
   settingPreviewDefault: document.getElementById("settingPreviewDefault"),
+  settingCompanionMode: document.getElementById("settingCompanionMode"),
   settingPlannerModel: document.getElementById("settingPlannerModel"),
   settingCoderModel: document.getElementById("settingCoderModel"),
   settingCriticModel: document.getElementById("settingCriticModel"),
@@ -1591,6 +1592,14 @@ function renderExplainWhy() {
           item.object || ""
         )}</div><div class="muted">${escapeHtml(fmtDate(item.timestamp || ""))}</div></div>`;
       }
+      if (item.type === "lesson") {
+        const tags = Array.isArray(item.tags) ? item.tags.join(", ") : "";
+        return `<div class="memory-fact-row"><div><strong>${escapeHtml(item.lesson || "")}</strong></div><div><span class="muted">goal:</span> ${escapeHtml(
+          item.goal || "-"
+        )}</div><div><span class="muted">tags:</span> ${escapeHtml(tags || "-")}</div><div class="muted">lesson · ${escapeHtml(
+          fmtDate(item.timestamp || "")
+        )}</div></div>`;
+      }
       return `<div class="memory-fact-row"><div>${escapeHtml(item.excerpt || item.id || "")}</div><div class="muted">conversation · ${escapeHtml(
         fmtDate(item.timestamp || "")
       )}</div></div>`;
@@ -1731,6 +1740,9 @@ function renderSettings(data) {
   if (el.settingPreviewDefault) {
     el.settingPreviewDefault.checked = !!safeData.run_preview_default;
   }
+  if (el.settingCompanionMode) {
+    el.settingCompanionMode.checked = safeData.companion_mode !== false;
+  }
   if (el.settingTddMode) {
     el.settingTddMode.checked = !!safeData.tdd_mode;
   }
@@ -1777,6 +1789,7 @@ function renderSettings(data) {
     ["Coder model", safeData.coder_model || safeData.coder_model_default || "-"],
     ["Critic model", safeData.critic_model || safeData.critic_model_default || "-"],
     ["Default TDD mode", fmtBool(safeData.tdd_mode)],
+    ["Companion mode", fmtBool(safeData.companion_mode !== false)],
     ["Allowed commands", (safeData.allowed_commands || []).join(", ")],
     ["Workspace", safeData.workspace_dir || "-"],
     ["Default max iterations", safeData.max_iterations_default || 0],
@@ -2439,6 +2452,7 @@ function wireActions() {
         risky_large_edit_bytes: Number(el.settingLargeEdit.value || 50000),
         risky_multi_file_threshold: Number(el.settingMultiFile.value || 4),
         run_preview_default: !!el.settingPreviewDefault.checked,
+        companion_mode: el.settingCompanionMode ? !!el.settingCompanionMode.checked : true,
         planner_model: el.settingPlannerModel?.value || "",
         coder_model: el.settingCoderModel?.value || "",
         critic_model: el.settingCriticModel?.value || "",

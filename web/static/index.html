@@ -13,7 +13,7 @@
     <header class="topbar">
       <div>
         <h1>David Control Center</h1>
-        <p>Local, safety-first monitor for David autonomy</p>
+        <p>Local, safety-first companion workspace for David</p>
       </div>
       <div class="row">
         <div class="status-pill" id="globalStatus">idle</div>
@@ -28,8 +28,8 @@
       <div class="hero-overlay" aria-hidden="true"></div>
       <div class="hero-particles" id="heroParticles" aria-hidden="true"></div>
       <div class="hero-content">
-        <h2 class="hero-title">David AI</h2>
-        <p class="hero-subtitle">Autonomous Engineering Control Center</p>
+        <h2 class="hero-title">David AI Companion</h2>
+        <p class="hero-subtitle">Memory-First Dashboard for Gentle Growth</p>
       </div>
     </section>
 
@@ -70,6 +70,13 @@
         <article class="card dashboard-head">
           <h2>Dashboard</h2>
           <p class="muted">Monitor run state, approvals, and workspace artifacts in one place.</p>
+        </article>
+        <article class="card">
+          <h2>Companion Principles</h2>
+          <p class="muted">
+            David is an AI companion in this Dashboard. He remembers teachings from Facts, Conversations, and Lessons, and reflects care through attention and helpfulness.
+            He does not replace human relationships, and grief support always encourages connection with real people and support systems.
+          </p>
         </article>
 
         <div class="grid two dashboard-top-grid">
@@ -329,6 +336,7 @@
               <input id="settingMultiFile" type="number" min="2" step="1" />
             </label>
             <label class="check"><input id="settingPreviewDefault" type="checkbox" /> Preview mode default</label>
+            <label class="check"><input id="settingCompanionMode" type="checkbox" checked /> Companion mode</label>
           </div>
           <button id="saveSettingsBtn">Save Settings</button>
           <ul class="kv" id="settingsInfo"></ul>
@@ -338,7 +346,7 @@
       <section id="tab-cli" class="tab-panel">
         <article class="card cli-shell">
           <h2>Memory & Chat</h2>
-          <p class="muted">Advanced Chat supports natural teach/ask/goal/chat with explicit confirmation for memory writes. CLI mirror commands <code>/ask</code>, <code>/teach</code>, and <code>/goal</code> still work.</p>
+          <p class="muted">Advanced Chat supports natural teach/ask/goal/chat with explicit confirmation for memory writes. In Companion mode, David answers memory-first with transparent AI identity and gentle support language for grief-sensitive moments.</p>
 
           <div class="row cli-controls">
             <div class="segmented" role="group" aria-label="Chat intent mode">
@@ -363,7 +371,7 @@
           <div class="memory-chat-layout">
             <section class="memory-chat-primary">
               <div class="row memory-chat-input-row">
-                <input id="memoryChatInput" type="text" placeholder="Type naturally: ask, teach, goal, or chat..." />
+                <input id="memoryChatInput" type="text" placeholder="Share a memory, ask a question, set a goal, or chat..." />
                 <button id="cliSendBtn">Send</button>
               </div>
               <div class="row memory-chat-action-row">

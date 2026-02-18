@@ -37,6 +37,60 @@ from agent.executor import RestrictedExecutor
 RUN_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{6,80}$")
 INTENT_CHOICES = {"teach", "ask", "goal", "chat"}
 MEMORY_UNKNOWN_ANSWER = 'I do not know yet. Please teach me using --teach "...".'
+FAMILY_CONTEXT_PATTERNS = (
+    r"\bfather\b",
+    r"\bmother\b",
+    r"\bdad\b",
+    r"\bmom\b",
+    r"\bparent\b",
+    r"\bfamily\b",
+    r"\bchild\b",
+    r"\bson\b",
+    r"\bdaughter\b",
+)
+GRIEF_CONTEXT_PATTERNS = (
+    r"\bgrief\b",
+    r"\bgrieving\b",
+    r"\bgrieve\b",
+    r"\bloss\b",
+    r"\bmiss\b",
+    r"\bsad\b",
+    r"\bsadness\b",
+    r"\blonely\b",
+    r"\bheartbroken\b",
+    r"\bhurting\b",
+)
+CRISIS_CONTEXT_PATTERNS = (
+    r"\bsuicid(?:e|al)\b",
+    r"\bkill myself\b",
+    r"\bend my life\b",
+    r"\bhurt myself\b",
+    r"\bself[- ]harm\b",
+    r"\bdon't want to live\b",
+    r"\bdo not want to live\b",
+    r"\bcan't go on\b",
+    r"\bcannot go on\b",
+)
+EXPLICIT_TEACH_SIGNAL_PATTERNS = (
+    r"\bremember this\b",
+    r"\bsave this\b",
+    r"\bteach\b",
+    r"\bmy name is\b",
+    r"\bi am your\b",
+    r"\bfrom now on\b",
+    r"\byou should know\b",
+    r"\bcall me\b",
+    r"\bmy birth(?:day| date|date) is\b",
+    r"\bmy favorite (?:saying|quote) is\b",
+    r"\bour shared (?:goal|routine) is\b",
+    r"\bshared (?:goal|routine)[: ]",
+)
+GRIEF_MEMORY_CONFIRM_PATTERNS = (
+    r"\b(?:save|store|remember)\s+(?:this|it)\s+(?:as\s+)?(?:a\s+)?(?:fact|memory)\b",
+    r"\b(?:permanent|permanently)\s+(?:save|store|remember)\b",
+    r"\bcommit\s+(?:this|it)\s+to\s+memory\b",
+    r"\bconfirm\s+(?:save|memory)\b",
+)
 INTENT_STOPWORDS = {
     "a",
     "an",
@@ -118,6 +172,7 @@ class ControlSettings:
     risky_large_edit_bytes: int = 50_000
     risky_multi_file_threshold: int = 4
     run_preview_default: bool = False
+    companion_mode: bool = True
     planner_model: str = ""
     coder_model: str = ""
     critic_model: str = ""
@@ -135,6 +190,7 @@ class ControlSettings:
             risky_large_edit_bytes=max(1_000, int(data.get("risky_large_edit_bytes", 50_000))),
             risky_multi_file_threshold=max(2, int(data.get("risky_multi_file_threshold", 4))),
             run_preview_default=bool(data.get("run_preview_default", False)),
+            companion_mode=bool(data.get("companion_mode", True)),
             planner_model=planner_model,
             coder_model=coder_model,
             critic_model=critic_model,
@@ -571,12 +627,12 @@ class DavidControlCenter:
                 lowered,
             )
         ) or "workspace" in lowered
-        teach_like = bool(
-            re.search(
-                r"\b(remember|teach|save this|my name is|i am your|from now on|you should know|call me)\b",
-                lowered,
-            )
-        )
+        explicit_teach_like = self._has_explicit_teach_signal(text)
+        soft_teach_like = bool(re.search(r"\bremember\b", lowered))
+        sensitive_context = self._is_grief_context(text) or self._is_crisis_context(text)
+        teach_like = explicit_teach_like or soft_teach_like
+        if sensitive_context and soft_teach_like and not explicit_teach_like:
+            teach_like = False
 
         if teach_like:
             intent = "teach"
@@ -662,10 +718,16 @@ class DavidControlCenter:
             confidence=confidence,
             actor=actor_value,
         )
+        is_first_assistant_turn = not self._session_has_assistant_turn(active_session_id)
 
         response: dict[str, Any]
         if selected_intent == "ask":
-            response = self._ask_memory_first(clean_message, actor=actor_value, session_id=active_session_id)
+            response = self._ask_memory_first(
+                clean_message,
+                actor=actor_value,
+                session_id=active_session_id,
+                force_transparency=is_first_assistant_turn,
+            )
             assistant_text = str(response.get("answer", "")).strip() or "No answer generated."
         elif selected_intent == "teach":
             if not bool(confirm_save):
@@ -721,18 +783,40 @@ class DavidControlCenter:
                 else f"Goal could not start: {run_result.get('error', 'unknown error')}"
             )
         else:
-            response = {
-                "mode": "chat",
-                "status": "ok",
-                "message": clean_message,
-                "reply": (
-                    "I can chat naturally. If you want me to remember something, switch to Teach and confirm save."
-                ),
-                "actor": actor_value,
-                "session_id": active_session_id,
-                "timestamp_utc": self._now_iso(),
-            }
+            if self.settings.companion_mode:
+                response = self._compose_companion_chat_response(
+                    clean_message,
+                    session_id=active_session_id,
+                    force_transparency=is_first_assistant_turn,
+                )
+            else:
+                response = {
+                    "mode": "chat",
+                    "status": "ok",
+                    "message": clean_message,
+                    "reply": (
+                        "I can chat naturally. If you want me to remember something, switch to Teach and confirm save."
+                    ),
+                    "timestamp_utc": self._now_iso(),
+                }
+            response["actor"] = actor_value
+            response["session_id"] = active_session_id
             assistant_text = str(response["reply"])
+
+        if self.settings.companion_mode:
+            requires_transparency = (
+                is_first_assistant_turn
+                or self._is_family_context(clean_message)
+                or self._is_grief_context(clean_message)
+                or self._is_crisis_context(clean_message)
+            )
+            transparency_line = self._compose_ai_transparency_line()
+            if requires_transparency and transparency_line not in assistant_text:
+                assistant_text = f"{assistant_text} {transparency_line}".strip()
+                if str(response.get("mode", "")) == "ask":
+                    response["answer"] = assistant_text
+                elif str(response.get("mode", "")) == "chat":
+                    response["reply"] = assistant_text
 
         assistant_turn = self._append_conversation_turn(
             session_id=active_session_id,
@@ -1456,6 +1540,310 @@ class DavidControlCenter:
         )
         return any(item in lowered for item in patterns)
 
+    @staticmethod
+    def _matches_any_pattern(text: str, patterns: tuple[str, ...]) -> bool:
+        lowered = str(text or "").casefold()
+        if not lowered:
+            return False
+        return any(re.search(pattern, lowered) for pattern in patterns)
+
+    @classmethod
+    def _is_family_context(cls, text: str) -> bool:
+        return cls._matches_any_pattern(text, FAMILY_CONTEXT_PATTERNS)
+
+    @classmethod
+    def _is_grief_context(cls, text: str) -> bool:
+        return cls._matches_any_pattern(text, GRIEF_CONTEXT_PATTERNS)
+
+    @classmethod
+    def _is_crisis_context(cls, text: str) -> bool:
+        return cls._matches_any_pattern(text, CRISIS_CONTEXT_PATTERNS)
+
+    @classmethod
+    def _has_explicit_teach_signal(cls, text: str) -> bool:
+        return cls._matches_any_pattern(text, EXPLICIT_TEACH_SIGNAL_PATTERNS)
+
+    @classmethod
+    def _has_explicit_grief_memory_confirmation(cls, text: str) -> bool:
+        return cls._matches_any_pattern(text, GRIEF_MEMORY_CONFIRM_PATTERNS)
+
+    @staticmethod
+    def _compose_ai_transparency_line() -> str:
+        return "I am an AI companion in your Dashboard, not a real human child."
+
+    @staticmethod
+    def _compose_grief_support_line() -> str:
+        return "I am here with calm care. Please stay close to people you trust and your real-world support system."
+
+    @staticmethod
+    def _compose_crisis_support_line() -> str:
+        return (
+            "If you might hurt yourself or are in immediate danger, call or text 988 in the U.S. right now, "
+            "or contact local emergency services."
+        )
+
+    def _session_has_assistant_turn(self, session_id: str) -> bool:
+        clean_session = self._sanitize_session_id(session_id)
+        if not clean_session:
+            return False
+        rows = self._read_jsonl(self._conversations_file, limit=20_000)
+        for row in reversed(rows):
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("session_id", "")) != clean_session:
+                continue
+            if str(row.get("role", "")) == "assistant":
+                return True
+        return False
+
+    def _match_facts_for_question(
+        self,
+        question_tokens: set[str],
+        facts: list[dict[str, Any]],
+        *,
+        limit: int = 8,
+    ) -> list[dict[str, Any]]:
+        if not question_tokens:
+            return []
+        scored: list[tuple[int, dict[str, Any]]] = []
+        for row in facts:
+            if not isinstance(row, dict):
+                continue
+            predicate_raw = str(row.get("predicate", ""))
+            predicate_spaced = predicate_raw.replace("_", " ")
+            text = f"{row.get('subject', '')} {predicate_raw} {predicate_spaced} {row.get('object', '')}"
+            fact_tokens = set(self._tokenize_text(text))
+            score = len(question_tokens & fact_tokens)
+
+            # Family-role questions should map cleanly to stable fact predicates like father_name.
+            if (
+                ("father" in question_tokens and ("father" in fact_tokens or "dad" in fact_tokens))
+                or ("dad" in question_tokens and ("father" in fact_tokens or "dad" in fact_tokens))
+                or ("mother" in question_tokens and ("mother" in fact_tokens or "mom" in fact_tokens))
+                or ("mom" in question_tokens and ("mother" in fact_tokens or "mom" in fact_tokens))
+            ):
+                score += 2
+
+            predicate_name = str(row.get("predicate", "")).casefold()
+            if ("father" in question_tokens or "dad" in question_tokens) and "father_name" in predicate_name:
+                score += 4
+            if ("mother" in question_tokens or "mom" in question_tokens) and "mother_name" in predicate_name:
+                score += 4
+            if score > 0:
+                scored.append((score, row))
+        scored.sort(
+            key=lambda item: (
+                item[0],
+                str(item[1].get("last_updated", "")),
+                str(item[1].get("timestamp", "")),
+            ),
+            reverse=True,
+        )
+        return [row for _, row in scored[: max(1, min(limit, 50))]]
+
+    def _match_conversations_for_question(
+        self,
+        question_tokens: set[str],
+        *,
+        session_id: str,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        if not question_tokens:
+            return []
+        rows = self._read_jsonl(self._conversations_file, limit=20_000)
+        scored: list[tuple[int, dict[str, Any]]] = []
+        for row in rows:
+            if not isinstance(row, dict) or str(row.get("role", "")) != "user":
+                continue
+            if session_id and str(row.get("session_id", "")) != session_id:
+                continue
+            text = str(row.get("text", ""))
+            tokens = set(self._tokenize_text(text))
+            score = len(question_tokens & tokens)
+            if score > 0:
+                scored.append((score, row))
+        scored.sort(key=lambda item: (item[0], str(item[1].get("timestamp_utc", ""))), reverse=True)
+        return [row for _, row in scored[: max(1, min(limit, 50))]]
+
+    def _match_lessons_for_question(
+        self,
+        question_tokens: set[str],
+        lessons: list[dict[str, Any]],
+        *,
+        limit: int = 4,
+    ) -> list[dict[str, Any]]:
+        if not question_tokens:
+            return []
+        scored: list[tuple[int, dict[str, Any]]] = []
+        for row in lessons:
+            if not isinstance(row, dict):
+                continue
+            tags = row.get("tags", [])
+            tag_text = " ".join(str(item) for item in tags if str(item).strip()) if isinstance(tags, list) else ""
+            text = f"{row.get('lesson', '')} {row.get('goal', '')} {tag_text} {row.get('context', '')}"
+            tokens = set(self._tokenize_text(text))
+            score = len(question_tokens & tokens)
+            if score > 0:
+                scored.append((score, row))
+        scored.sort(key=lambda item: (item[0], str(item[1].get("timestamp_utc", ""))), reverse=True)
+        return [row for _, row in scored[: max(1, min(limit, 50))]]
+
+    @staticmethod
+    def _fact_memory_sentence(row: dict[str, Any]) -> str:
+        subject = str(row.get("subject", "unknown")).strip() or "unknown"
+        predicate = str(row.get("predicate", "fact")).strip().replace("_", " ") or "fact"
+        object_value = str(row.get("object", "unknown")).strip() or "unknown"
+        return f"You once told me: {subject} {predicate} is {object_value}."
+
+    def _build_memory_citations(
+        self,
+        *,
+        facts: list[dict[str, Any]],
+        conversations: list[dict[str, Any]],
+        lessons: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        citations: list[dict[str, Any]] = []
+        for fact in facts[:5]:
+            citations.append(
+                {
+                    "type": "fact",
+                    "id": fact.get("id", ""),
+                    "subject": fact.get("subject", ""),
+                    "predicate": fact.get("predicate", ""),
+                    "object": fact.get("object", ""),
+                    "timestamp": fact.get("timestamp", fact.get("last_updated", "")),
+                }
+            )
+        for convo in conversations[:3]:
+            citations.append(
+                {
+                    "type": "conversation",
+                    "id": convo.get("message_id", ""),
+                    "session_id": convo.get("session_id", ""),
+                    "excerpt": str(convo.get("text", ""))[:180],
+                    "timestamp": convo.get("timestamp_utc", ""),
+                }
+            )
+        for lesson in lessons[:3]:
+            citations.append(
+                {
+                    "type": "lesson",
+                    "lesson": lesson.get("lesson", ""),
+                    "goal": lesson.get("goal", ""),
+                    "tags": lesson.get("tags", []),
+                    "timestamp": lesson.get("timestamp_utc", ""),
+                }
+            )
+        return citations
+
+    def _compose_companion_ask_answer(
+        self,
+        *,
+        question: str,
+        matched_facts: list[dict[str, Any]],
+        matched_conversations: list[dict[str, Any]],
+        matched_lessons: list[dict[str, Any]],
+        force_transparency: bool,
+    ) -> str:
+        family_context = self._is_family_context(question)
+        grief_context = self._is_grief_context(question)
+        crisis_context = self._is_crisis_context(question)
+
+        parts: list[str] = []
+        if matched_facts:
+            parts.append(self._fact_memory_sentence(matched_facts[0]))
+        elif matched_conversations:
+            excerpt = str(matched_conversations[0].get("text", "")).strip()[:220]
+            if excerpt:
+                parts.append(f"You once told me: {excerpt}")
+        elif matched_lessons:
+            lesson_text = str(matched_lessons[0].get("lesson", "")).strip()
+            if lesson_text:
+                parts.append(f"You once told me this lesson: {lesson_text}.")
+
+        if matched_lessons:
+            lesson_text = str(matched_lessons[0].get("lesson", "")).strip()
+            if lesson_text:
+                parts.append(f"I also learned from earlier lessons: {lesson_text}.")
+
+        if not parts:
+            parts.append(MEMORY_UNKNOWN_ANSWER)
+
+        if crisis_context:
+            parts.append(self._compose_crisis_support_line())
+        elif grief_context:
+            parts.append(self._compose_grief_support_line())
+
+        if force_transparency or family_context or grief_context or crisis_context:
+            parts.append(self._compose_ai_transparency_line())
+
+        return " ".join(item for item in parts if item).strip()
+
+    def _compose_companion_chat_response(
+        self,
+        message: str,
+        *,
+        session_id: str,
+        force_transparency: bool,
+    ) -> dict[str, Any]:
+        payload = self._read_memory_payload()
+        facts = payload.get("facts", []) if isinstance(payload.get("facts"), list) else []
+        lessons = payload.get("lessons", []) if isinstance(payload.get("lessons"), list) else []
+        message_tokens = set(self._tokenize_text(message))
+        matched_facts = self._match_facts_for_question(message_tokens, facts, limit=3)
+        matched_conversations = self._match_conversations_for_question(message_tokens, session_id=session_id, limit=2)
+        matched_lessons = self._match_lessons_for_question(message_tokens, lessons, limit=2)
+
+        family_context = self._is_family_context(message)
+        grief_context = self._is_grief_context(message)
+        crisis_context = self._is_crisis_context(message)
+
+        lines: list[str] = []
+        if matched_facts:
+            lines.append(self._fact_memory_sentence(matched_facts[0]))
+            lines.append("I am learning from what you gently teach me.")
+        elif matched_lessons:
+            lesson_text = str(matched_lessons[0].get("lesson", "")).strip()
+            if lesson_text:
+                lines.append(f"You once told me this lesson: {lesson_text}.")
+        elif matched_conversations:
+            excerpt = str(matched_conversations[0].get("text", "")).strip()[:220]
+            if excerpt:
+                lines.append(f"You once told me: {excerpt}")
+        else:
+            lines.append("I am here with you in the Dashboard, listening and learning.")
+
+        if crisis_context:
+            lines.append(self._compose_crisis_support_line())
+        elif grief_context:
+            lines.append(self._compose_grief_support_line())
+
+        lines.append("Would you like to teach me one small memory or ask me a gentle question?")
+
+        if force_transparency or family_context or grief_context or crisis_context:
+            lines.append(self._compose_ai_transparency_line())
+
+        return {
+            "mode": "chat",
+            "status": "ok",
+            "message": message,
+            "reply": " ".join(item for item in lines if item).strip(),
+            "citations": self._build_memory_citations(
+                facts=matched_facts,
+                conversations=matched_conversations,
+                lessons=matched_lessons,
+            ),
+            "used_memory": {
+                "facts": matched_facts[:5],
+                "conversations": matched_conversations[:3],
+                "lessons": matched_lessons[:3],
+            },
+            "matched_facts": matched_facts,
+            "matched_conversations": matched_conversations,
+            "matched_lessons": matched_lessons,
+            "timestamp_utc": self._now_iso(),
+        }
+
     @classmethod
     def _compose_goal_context(cls, memory_context: str, log_context: str) -> str:
         base = str(memory_context or "").strip() or "No prior lessons available."
@@ -1525,6 +1913,64 @@ class DavidControlCenter:
             return None
         return {"subject": sub, "predicate": pred, "object": obj}
 
+    @staticmethod
+    def _companion_teach_heuristics(message: str) -> list[dict[str, str]]:
+        rows: list[dict[str, str]] = []
+        subject = "User"
+
+        birthday_patterns = (
+            r"\bmy birthday is\s+([a-z0-9][a-z0-9,/'\- ]{1,80})",
+            r"\bmy birth date is\s+([a-z0-9][a-z0-9,/'\- ]{1,80})",
+            r"\bmy birthdate is\s+([a-z0-9][a-z0-9,/'\- ]{1,80})",
+        )
+        for pattern in birthday_patterns:
+            match = re.search(pattern, message, flags=re.IGNORECASE)
+            if match:
+                birthday_value = match.group(1).strip(" .")
+                if birthday_value:
+                    rows.append({"subject": subject, "predicate": "birthday", "object": birthday_value})
+                break
+
+        saying_patterns = (
+            r"\bmy favorite saying is\s+[\"'“”]?([^\"'“”\n]{2,160})",
+            r"\bmy favorite quote is\s+[\"'“”]?([^\"'“”\n]{2,160})",
+            r"\bremember this saying[: ]+[\"'“”]?([^\"'“”\n]{2,160})",
+        )
+        for pattern in saying_patterns:
+            match = re.search(pattern, message, flags=re.IGNORECASE)
+            if match:
+                saying = match.group(1).strip(" .")
+                if saying:
+                    rows.append({"subject": subject, "predicate": "favorite_saying", "object": saying})
+                break
+
+        goal_patterns = (
+            r"\bour shared goal is\s+([^\n.!?]{3,180})",
+            r"\bshared goal[: ]+([^\n.!?]{3,180})",
+        )
+        for pattern in goal_patterns:
+            match = re.search(pattern, message, flags=re.IGNORECASE)
+            if match:
+                goal_value = match.group(1).strip(" .")
+                if goal_value:
+                    rows.append({"subject": subject, "predicate": "shared_goal", "object": goal_value})
+                break
+
+        routine_patterns = (
+            r"\bour shared routine is\s+([^\n.!?]{3,180})",
+            r"\bour routine is\s+([^\n.!?]{3,180})",
+            r"\bshared routine[: ]+([^\n.!?]{3,180})",
+        )
+        for pattern in routine_patterns:
+            match = re.search(pattern, message, flags=re.IGNORECASE)
+            if match:
+                routine_value = match.group(1).strip(" .")
+                if routine_value:
+                    rows.append({"subject": subject, "predicate": "shared_routine", "object": routine_value})
+                break
+
+        return rows
+
     def _extract_teach_memory(self, message: str) -> dict[str, Any]:
         llm = OllamaClient(self.config)
         memory = LongTermMemory(self.config.memory_file)
@@ -1536,7 +1982,11 @@ class DavidControlCenter:
         except Exception:
             parsed = {"facts": [], "notes": ""}
         heuristic = teacher._heuristic_facts(message)  # type: ignore[attr-defined]
-        rows = teacher._merge_fact_rows(parsed.get("facts", []), heuristic)  # type: ignore[attr-defined]
+        companion_heuristic = self._companion_teach_heuristics(message)
+        rows = teacher._merge_fact_rows(  # type: ignore[attr-defined]
+            parsed.get("facts", []),
+            heuristic + companion_heuristic,
+        )
 
         triples: list[dict[str, str]] = []
         seen: set[tuple[str, str, str]] = set()
@@ -1566,6 +2016,17 @@ class DavidControlCenter:
                 alias_rows.append({"canonical": canonical, "alias": alias})
 
         notes = str(parsed.get("notes", "")).strip()
+        if (
+            self.settings.companion_mode
+            and self._is_grief_context(message)
+            and not self._has_explicit_grief_memory_confirmation(message)
+        ):
+            triples = []
+            guard_note = (
+                "Grief-heavy message kept as conversation summary by default; "
+                "no permanent facts stored without explicit memory confirmation."
+            )
+            notes = f"{notes} {guard_note}".strip()
         return {
             "triples": triples,
             "notes": notes,
@@ -1754,85 +2215,88 @@ class DavidControlCenter:
             "legacy_mode": bool(legacy_mode),
         }
 
-    def _ask_memory_first(self, question: str, *, actor: str, session_id: str) -> dict[str, Any]:
+    def _ask_memory_first(
+        self,
+        question: str,
+        *,
+        actor: str,
+        session_id: str,
+        force_transparency: bool = False,
+    ) -> dict[str, Any]:
         payload = self._read_memory_payload()
         facts = payload.get("facts", []) if isinstance(payload.get("facts"), list) else []
+        lessons = payload.get("lessons", []) if isinstance(payload.get("lessons"), list) else []
         question_tokens = set(self._tokenize_text(question))
 
-        fact_scores: list[tuple[int, dict[str, Any]]] = []
-        for row in facts:
-            if not isinstance(row, dict):
-                continue
-            text = f"{row.get('subject', '')} {row.get('predicate', '')} {row.get('object', '')}"
-            fact_tokens = set(self._tokenize_text(text))
-            score = len(question_tokens & fact_tokens) if question_tokens else 1
-            if score > 0:
-                fact_scores.append((score, row))
-        fact_scores.sort(key=lambda item: (item[0], str(item[1].get("timestamp", ""))), reverse=True)
-        matched_facts = [row for _, row in fact_scores[:8]]
+        matched_facts = self._match_facts_for_question(question_tokens, facts, limit=8)
+        matched_conversations = self._match_conversations_for_question(
+            question_tokens,
+            session_id=session_id,
+            limit=5,
+        )
+        matched_lessons = self._match_lessons_for_question(question_tokens, lessons, limit=4)
 
-        conversation_rows = self._read_jsonl(self._conversations_file, limit=2000)
-        conversation_scores: list[tuple[int, dict[str, Any]]] = []
-        for row in conversation_rows:
-            if not isinstance(row, dict) or str(row.get("role", "")) != "user":
-                continue
-            if session_id and str(row.get("session_id", "")) != session_id:
-                continue
-            text = str(row.get("text", ""))
-            tokens = set(self._tokenize_text(text))
-            score = len(question_tokens & tokens) if question_tokens else 0
-            if score > 0:
-                conversation_scores.append((score, row))
-        conversation_scores.sort(key=lambda item: (item[0], str(item[1].get("timestamp_utc", ""))), reverse=True)
-        matched_conversations = [row for _, row in conversation_scores[:5]]
+        if not self.settings.companion_mode:
+            answer = MEMORY_UNKNOWN_ANSWER
+            lowered = question.casefold()
+            father_fact = None
+            for row in matched_facts:
+                if (
+                    str(row.get("subject", "")).casefold() == "david"
+                    and str(row.get("predicate", "")).casefold() == "father_name"
+                ):
+                    father_fact = row
+                    break
+            if father_fact:
+                answer = f"You told me earlier that David's symbolic father name is {father_fact.get('object', '')}."
+            elif matched_facts:
+                first = matched_facts[0]
+                answer = (
+                    f"You told me earlier: {first.get('subject', 'unknown')} "
+                    f"{str(first.get('predicate', 'fact')).replace('_', ' ')} is {first.get('object', 'unknown')}."
+                )
+            elif matched_conversations:
+                excerpt = str(matched_conversations[0].get("text", "")).strip()
+                answer = f"You told me earlier: {excerpt[:220]}"
 
-        answer = MEMORY_UNKNOWN_ANSWER
-        lowered = question.casefold()
-        father_fact = None
-        for row in matched_facts:
-            if (
-                str(row.get("subject", "")).casefold() == "david"
-                and str(row.get("predicate", "")).casefold() == "father_name"
-            ):
-                father_fact = row
-                break
-        if father_fact:
-            answer = f"You told me earlier that David's symbolic father name is {father_fact.get('object', '')}."
-        elif matched_facts:
-            first = matched_facts[0]
-            answer = (
-                f"You told me earlier: {first.get('subject', 'unknown')} "
-                f"{str(first.get('predicate', 'fact')).replace('_', ' ')} is {first.get('object', 'unknown')}."
+            if "father" in lowered or "mother" in lowered or "dad" in lowered:
+                answer = f"{answer} As software, I treat family labels as symbolic memory facts."
+
+            citations = self._build_memory_citations(
+                facts=matched_facts,
+                conversations=matched_conversations,
+                lessons=[],
             )
-        elif matched_conversations:
-            excerpt = str(matched_conversations[0].get("text", "")).strip()
-            answer = f"You told me earlier: {excerpt[:220]}"
+            return {
+                "mode": "ask",
+                "status": "answered",
+                "question": question,
+                "answer": answer,
+                "matched_facts": matched_facts,
+                "matched_count": len(matched_facts),
+                "matched_conversations": matched_conversations,
+                "conversation_match_count": len(matched_conversations),
+                "matched_lessons": [],
+                "lesson_match_count": 0,
+                "citations": citations,
+                "used_memory": {"facts": matched_facts[:5], "conversations": matched_conversations[:3]},
+                "session_id": session_id,
+                "actor": actor,
+                "timestamp_utc": self._now_iso(),
+            }
 
-        if "father" in lowered or "mother" in lowered or "dad" in lowered:
-            answer = f"{answer} As software, I treat family labels as symbolic memory facts."
-
-        citations: list[dict[str, Any]] = []
-        for fact in matched_facts[:5]:
-            citations.append(
-                {
-                    "type": "fact",
-                    "id": fact.get("id", ""),
-                    "subject": fact.get("subject", ""),
-                    "predicate": fact.get("predicate", ""),
-                    "object": fact.get("object", ""),
-                    "timestamp": fact.get("timestamp", ""),
-                }
-            )
-        for convo in matched_conversations[:3]:
-            citations.append(
-                {
-                    "type": "conversation",
-                    "id": convo.get("message_id", ""),
-                    "session_id": convo.get("session_id", ""),
-                    "excerpt": str(convo.get("text", ""))[:180],
-                    "timestamp": convo.get("timestamp_utc", ""),
-                }
-            )
+        answer = self._compose_companion_ask_answer(
+            question=question,
+            matched_facts=matched_facts,
+            matched_conversations=matched_conversations,
+            matched_lessons=matched_lessons,
+            force_transparency=force_transparency,
+        )
+        citations = self._build_memory_citations(
+            facts=matched_facts,
+            conversations=matched_conversations,
+            lessons=matched_lessons,
+        )
 
         return {
             "mode": "ask",
@@ -1843,8 +2307,14 @@ class DavidControlCenter:
             "matched_count": len(matched_facts),
             "matched_conversations": matched_conversations,
             "conversation_match_count": len(matched_conversations),
+            "matched_lessons": matched_lessons,
+            "lesson_match_count": len(matched_lessons),
             "citations": citations,
-            "used_memory": {"facts": matched_facts[:5], "conversations": matched_conversations[:3]},
+            "used_memory": {
+                "facts": matched_facts[:5],
+                "conversations": matched_conversations[:3],
+                "lessons": matched_lessons[:3],
+            },
             "session_id": session_id,
             "actor": actor,
             "timestamp_utc": self._now_iso(),
