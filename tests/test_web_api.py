@@ -18,6 +18,7 @@ class FakeCenter:
         self._legacy_archive = []
         self._pending_overwrites = {}
         self._self_improvements = []
+        self._imported_bundles = {}
         self._settings = {
             "safe_mode": False,
             "rate_limit_seconds": 3,
@@ -73,6 +74,10 @@ class FakeCenter:
             "allowed_commands": ["python", "pytest"],
             "metrics": {},
             "csrf_token": "test-token",
+            "app_version": "dev",
+            "git_commit": "abc1234",
+            "version_stamp": "dev+abc1234",
+            "imported_bundle_count": len(self._imported_bundles),
         }
 
     def get_csrf_token(self):
@@ -124,6 +129,17 @@ class FakeCenter:
             "timeline": [],
             "iterations": [],
             "approvals": [],
+            "health_summary": {
+                "iterations": 1,
+                "iterations_until_green": 1,
+                "elapsed_sec": 1.2,
+                "approvals_count": 0,
+                "planner_model_used": "qwen2.5-coder:1.5b",
+                "coder_model_used": "qwen2.5-coder:1.5b",
+                "critic_model_used": "qwen2.5-coder:1.5b",
+                "top_error_category": "none",
+                "memory_items_referenced": 0,
+            },
         }
 
     def get_run_timeline(self, run_id, limit=1000):
@@ -229,6 +245,149 @@ class FakeCenter:
         if run_id != "run_test_1":
             return None
         return io.BytesIO(b"PK")
+
+    def import_run_bundle(self, *, file_name, content, actor="web_ui"):
+        if not content:
+            return False, {"error": "Bundle file is empty."}
+        import_id = f"imp_test_{len(self._imported_bundles) + 1}"
+        self._imported_bundles[import_id] = {
+            "import_id": import_id,
+            "run_id": "run_test_1",
+            "source_filename": str(file_name or "bundle.zip"),
+            "imported_at": "2026-01-01T00:00:00+00:00",
+            "read_only": True,
+            "meta": {
+                "id": "run_test_1",
+                "status": "success",
+                "started_at": "2026-01-01T00:00:00+00:00",
+                "ended_at": "2026-01-01T00:00:05+00:00",
+            },
+            "plan": {},
+            "result": {"status": "success"},
+            "timeline": [
+                {"step": "run_started", "timestamp_utc": "2026-01-01T00:00:00+00:00", "payload": {}},
+                {"step": "run_completed", "timestamp_utc": "2026-01-01T00:00:05+00:00", "payload": {"status": "success"}},
+            ],
+            "iterations": [
+                {
+                    "iteration": "001",
+                    "coder": {},
+                    "execution": [{"returncode": 0, "timed_out": False, "stdout": "ok", "stderr": ""}],
+                    "critic": {},
+                    "diffs": [{"path": "hello.py", "added": 1, "removed": 0, "change_type": "new"}],
+                }
+            ],
+            "audit": [{"action": "approval_requested", "timestamp_utc": "2026-01-01T00:00:01+00:00", "payload": {}}],
+            "file_summary": {
+                "workspace_dir": "imported_bundle_read_only",
+                "artifacts_dir": f"imported_bundle:{import_id}",
+                "created": [{"path": "hello.py", "change_type": "new", "after_preview": "print('hi')"}],
+                "modified": [],
+                "workspace_files": [{"path": "hello.py", "after_preview": "print('hi')"}],
+                "workspace_dirs": [],
+                "workspace_file_total": 1,
+                "workspace_dir_total": 0,
+                "workspace_files_truncated": False,
+                "read_only": True,
+            },
+            "bundle_manifest": {"version_stamp": "dev+abc1234"},
+            "memory_snapshot_redacted": {"counts": {"facts": 0}},
+            "health_summary": {
+                "iterations": 1,
+                "iterations_until_green": 1,
+                "elapsed_sec": 5.0,
+                "approvals_count": 1,
+                "planner_model_used": "qwen2.5-coder:1.5b",
+                "coder_model_used": "qwen2.5-coder:1.5b",
+                "critic_model_used": "qwen2.5-coder:1.5b",
+                "top_error_category": "none",
+                "memory_items_referenced": 1,
+            },
+        }
+        return True, {
+            "import_id": import_id,
+            "run_id": "run_test_1",
+            "source_filename": str(file_name or "bundle.zip"),
+            "imported_at": "2026-01-01T00:00:00+00:00",
+            "read_only": True,
+        }
+
+    def list_imported_bundles(self, limit=120):
+        rows = []
+        for import_id, row in self._imported_bundles.items():
+            rows.append(
+                {
+                    "import_id": import_id,
+                    "run_id": row["run_id"],
+                    "source_filename": row["source_filename"],
+                    "imported_at": row["imported_at"],
+                    "read_only": True,
+                    "status": row["meta"]["status"],
+                    "health_summary": row.get("health_summary", {}),
+                }
+            )
+        return rows[: int(limit or 120)]
+
+    def get_imported_bundle(self, import_id):
+        row = self._imported_bundles.get(str(import_id))
+        if not row:
+            return None
+        payload = dict(row)
+        payload["artifacts_dir"] = f"imported_bundle:{import_id}"
+        payload["workspace_dir"] = "imported_bundle_read_only"
+        return payload
+
+    def get_imported_bundle_timeline(self, import_id, limit=1000):
+        row = self._imported_bundles.get(str(import_id))
+        if not row:
+            return None
+        return list(row.get("timeline", []))[: int(limit or 1000)]
+
+    def get_imported_bundle_audit(self, import_id, limit=1000):
+        row = self._imported_bundles.get(str(import_id))
+        if not row:
+            return None
+        return list(row.get("audit", []))[: int(limit or 1000)]
+
+    def get_imported_bundle_files(self, import_id):
+        row = self._imported_bundles.get(str(import_id))
+        if not row:
+            return None
+        payload = dict(row.get("file_summary", {}))
+        payload["read_only"] = True
+        return payload
+
+    def get_imported_bundle_replay(self, import_id, iteration):
+        row = self._imported_bundles.get(str(import_id))
+        if not row:
+            return None
+        return {
+            "import_id": str(import_id),
+            "run_id": "run_test_1",
+            "iteration": 1,
+            "total_iterations": 1,
+            "has_prev": False,
+            "has_next": False,
+            "current": row.get("iterations", [])[0],
+            "comparison": {"likely_failure_cause": None},
+            "read_only": True,
+        }
+
+    def get_imported_bundle_compare(self, import_id, iteration):
+        row = self._imported_bundles.get(str(import_id))
+        if not row:
+            return None
+        return {
+            "iteration": int(iteration or 1),
+            "previous_iteration": None,
+            "changed_files_current": ["hello.py"],
+            "changed_files_previous": [],
+            "newly_changed_files": ["hello.py"],
+            "passed_previous": False,
+            "passed_current": True,
+            "likely_failure_cause": None,
+            "read_only": True,
+        }
 
     def memory_snapshot(self):
         conflicts = []
@@ -934,6 +1093,61 @@ def test_replay_compare_and_audit_endpoints(client):
 
     audit = client.get("/api/run/run_test_1/audit")
     assert audit.status_code == 200
+
+
+def test_run_bundle_export_endpoint(client):
+    response = client.get("/api/run/run_test_1/bundle")
+    assert response.status_code == 200
+    assert response.mimetype == "application/zip"
+
+
+def test_bundle_import_and_read_only_view_endpoints(client):
+    upload = client.post(
+        "/api/bundles/import",
+        data={
+            "actor": "web_ui",
+            "bundle": (io.BytesIO(b"fake bundle bytes"), "run_bundle.zip"),
+        },
+        content_type="multipart/form-data",
+    )
+    assert upload.status_code == 200
+    upload_data = upload.get_json()["data"]
+    import_id = str(upload_data["import_id"])
+    assert upload_data["read_only"] is True
+
+    listed = client.get("/api/bundles/imports")
+    assert listed.status_code == 200
+    listed_rows = listed.get_json()["data"]
+    assert any(str(row.get("import_id", "")) == import_id for row in listed_rows)
+
+    details = client.get(f"/api/bundles/import/{import_id}")
+    assert details.status_code == 200
+    details_data = details.get_json()["data"]
+    assert details_data["read_only"] is True
+    assert details_data["run_id"] == "run_test_1"
+
+    timeline = client.get(f"/api/bundles/import/{import_id}/timeline")
+    assert timeline.status_code == 200
+    assert isinstance(timeline.get_json()["data"], list)
+
+    files = client.get(f"/api/bundles/import/{import_id}/files")
+    assert files.status_code == 200
+    files_data = files.get_json()["data"]
+    assert files_data["read_only"] is True
+
+    audit = client.get(f"/api/bundles/import/{import_id}/audit")
+    assert audit.status_code == 200
+    assert isinstance(audit.get_json()["data"], list)
+
+    replay = client.get(f"/api/bundles/import/{import_id}/replay?iteration=1")
+    assert replay.status_code == 200
+    replay_data = replay.get_json()["data"]
+    assert replay_data["read_only"] is True
+
+    compare = client.get(f"/api/bundles/import/{import_id}/compare?iteration=1")
+    assert compare.status_code == 200
+    compare_data = compare.get_json()["data"]
+    assert compare_data["iteration"] == 1
 
 
 def test_sse_endpoints_available(client):

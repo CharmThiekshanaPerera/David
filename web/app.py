@@ -29,7 +29,7 @@ def create_app(
         cfg = load_config()
     center = control_center or create_control_center(config=cfg, data_root=data_root)
     app.config["DAVID_CENTER"] = center
-    app.config["MAX_CONTENT_LENGTH"] = 128 * 1024
+    app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024
     state_change_hits: dict[str, float] = {}
 
     def _is_local_request() -> bool:
@@ -54,6 +54,7 @@ def create_app(
                 "/api/legacy_archive",
                 "/api/demo/load",
                 "/api/demo/reset",
+                "/api/bundles/import",
             }
             if request.path.startswith("/api/approval/") or request.path.startswith("/api/run/"):
                 protected.add(request.path)
@@ -309,6 +310,88 @@ def create_app(
             as_attachment=True,
             download_name=f"{run_id}.zip",
         )
+
+    @app.post("/api/bundles/import")
+    def api_bundle_import():
+        actor = str(request.form.get("actor", "web_ui")).strip() or "web_ui"
+        upload = request.files.get("bundle")
+        if upload is None:
+            payload = request.get_json(silent=True) or {}
+            if isinstance(payload, dict):
+                actor = str(payload.get("actor", actor)).strip() or actor
+            return _json_error("Missing bundle upload. Use multipart/form-data with field `bundle`.", status=400)
+        filename = str(getattr(upload, "filename", "") or "").strip() or "bundle.zip"
+        content = upload.read()
+        ok, data = center.import_run_bundle(file_name=filename, content=content, actor=actor)
+        if not ok:
+            return _json_error(str(data.get("error", "Failed to import bundle.")), status=409)
+        return jsonify({"ok": True, "data": data})
+
+    @app.get("/api/bundles/imports")
+    def api_bundle_imports():
+        try:
+            limit = int(request.args.get("limit", "120"))
+        except ValueError:
+            limit = 120
+        return jsonify({"ok": True, "data": center.list_imported_bundles(limit=limit)})
+
+    @app.get("/api/bundles/import/<import_id>")
+    def api_bundle_import_details(import_id: str):
+        payload = center.get_imported_bundle(import_id)
+        if not payload:
+            return _json_error("Imported bundle not found.", status=404)
+        return jsonify({"ok": True, "data": payload})
+
+    @app.get("/api/bundles/import/<import_id>/timeline")
+    def api_bundle_import_timeline(import_id: str):
+        try:
+            limit = int(request.args.get("limit", "1000"))
+        except ValueError:
+            limit = 1000
+        payload = center.get_imported_bundle_timeline(import_id, limit=limit)
+        if payload is None:
+            return _json_error("Imported bundle not found.", status=404)
+        return jsonify({"ok": True, "data": payload})
+
+    @app.get("/api/bundles/import/<import_id>/files")
+    def api_bundle_import_files(import_id: str):
+        payload = center.get_imported_bundle_files(import_id)
+        if payload is None:
+            return _json_error("Imported bundle not found.", status=404)
+        return jsonify({"ok": True, "data": payload})
+
+    @app.get("/api/bundles/import/<import_id>/audit")
+    def api_bundle_import_audit(import_id: str):
+        try:
+            limit = int(request.args.get("limit", "1000"))
+        except ValueError:
+            limit = 1000
+        payload = center.get_imported_bundle_audit(import_id, limit=limit)
+        if payload is None:
+            return _json_error("Imported bundle not found.", status=404)
+        return jsonify({"ok": True, "data": payload})
+
+    @app.get("/api/bundles/import/<import_id>/replay")
+    def api_bundle_import_replay(import_id: str):
+        try:
+            iteration = int(request.args.get("iteration", "1"))
+        except ValueError:
+            iteration = 1
+        payload = center.get_imported_bundle_replay(import_id, iteration=iteration)
+        if payload is None:
+            return _json_error("Imported bundle not found.", status=404)
+        return jsonify({"ok": True, "data": payload})
+
+    @app.get("/api/bundles/import/<import_id>/compare")
+    def api_bundle_import_compare(import_id: str):
+        try:
+            iteration = int(request.args.get("iteration", "1"))
+        except ValueError:
+            iteration = 1
+        payload = center.get_imported_bundle_compare(import_id, iteration=iteration)
+        if payload is None:
+            return _json_error("Imported bundle not found.", status=404)
+        return jsonify({"ok": True, "data": payload})
 
     @app.get("/api/memory")
     def api_memory():

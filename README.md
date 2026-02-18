@@ -353,7 +353,11 @@ python -m web.server --host 127.0.0.1 --port 8787
 4. Confirm demo activation:
    - top bar shows `DEMO` badge.
    - Dashboard status shows `Demo mode = true`.
-5. Click through tabs in this order:
+5. Optional fast tour:
+   - click `Guided Walkthrough` in the header.
+   - follow the overlay steps through Dashboard, Memory & Chat, Approvals, Runs replay/compare, Logs, and Settings.
+   - walkthrough pre-fills safe local example prompts for ask/teach gating demos.
+6. Click through tabs in this order:
    - `Dashboard`: Growth Timeline milestones, Legacy Archive, Proposed Improvements.
    - `Runs`: open seeded runs (success, failure/regression, awaiting approval).
    - `Approvals`: resolve pending approvals (typed confirmation required for high-risk items).
@@ -362,7 +366,7 @@ python -m web.server --host 127.0.0.1 --port 8787
    - `Telemetry`: verify stage/model events and stream states (`connected`, `reconnecting`, `fallback`).
    - `Logs`: confirm seeded info/warn/error mix.
    - `Settings`: verify personality calibration, model roles, and demo controls.
-6. In `Memory & Chat`, run this scripted sequence:
+7. In `Memory & Chat`, run this scripted sequence:
    - `Who is your father?`
    - `What did you learn about tests and edge cases?`
    - `Who founded this imaginary company called Zephra Dynamics?` (no memory match path)
@@ -370,12 +374,12 @@ python -m web.server --host 127.0.0.1 --port 8787
    - same message again with `Confirm Teach save` on and `Parent Teaching Mode` on (clarification flow)
    - `Hi David I am your dad. My Name is Bob.` with `Teach` + confirm on (conflict/overwrite-required flow)
    - confirm overwrite when prompted
-7. In `Approvals`, approve a typed-confirmation item:
+8. In `Approvals`, approve a typed-confirmation item:
    - submit exactly `approve <run_id>` in confirmation field
    - verify `Run Audit` includes `approval_decision`.
-8. In `Diff Viewer`, open:
+9. In `Diff Viewer`, open:
    - `run_20260211T113000_b2c3d4e5`, compare iteration `2` to confirm “first failing iteration after a passing iteration”.
-9. Use `Reset Demo` anytime to restore baseline seeded state.
+10. Use `Reset Demo` anytime to restore baseline seeded state.
 
 ### Web tabs
 
@@ -430,7 +434,7 @@ Use the `Memory & Chat` tab to interact naturally while keeping memory writes ex
 6. `Explain why David answered this` shows citations for memory facts/conversation snippets and relevant lessons used in the answer.
 7. `Memory Insight` expands each answer with a readable reference summary such as `This answer was influenced by Fact #12 (...), Lesson #7 (...), and Conversation #3 (...)`.
 8. `Legacy Archive` stores Significant Moments as a reflective learning journal and is intentionally not positioned as a substitute for real-world relationships.
-7. Companion behavior safeguards:
+9. Companion behavior safeguards:
    - David stays transparent that he is an AI companion and not a real human child.
    - Family and attachment language is handled with warm + transparent wording.
    - Grief-sensitive language adds calm support and encourages reaching trusted real-world people.
@@ -452,6 +456,12 @@ Use the `Memory & Chat` tab to interact naturally while keeping memory writes ex
 - Real-time Server-Sent Events (SSE) streaming with polling fallback and connection-state indicator.
 - Approvals tab with high-risk typed confirmation and per-run audit log.
 - Run Replay mode (`Prev/Next`) and iteration comparison view.
+- Guided Walkthrough overlay with tab-by-tab highlights and safe prefilled demo prompts.
+- Header version stamp (`app_version + git commit` when available).
+- Portable run bundles:
+  - `Export Bundle` from run rows/success banner.
+  - `Import Bundle` into read-only viewer mode (no live-state mutation).
+- Run Health Summary card per run: iterations, time-to-green, approvals, models used, top error category, memory references.
 - Failure explainer with category, top error lines, related files, and copyable VS Code open commands.
 
 ### AI Cinematic Theme
@@ -490,6 +500,14 @@ Use the `Memory & Chat` tab to interact naturally while keeping memory writes ex
 - `GET /api/run/<run_id>/compare`
 - `POST /api/run/<run_id>/retry`
 - `GET /api/run/<run_id>/bundle`
+- `POST /api/bundles/import`
+- `GET /api/bundles/imports`
+- `GET /api/bundles/import/<import_id>`
+- `GET /api/bundles/import/<import_id>/timeline`
+- `GET /api/bundles/import/<import_id>/files`
+- `GET /api/bundles/import/<import_id>/audit`
+- `GET /api/bundles/import/<import_id>/replay`
+- `GET /api/bundles/import/<import_id>/compare`
 - `GET /api/memory`
 - `GET /api/memory/facts`
 - `GET /api/memory/conversations`
@@ -534,6 +552,31 @@ Use the `Memory & Chat` tab to interact naturally while keeping memory writes ex
 - Grief/calm support overlays never replace human support; crisis-risk responses include U.S. `988` guidance.
 - Safe mode can block write operations (read-only monitoring mode).
 - Run artifacts are stored under `data/runs/<run_id>/` (plan, iteration outputs, diffs, result bundle).
+- Imported bundle viewer is permanently read-only and isolated from live workspace state.
+
+## Release Checklist
+
+Before shipping a release build:
+
+1. Run full tests:
+   - `pytest -q`
+2. Validate local web startup:
+   - `python -m web.server --host 127.0.0.1 --port 8787`
+3. Verify header version stamp shows expected `VERSION` and git short commit.
+4. Enable demo mode and run the Guided Walkthrough end-to-end.
+5. Execute the scripted Demo Walkthrough chat sequence and confirm:
+   - intent chips,
+   - teach confirmation gating,
+   - citations + memory insight rendering,
+   - typed approval flow,
+   - replay/compare controls.
+6. Export a run bundle, import it, and verify read-only viewer endpoints:
+   - timeline,
+   - files,
+   - audit,
+   - replay/compare.
+7. Confirm imported bundle viewing does not mutate live runs/memory/workspace state.
+8. Review logs/telemetry for clean startup and no unhandled errors.
 
 ### Preview mode quick usage
 

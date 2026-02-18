@@ -1,11 +1,16 @@
 // web/static/app.js
 const STAGES = ["planner", "coder", "safety", "executor", "critic", "memory"];
 const STREAM_RETRY_MS = 3000;
+const WALKTHROUGH_DISMISSED_KEY = "dcc_walkthrough_dismissed";
 
 const state = {
   status: null,
   runs: [],
+  importedBundles: [],
   selectedRunId: localStorage.getItem("dcc_selected_run") || "",
+  selectedImportedBundleId: "",
+  runViewerMode: "live",
+  runReadOnlyView: false,
   selectedIteration: 1,
   selectedRunDetails: null,
   selectedRunFiles: null,
@@ -64,10 +69,18 @@ const state = {
   bgDisabled: localStorage.getItem("dcc_bg_disabled") === "1",
   reducedMotion: window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches,
   demoBadgeText: "DEMO",
+  versionStamp: "dev",
+  walkthrough: {
+    active: false,
+    stepIndex: 0,
+    highlightedSelector: "",
+  },
 };
 
 const el = {
   tabs: document.getElementById("tabs"),
+  startWalkthroughBtn: document.getElementById("startWalkthroughBtn"),
+  versionStamp: document.getElementById("versionStamp"),
   globalStatus: document.getElementById("globalStatus"),
   demoBadge: document.getElementById("demoBadge"),
   streamStatus: document.getElementById("streamStatus"),
@@ -117,7 +130,11 @@ const el = {
   runSearch: document.getElementById("runSearch"),
   runStatusFilter: document.getElementById("runStatusFilter"),
   refreshRunsBtn: document.getElementById("refreshRunsBtn"),
+  bundleImportFile: document.getElementById("bundleImportFile"),
+  importBundleBtn: document.getElementById("importBundleBtn"),
+  importedBundleList: document.getElementById("importedBundleList"),
   runTableWrap: document.getElementById("runTableWrap"),
+  runHealthSummary: document.getElementById("runHealthSummary"),
   timelineView: document.getElementById("timelineView"),
   executionPanels: document.getElementById("executionPanels"),
   failureDetails: document.getElementById("failureDetails"),
@@ -210,6 +227,13 @@ const el = {
   cliExecPanel: document.getElementById("cliExecPanel"),
   toastContainer: document.getElementById("toastContainer"),
   heroParticles: document.getElementById("heroParticles"),
+  walkthroughOverlay: document.getElementById("walkthroughOverlay"),
+  walkthroughStepCounter: document.getElementById("walkthroughStepCounter"),
+  walkthroughTitle: document.getElementById("walkthroughTitle"),
+  walkthroughText: document.getElementById("walkthroughText"),
+  walkthroughBackBtn: document.getElementById("walkthroughBackBtn"),
+  walkthroughNextBtn: document.getElementById("walkthroughNextBtn"),
+  walkthroughCloseBtn: document.getElementById("walkthroughCloseBtn"),
 };
 
 if (!Array.isArray(state.pinnedMessageIds)) {
@@ -326,7 +350,7 @@ function renderFileItemRow(path, label, badgeClass, badgeText, includeActions = 
   )}</span></button>${actions}</div>`;
 }
 
-function renderWorkspaceFileTree(node, createdSet, modifiedSet, query = "", openDepth = 1, depth = 0, parent = "") {
+function renderWorkspaceFileTree(node, createdSet, modifiedSet, query = "", openDepth = 1, depth = 0, parent = "", canEdit = true) {
   const folderRows = Array.from(node.dirs.entries())
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([name, child]) => {
@@ -338,18 +362,22 @@ function renderWorkspaceFileTree(node, createdSet, modifiedSet, query = "", open
         query,
         openDepth,
         depth + 1,
-        folderPath
+        folderPath,
+        canEdit
       );
       const folderMatched = pathMatchesQuery(`${folderPath}/`, query) || childResult.hasMatch;
       if (!folderMatched) return "";
       const open = state.previewTreeExpandAll || query || depth < openDepth ? " open" : "";
+      const folderActions = canEdit
+        ? `<div class="folder-tools"><button type="button" class="btn-subtle folder-action-btn" data-folder-action="rename" data-folder-path="${escapeHtml(
+            folderPath
+          )}">Rename</button><button type="button" class="btn-subtle folder-action-btn danger-lite" data-folder-action="delete" data-folder-path="${escapeHtml(
+            folderPath
+          )}">Delete</button></div>`
+        : "";
       return `<details class="file-folder"${open}><summary><span class="folder-name">${escapeHtml(
         name
-      )}/</span><span class="folder-path-inline">${escapeHtml(folderPath)}/</span></summary><div class="folder-tools"><button type="button" class="btn-subtle folder-action-btn" data-folder-action="rename" data-folder-path="${escapeHtml(
-        folderPath
-      )}">Rename</button><button type="button" class="btn-subtle folder-action-btn danger-lite" data-folder-action="delete" data-folder-path="${escapeHtml(
-        folderPath
-      )}">Delete</button></div><div class="file-children">${childResult.html}</div></details>`;
+      )}/</span><span class="folder-path-inline">${escapeHtml(folderPath)}/</span></summary>${folderActions}<div class="file-children">${childResult.html}</div></details>`;
     });
 
   const fileRows = node.files
@@ -366,7 +394,7 @@ function renderWorkspaceFileTree(node, createdSet, modifiedSet, query = "", open
         badgeClass = "edited";
         badgeText = "edited file";
       }
-      return renderFileItemRow(row.path, row.name, badgeClass, badgeText, true);
+      return renderFileItemRow(row.path, row.name, badgeClass, badgeText, canEdit);
     });
 
   const html = [...folderRows.filter(Boolean), ...fileRows.filter(Boolean)].join("");
@@ -374,6 +402,12 @@ function renderWorkspaceFileTree(node, createdSet, modifiedSet, query = "", open
 }
 
 async function refreshSelectedRunFiles() {
+  if (state.runViewerMode === "import" && state.selectedImportedBundleId) {
+    const files = await api(`/api/bundles/import/${encodeURIComponent(state.selectedImportedBundleId)}/files`);
+    state.selectedRunFiles = files;
+    renderFileTree(files);
+    return;
+  }
   if (!state.selectedRunId) return;
   const files = await api(`/api/run/${encodeURIComponent(state.selectedRunId)}/files`);
   state.selectedRunFiles = files;
@@ -388,6 +422,25 @@ async function api(path, options = {}) {
   }
 
   const response = await fetch(path, { ...options, headers });
+  const json = await response.json().catch(() => ({}));
+  if (!response.ok || !json.ok) {
+    const err = new Error(json?.error || json?.data?.error || `Request failed (${response.status})`);
+    err.response = json;
+    throw err;
+  }
+  return json.data;
+}
+
+async function apiMultipart(path, formData) {
+  const headers = {};
+  if (state.csrfToken) {
+    headers["X-CSRF-Token"] = state.csrfToken;
+  }
+  const response = await fetch(path, {
+    method: "POST",
+    body: formData,
+    headers,
+  });
   const json = await response.json().catch(() => ({}));
   if (!response.ok || !json.ok) {
     const err = new Error(json?.error || json?.data?.error || `Request failed (${response.status})`);
@@ -1090,6 +1143,21 @@ function renderDemoBadge() {
   }
 }
 
+function renderVersionStamp() {
+  if (!el.versionStamp) return;
+  const statusVersion = String(state.status?.version_stamp || "").trim();
+  const settingsVersion = String(state.settings?.version_stamp || "").trim();
+  const stamp = statusVersion || settingsVersion || "dev";
+  state.versionStamp = stamp;
+  const appVersion = String(state.status?.app_version || state.settings?.app_version || "").trim();
+  const gitCommit = String(state.status?.git_commit || state.settings?.git_commit || "").trim();
+  const titleParts = [];
+  if (appVersion) titleParts.push(`app ${appVersion}`);
+  if (gitCommit) titleParts.push(`commit ${gitCommit}`);
+  el.versionStamp.textContent = stamp;
+  el.versionStamp.title = titleParts.join(" | ") || "Local build";
+}
+
 function applyDemoUiDefaults(settingsData) {
   const data = settingsData && typeof settingsData === "object" ? settingsData : {};
   if (!(state.status?.demo_mode || data.demo_mode)) return;
@@ -1115,6 +1183,23 @@ function renderRunConfigSummary(planner, coder, critic, tdd) {
     <span class="run-config-pill">Critic: ${escapeHtml(critic || "-")}</span>
     <span class="run-config-pill">TDD: ${escapeHtml(String(!!tdd))}</span>
   `;
+}
+
+function renderRunHealthSummary(summary, readOnly = false) {
+  const data = summary && typeof summary === "object" ? summary : {};
+  const models = [data.planner_model_used, data.coder_model_used, data.critic_model_used].filter(Boolean).join(" | ") || "-";
+  const elapsed = Number(data.elapsed_sec);
+  const elapsedLabel = Number.isFinite(elapsed) ? `${elapsed.toFixed(2)}s` : "-";
+  kvList(el.runHealthSummary, [
+    ["Viewer mode", readOnly ? "Imported bundle (read-only)" : "Live run"],
+    ["Iterations", data.iterations ?? "-"],
+    ["Time to green", data.iterations_until_green ?? "-"],
+    ["Elapsed", elapsedLabel],
+    ["Approvals", data.approvals_count ?? 0],
+    ["Models used", models],
+    ["Top error category", data.top_error_category || "none"],
+    ["Memory references", data.memory_items_referenced ?? 0],
+  ]);
 }
 
 function renderStageTracker(currentStage) {
@@ -1185,6 +1270,7 @@ function renderStatus() {
   updateButtonState();
   renderRunConfigSummary(s.planner_model_used, s.coder_model_used, s.critic_model_used, s.tdd_mode);
   renderDemoBadge();
+  renderVersionStamp();
 }
 
 function renderArtifacts(details) {
@@ -1193,13 +1279,15 @@ function renderArtifacts(details) {
     return;
   }
   const meta = details.meta || {};
+  const readOnly = !!details.read_only || !!state.runReadOnlyView;
   const projectPath = meta.project_path || "-";
   const openProject = projectPath !== "-" ? `code "${projectPath}"` : "-";
   kvList(el.artifactList, [
+    ["Viewer mode", readOnly ? "Imported bundle (read-only)" : "Live workspace"],
     ["Artifacts", details.artifacts_dir || details.meta.artifacts_dir || "-"],
     ["Workspace", details.workspace_dir || details.meta.workspace_dir || "-"],
     ["Project", `${meta.project_slug || "-"} (${projectPath})`],
-    ["Open project folder", openProject],
+    ["Open project folder", readOnly ? "-" : openProject],
   ]);
 }
 
@@ -1286,7 +1374,7 @@ function renderRuns() {
             <td>
               <button data-run-action="view" data-run-id="${escapeHtml(row.id)}">View</button>
               <button data-run-action="retry" data-run-id="${escapeHtml(row.id)}" class="ghost" ${hasActive ? "disabled" : ""}>Retry</button>
-              <button data-run-action="bundle" data-run-id="${escapeHtml(row.id)}" class="ghost">Bundle</button>
+              <button data-run-action="bundle" data-run-id="${escapeHtml(row.id)}" class="ghost">Export Bundle</button>
             </td>
           </tr>`
         )
@@ -1300,6 +1388,9 @@ function renderRuns() {
       const runId = button.getAttribute("data-run-id");
       if (!runId) return;
       if (action === "view") {
+        state.runViewerMode = "live";
+        state.runReadOnlyView = false;
+        state.selectedImportedBundleId = "";
         state.selectedRunId = runId;
         localStorage.setItem("dcc_selected_run", runId);
         await openRunTab(runId);
@@ -1314,6 +1405,42 @@ function renderRuns() {
       } else if (action === "bundle") {
         window.location.href = `/api/run/${encodeURIComponent(runId)}/bundle`;
       }
+    });
+  });
+}
+
+function renderImportedBundles() {
+  if (!el.importedBundleList) return;
+  const rows = Array.isArray(state.importedBundles) ? state.importedBundles : [];
+  if (!rows.length) {
+    el.importedBundleList.innerHTML = '<p class="muted">No imported bundles yet.</p>';
+    return;
+  }
+  el.importedBundleList.innerHTML = rows
+    .map((row) => {
+      const importId = String(row.import_id || "");
+      const active = importId && importId === state.selectedImportedBundleId;
+      const summary = row.health_summary && typeof row.health_summary === "object" ? row.health_summary : {};
+      return `<div class="imported-bundle-item ${active ? "active" : ""}">
+        <div class="row">
+          <strong><code>${escapeHtml(row.run_id || "-")}</code></strong>
+          <button type="button" class="ghost" data-import-open="${escapeHtml(importId)}">Open</button>
+        </div>
+        <div class="muted">${escapeHtml(row.source_filename || "bundle.zip")} · imported ${escapeHtml(fmtDate(row.imported_at || ""))}</div>
+        <div class="muted">status=${escapeHtml(row.status || "-")} · iterations=${escapeHtml(summary.iterations ?? "-")} · approvals=${escapeHtml(summary.approvals_count ?? 0)}</div>
+      </div>`;
+    })
+    .join("");
+  el.importedBundleList.querySelectorAll("button[data-import-open]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const importId = String(button.getAttribute("data-import-open") || "").trim();
+      if (!importId) return;
+      state.selectedImportedBundleId = importId;
+      state.runViewerMode = "import";
+      state.runReadOnlyView = true;
+      await loadImportedBundle(importId);
+      renderImportedBundles();
+      activateTab("runs");
     });
   });
 }
@@ -1444,6 +1571,7 @@ function renderFileTree(summary) {
   const workspaceFileTotal = Number(summary.workspace_file_total || workspaceFiles.length || 0);
   const workspaceDirTotal = Number(summary.workspace_dir_total || workspaceDirs.length || 0);
   const workspaceTruncated = !!summary.workspace_files_truncated;
+  const readOnly = !!summary.read_only || !!state.runReadOnlyView;
   const changedCount = created.length + modified.length;
   const projectLabel = summary.project_slug
     ? `${summary.project_slug} (${summary.project_path || "-"})`
@@ -1451,7 +1579,8 @@ function renderFileTree(summary) {
   const workspaceLabel = workspaceTruncated
     ? `${workspaceFileTotal} files + ${workspaceDirTotal} folders (showing ${workspaceFiles.length} files)`
     : `${workspaceFileTotal} files + ${workspaceDirTotal} folders`;
-  el.previewSummary.textContent = `${changedCount} changed files · ${workspaceLabel} · Project: ${projectLabel}. Artifacts: ${summary.artifacts_dir}`;
+  const modeLabel = readOnly ? "Read-only imported bundle" : "Live workspace";
+  el.previewSummary.textContent = `${changedCount} changed files · ${workspaceLabel} · Project: ${projectLabel}. Artifacts: ${summary.artifacts_dir} · Mode: ${modeLabel}`;
 
   const previewByPath = new Map();
   [...workspaceFiles, ...created, ...modified].forEach((row) => {
@@ -1479,7 +1608,7 @@ function renderFileTree(summary) {
   created.forEach((file) => {
     const previewPath = normalizePath(file.path);
     const workspacePath = normalizePath(toWorkspaceRelativePath(file.workspace_path || "", workspaceRoot) || file.path);
-    rows.push(renderFileItemRow(previewPath, previewPath, "new", "new file", true, workspacePath));
+    rows.push(renderFileItemRow(previewPath, previewPath, "new", "new file", !readOnly, workspacePath));
   });
   if (modified.length) {
     rows.push('<div class="muted">Modified Files</div>');
@@ -1487,11 +1616,20 @@ function renderFileTree(summary) {
   modified.forEach((file) => {
     const previewPath = normalizePath(file.path);
     const workspacePath = normalizePath(toWorkspaceRelativePath(file.workspace_path || "", workspaceRoot) || file.path);
-    rows.push(renderFileItemRow(previewPath, previewPath, "edited", "edited file", true, workspacePath));
+    rows.push(renderFileItemRow(previewPath, previewPath, "edited", "edited file", !readOnly, workspacePath));
   });
 
   const tree = buildWorkspaceFileTree(workspaceFiles, workspaceDirs);
-  const treeResult = renderWorkspaceFileTree(tree, createdPaths, modifiedPaths, state.previewTreeQuery || "");
+  const treeResult = renderWorkspaceFileTree(
+    tree,
+    createdPaths,
+    modifiedPaths,
+    state.previewTreeQuery || "",
+    1,
+    0,
+    "",
+    !readOnly
+  );
   if (treeResult.html) {
     rows.push('<div class="muted">Workspace Folder Tree (All Files/Folders)</div>');
     rows.push(`<div class="workspace-tree">${treeResult.html}</div>`);
@@ -1531,6 +1669,10 @@ function renderFileTree(summary) {
       el.filePreview.textContent = `${path}\n\n${preview}`;
     });
   });
+
+  if (readOnly) {
+    return;
+  }
 
   el.fileTree.querySelectorAll("button[data-file-action]").forEach((button) => {
     button.addEventListener("click", async (event) => {
@@ -2452,6 +2594,7 @@ function renderSettings(data) {
     ["Goal templates", (state.goalTemplates || []).length],
   ]);
   renderDemoBadge();
+  renderVersionStamp();
 }
 
 function handleRunCompletionNotification() {
@@ -2488,9 +2631,13 @@ function handleRunCompletionNotification() {
   };
 }
 
-async function loadReplay(runId, iteration) {
+async function loadReplay(runId, iteration, mode = "live") {
+  const isImport = mode === "import";
+  const endpoint = isImport
+    ? `/api/bundles/import/${encodeURIComponent(runId)}/replay?iteration=${encodeURIComponent(iteration)}`
+    : `/api/run/${encodeURIComponent(runId)}/replay?iteration=${encodeURIComponent(iteration)}`;
   try {
-    const replay = await api(`/api/run/${encodeURIComponent(runId)}/replay?iteration=${encodeURIComponent(iteration)}`);
+    const replay = await api(endpoint);
     state.selectedIteration = replay.iteration;
     el.replayIterationLabel.textContent = `Iteration ${replay.iteration} / ${replay.total_iterations}`;
     el.replayPrevBtn.disabled = !replay.has_prev;
@@ -2502,9 +2649,13 @@ async function loadReplay(runId, iteration) {
   }
 }
 
-async function loadAudit(runId) {
+async function loadAudit(runId, mode = "live") {
+  const isImport = mode === "import";
+  const endpoint = isImport
+    ? `/api/bundles/import/${encodeURIComponent(runId)}/audit?limit=300`
+    : `/api/run/${encodeURIComponent(runId)}/audit?limit=300`;
   try {
-    const audit = await api(`/api/run/${encodeURIComponent(runId)}/audit?limit=300`);
+    const audit = await api(endpoint);
     el.approvalAudit.textContent = JSON.stringify(audit, null, 2);
   } catch (err) {
     el.approvalAudit.textContent = err.message;
@@ -2513,6 +2664,8 @@ async function loadAudit(runId) {
 
 async function loadRun(runId) {
   try {
+    state.runViewerMode = "live";
+    state.runReadOnlyView = false;
     const details = await api(`/api/run/${encodeURIComponent(runId)}`);
     const files = await api(`/api/run/${encodeURIComponent(runId)}/files`);
     state.selectedRunDetails = details;
@@ -2523,8 +2676,9 @@ async function loadRun(runId) {
     renderDiffs(details);
     renderArtifacts(details);
     renderFileTree(files);
-    await loadReplay(runId, state.selectedIteration || 1);
-    await loadAudit(runId);
+    renderRunHealthSummary(details.health_summary, false);
+    await loadReplay(runId, state.selectedIteration || 1, "live");
+    await loadAudit(runId, "live");
 
     if (state.lastCliRunId === runId) {
       setCliOutput(JSON.stringify(details.result || {}, null, 2));
@@ -2535,13 +2689,51 @@ async function loadRun(runId) {
   }
 }
 
+async function loadImportedBundle(importId) {
+  if (!importId) return;
+  try {
+    const details = await api(`/api/bundles/import/${encodeURIComponent(importId)}`);
+    const files = await api(`/api/bundles/import/${encodeURIComponent(importId)}/files`);
+    state.selectedRunDetails = details;
+    state.selectedRunFiles = files;
+    state.selectedRunId = String(details.run_id || state.selectedRunId || "");
+    if (el.diffRunId && state.selectedRunId) {
+      el.diffRunId.value = state.selectedRunId;
+    }
+    state.runViewerMode = "import";
+    state.runReadOnlyView = true;
+
+    renderTimeline(details);
+    renderExecutionPanels(el.executionPanels, details.iterations || []);
+    renderDiffs(details);
+    renderArtifacts(details);
+    renderFileTree(files);
+    renderRunHealthSummary(details.health_summary, true);
+    await loadReplay(importId, state.selectedIteration || 1, "import");
+    await loadAudit(importId, "import");
+
+    if (state.lastCliRunId === state.selectedRunId) {
+      setCliOutput(JSON.stringify(details.result || {}, null, 2));
+      renderExecutionPanels(el.cliExecPanel, details.iterations || []);
+    }
+  } catch (err) {
+    setMessage(err.message);
+  }
+}
+
 async function openRunTab(runId) {
+  state.runViewerMode = "live";
+  state.runReadOnlyView = false;
+  state.selectedImportedBundleId = "";
   activateTab("runs");
   el.diffRunId.value = runId;
   await loadRun(runId);
 }
 
 async function openDiffTab(runId) {
+  state.runViewerMode = "live";
+  state.runReadOnlyView = false;
+  state.selectedImportedBundleId = "";
   activateTab("diff");
   el.diffRunId.value = runId;
   await loadRun(runId);
@@ -2566,7 +2758,7 @@ async function refreshRuns() {
   handleRunCompletionNotification();
 
   const hasSelected = state.runs.some((item) => item.id === state.selectedRunId);
-  if (!hasSelected) {
+  if (state.runViewerMode === "live" && !hasSelected) {
     const preferredRunId =
       state.status?.active_run_id ||
       (state.runs.length ? state.runs[0].id : "");
@@ -2576,11 +2768,32 @@ async function refreshRuns() {
     }
   }
 
-  if (state.selectedRunId) {
+  if (state.runViewerMode === "live" && state.selectedRunId) {
+    state.runReadOnlyView = false;
     await loadRun(state.selectedRunId);
+  } else if (state.runViewerMode === "import" && state.selectedImportedBundleId) {
+    state.runReadOnlyView = true;
+    await loadImportedBundle(state.selectedImportedBundleId);
   } else {
     renderFileTree(null);
+    renderRunHealthSummary({}, false);
   }
+}
+
+async function refreshImportedBundles() {
+  const rows = await api("/api/bundles/imports?limit=120");
+  state.importedBundles = Array.isArray(rows) ? rows : [];
+  if (state.selectedImportedBundleId) {
+    const exists = state.importedBundles.some((row) => String(row.import_id || "") === state.selectedImportedBundleId);
+    if (!exists) {
+      state.selectedImportedBundleId = "";
+      if (state.runViewerMode === "import") {
+        state.runViewerMode = "live";
+        state.runReadOnlyView = false;
+      }
+    }
+  }
+  renderImportedBundles();
 }
 
 async function refreshMemory() {
@@ -2866,6 +3079,9 @@ async function handleGoalCommand(request) {
     }),
   });
   state.lastCliRunId = result.run_id;
+  state.runViewerMode = "live";
+  state.runReadOnlyView = false;
+  state.selectedImportedBundleId = "";
   state.selectedRunId = result.run_id;
   localStorage.setItem("dcc_selected_run", result.run_id);
   setupRunStream(result.run_id);
@@ -2970,6 +3186,9 @@ async function handleAdvancedChat(rawMessage) {
     }
   } else if (responseStatus === "queued" && response?.run?.run_id) {
     state.lastCliRunId = response.run.run_id;
+    state.runViewerMode = "live";
+    state.runReadOnlyView = false;
+    state.selectedImportedBundleId = "";
     state.selectedRunId = response.run.run_id;
     localStorage.setItem("dcc_selected_run", response.run.run_id);
     setupRunStream(response.run.run_id);
@@ -3021,6 +3240,155 @@ async function submitMemoryChat() {
   setCliOutput("Unsupported command. Use /goal, /ask, /teach, or plain natural input.");
 }
 
+function walkthroughSteps() {
+  return [
+    {
+      tab: "dashboard",
+      title: "Dashboard",
+      text: "Start here for status, progress, and growth. Check the version stamp in the header and the demo badge when fixture mode is enabled.",
+      highlight: "#tab-dashboard .dashboard-top-grid",
+    },
+    {
+      tab: "cli",
+      title: "Memory & Chat",
+      text: "This is memory-first chat. We prefilled an Ask prompt. Send it to see citation chips and Memory Insight references.",
+      highlight: "#memoryChatInput",
+      onEnter: () => {
+        setAdvancedIntent("ask");
+        if (el.memoryChatInput) {
+          el.memoryChatInput.value = "Who is your father?";
+        }
+        updateIntentPreview();
+      },
+    },
+    {
+      tab: "cli",
+      title: "Confirmation Gating",
+      text: "Teach writes are confirmation-gated. We prefilled a Teach prompt; keep Confirm Teach save off to preview before storing.",
+      highlight: "#chatConfirmSave",
+      onEnter: () => {
+        setAdvancedIntent("teach");
+        if (el.chatConfirmSave) {
+          el.chatConfirmSave.checked = false;
+        }
+        if (el.memoryChatInput) {
+          el.memoryChatInput.value = "Always value patience.";
+        }
+        updateIntentPreview();
+      },
+    },
+    {
+      tab: "approvals",
+      title: "Approvals Queue",
+      text: "High-risk changes can require typed confirmation. Use exact text like `approve <run_id>` when required, then review audit entries.",
+      highlight: "#approvalList",
+    },
+    {
+      tab: "runs",
+      title: "Runs Replay/Compare",
+      text: "Inspect Run Health Summary, then use replay controls to step iterations and compare where regressions started.",
+      highlight: "#replayPanel",
+      onEnter: async () => {
+        if (state.runViewerMode === "import" && state.selectedImportedBundleId) {
+          await loadImportedBundle(state.selectedImportedBundleId);
+          return;
+        }
+        if (!state.selectedRunId && state.runs.length) {
+          state.selectedRunId = String(state.runs[0].id || "");
+        }
+        if (state.selectedRunId) {
+          await loadRun(state.selectedRunId);
+        }
+      },
+    },
+    {
+      tab: "logs",
+      title: "Logs",
+      text: "Logs include info/warn/error with search and level filters so newcomers can inspect system behavior quickly.",
+      highlight: "#logsView",
+    },
+    {
+      tab: "settings",
+      title: "Settings",
+      text: "Calibrate personality sliders, model roles, and demo controls. Settings never bypass safety constraints.",
+      highlight: "#settingsInfo",
+    },
+  ];
+}
+
+function clearWalkthroughHighlight() {
+  if (!state.walkthrough.highlightedSelector) return;
+  const node = document.querySelector(state.walkthrough.highlightedSelector);
+  if (node) {
+    node.classList.remove("walkthrough-highlight");
+  }
+  state.walkthrough.highlightedSelector = "";
+}
+
+function applyWalkthroughHighlight(selector) {
+  clearWalkthroughHighlight();
+  const clean = String(selector || "").trim();
+  if (!clean) return;
+  const node = document.querySelector(clean);
+  if (!node) return;
+  node.classList.add("walkthrough-highlight");
+  state.walkthrough.highlightedSelector = clean;
+  try {
+    node.scrollIntoView({ behavior: state.reducedMotion ? "auto" : "smooth", block: "center", inline: "nearest" });
+  } catch (_) {}
+}
+
+async function renderWalkthroughStep() {
+  const steps = walkthroughSteps();
+  const maxIndex = Math.max(0, steps.length - 1);
+  const idx = Math.max(0, Math.min(state.walkthrough.stepIndex, maxIndex));
+  state.walkthrough.stepIndex = idx;
+  const step = steps[idx];
+  if (!step) return;
+
+  activateTab(step.tab || "dashboard");
+  if (typeof step.onEnter === "function") {
+    await step.onEnter();
+  }
+  applyWalkthroughHighlight(step.highlight || "");
+
+  if (el.walkthroughStepCounter) {
+    el.walkthroughStepCounter.textContent = `Step ${idx + 1} / ${steps.length}`;
+  }
+  if (el.walkthroughTitle) {
+    el.walkthroughTitle.textContent = step.title || "Guided Walkthrough";
+  }
+  if (el.walkthroughText) {
+    el.walkthroughText.textContent = step.text || "";
+  }
+  if (el.walkthroughBackBtn) {
+    el.walkthroughBackBtn.disabled = idx <= 0;
+  }
+  if (el.walkthroughNextBtn) {
+    el.walkthroughNextBtn.textContent = idx >= maxIndex ? "Finish" : "Next";
+  }
+}
+
+function closeWalkthrough(markDismissed = false) {
+  state.walkthrough.active = false;
+  if (el.walkthroughOverlay) {
+    el.walkthroughOverlay.classList.add("hidden");
+  }
+  if (markDismissed) {
+    localStorage.setItem(WALKTHROUGH_DISMISSED_KEY, "1");
+  }
+  clearWalkthroughHighlight();
+}
+
+async function openWalkthrough(stepIndex = 0) {
+  state.walkthrough.active = true;
+  state.walkthrough.stepIndex = Math.max(0, Number(stepIndex) || 0);
+  if (el.walkthroughOverlay) {
+    el.walkthroughOverlay.classList.remove("hidden");
+  }
+  await renderWalkthroughStep();
+}
+
 function wireTabs() {
   el.tabs.querySelectorAll("button[data-tab]").forEach((button) => {
     button.addEventListener("click", () => activateTab(button.getAttribute("data-tab")));
@@ -3045,6 +3413,32 @@ function initHeroParticles() {
 }
 
 function wireActions() {
+  el.startWalkthroughBtn?.addEventListener("click", async () => {
+    localStorage.removeItem(WALKTHROUGH_DISMISSED_KEY);
+    await openWalkthrough(0);
+  });
+  el.walkthroughCloseBtn?.addEventListener("click", () => closeWalkthrough(true));
+  el.walkthroughBackBtn?.addEventListener("click", async () => {
+    if (!state.walkthrough.active) return;
+    state.walkthrough.stepIndex = Math.max(0, state.walkthrough.stepIndex - 1);
+    await renderWalkthroughStep();
+  });
+  el.walkthroughNextBtn?.addEventListener("click", async () => {
+    if (!state.walkthrough.active) return;
+    const maxIndex = Math.max(0, walkthroughSteps().length - 1);
+    if (state.walkthrough.stepIndex >= maxIndex) {
+      closeWalkthrough(true);
+      return;
+    }
+    state.walkthrough.stepIndex += 1;
+    await renderWalkthroughStep();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && state.walkthrough.active) {
+      closeWalkthrough(true);
+    }
+  });
+
   el.themeDarkBtn?.addEventListener("click", () => {
     applyTheme("dark");
     showToast("Theme set to Dark");
@@ -3117,6 +3511,9 @@ function wireActions() {
         critic_model: el.settingCriticModel?.value || "",
       };
       const result = await api("/api/run", { method: "POST", body: JSON.stringify(payload) });
+      state.runViewerMode = "live";
+      state.runReadOnlyView = false;
+      state.selectedImportedBundleId = "";
       state.selectedRunId = result.run_id;
       localStorage.setItem("dcc_selected_run", result.run_id);
       setupRunStream(result.run_id);
@@ -3143,9 +3540,40 @@ function wireActions() {
     if (evt.key === "Enter") refreshRuns().catch((e) => setMessage(e.message));
   });
 
+  el.importBundleBtn?.addEventListener("click", async () => {
+    const file = el.bundleImportFile?.files?.[0];
+    if (!file) {
+      setMessage("Choose a .zip run bundle first.");
+      return;
+    }
+    const form = new FormData();
+    form.append("bundle", file, file.name || "bundle.zip");
+    form.append("actor", "web_ui");
+    try {
+      const result = await apiMultipart("/api/bundles/import", form);
+      showToast(`Imported bundle: ${result.run_id || "-"}`);
+      if (el.bundleImportFile) {
+        el.bundleImportFile.value = "";
+      }
+      await refreshImportedBundles();
+      if (result.import_id) {
+        state.selectedImportedBundleId = String(result.import_id);
+        state.runViewerMode = "import";
+        state.runReadOnlyView = true;
+        await loadImportedBundle(state.selectedImportedBundleId);
+        renderImportedBundles();
+      }
+    } catch (err) {
+      setMessage(err.message);
+    }
+  });
+
   el.loadDiffBtn.addEventListener("click", async () => {
     const runId = el.diffRunId.value.trim();
     if (!runId) return setMessage("Enter run ID.");
+    state.runViewerMode = "live";
+    state.runReadOnlyView = false;
+    state.selectedImportedBundleId = "";
     state.selectedRunId = runId;
     localStorage.setItem("dcc_selected_run", runId);
     setupRunStream(runId);
@@ -3204,6 +3632,7 @@ function wireActions() {
         refreshSettings().catch(() => {}),
         refreshStatus().catch(() => {}),
         refreshRuns().catch(() => {}),
+        refreshImportedBundles().catch(() => {}),
         refreshApprovals().catch(() => {}),
         refreshMemory().catch(() => {}),
         refreshTelemetry().catch(() => {}),
@@ -3228,6 +3657,7 @@ function wireActions() {
         refreshSettings().catch(() => {}),
         refreshStatus().catch(() => {}),
         refreshRuns().catch(() => {}),
+        refreshImportedBundles().catch(() => {}),
         refreshApprovals().catch(() => {}),
         refreshMemory().catch(() => {}),
         refreshTelemetry().catch(() => {}),
@@ -3434,13 +3864,23 @@ function wireActions() {
   });
 
   el.replayPrevBtn.addEventListener("click", async () => {
+    if (state.runViewerMode === "import") {
+      if (!state.selectedImportedBundleId) return;
+      await loadReplay(state.selectedImportedBundleId, Math.max(1, state.selectedIteration - 1), "import");
+      return;
+    }
     if (!state.selectedRunId) return;
-    await loadReplay(state.selectedRunId, Math.max(1, state.selectedIteration - 1));
+    await loadReplay(state.selectedRunId, Math.max(1, state.selectedIteration - 1), "live");
   });
 
   el.replayNextBtn.addEventListener("click", async () => {
+    if (state.runViewerMode === "import") {
+      if (!state.selectedImportedBundleId) return;
+      await loadReplay(state.selectedImportedBundleId, state.selectedIteration + 1, "import");
+      return;
+    }
     if (!state.selectedRunId) return;
-    await loadReplay(state.selectedRunId, state.selectedIteration + 1);
+    await loadReplay(state.selectedRunId, state.selectedIteration + 1, "live");
   });
 
   el.cliTemplateSelect?.addEventListener("change", () => {
@@ -3495,6 +3935,7 @@ async function bootstrap() {
   setMemoryPanelTab(state.memoryPanelTab || "facts");
   updateIntentPreview();
   renderChatHistory();
+  renderRunHealthSummary({}, false);
   initHeroParticles();
 
   if (window.matchMedia) {
@@ -3519,6 +3960,7 @@ async function bootstrap() {
     safeRefresh("status", refreshStatus),
     safeRefresh("approvals", refreshApprovals),
     safeRefresh("runs", refreshRuns),
+    safeRefresh("imported bundles", refreshImportedBundles),
     safeRefresh("memory", refreshMemory),
     safeRefresh("growth", refreshGrowth),
     safeRefresh("legacy archive", refreshLegacyArchive),
@@ -3534,6 +3976,14 @@ async function bootstrap() {
     await safeRefresh("run details", async () => loadRun(state.selectedRunId));
   }
 
+  const walkthroughDismissed = localStorage.getItem(WALKTHROUGH_DISMISSED_KEY) === "1";
+  const demoActive = !!(state.status?.demo_mode || state.settings?.demo_mode);
+  if (demoActive && !walkthroughDismissed) {
+    setTimeout(() => {
+      openWalkthrough(0).catch(() => {});
+    }, 350);
+  }
+
   setupSSE();
   setInterval(async () => {
     if (!state.streams.connected) {
@@ -3541,6 +3991,7 @@ async function bootstrap() {
       await Promise.all([
         safeRefresh("status", refreshStatus, { silent: true }),
         safeRefresh("runs", refreshRuns, { silent: true }),
+        safeRefresh("imported bundles", refreshImportedBundles, { silent: true }),
         safeRefresh("approvals", refreshApprovals, { silent: true }),
         safeRefresh("legacy archive", refreshLegacyArchive, { silent: true }),
         safeRefresh("self improvements", refreshSelfImprovements, { silent: true }),

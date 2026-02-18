@@ -9,6 +9,7 @@ import os
 import queue
 import re
 import shutil
+import subprocess
 import threading
 import time
 import uuid
@@ -37,6 +38,7 @@ from agent.executor import RestrictedExecutor
 
 
 RUN_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{6,80}$")
+IMPORT_ID_PATTERN = re.compile(r"^imp_[a-zA-Z0-9_-]{6,80}$")
 INTENT_CHOICES = {"teach", "ask", "goal", "chat"}
 MEMORY_UNKNOWN_ANSWER = 'I do not know yet. Please teach me using --teach "...".'
 REFLECTION_KIND = "reflection"
@@ -278,6 +280,9 @@ class DavidControlCenter:
         self._pending_memory_overwrites: dict[str, dict[str, Any]] = {}
         self._pending_parent_teaching: dict[str, dict[str, Any]] = {}
         self._chat_session_by_actor: dict[str, str] = {}
+        self._imported_bundle_views: dict[str, dict[str, Any]] = {}
+        self._imported_bundle_order: list[str] = []
+        self._max_imported_bundles = 25
         self._conversations_file = self.config.memory_file.parent / "conversations.jsonl"
         self._demo_runtime: dict[str, Any] = {
             "initialized": False,
@@ -297,6 +302,9 @@ class DavidControlCenter:
             handler.setFormatter(formatter)
             self._logger.addHandler(handler)
 
+        self.app_version = self._resolve_app_version()
+        self.git_commit = self._resolve_git_commit()
+        self.version_stamp = self._compose_version_stamp(self.app_version, self.git_commit)
         self.settings = self._load_settings()
         self._validate_role_models()
         ensure_workspace_layout(self.config.workspace_dir)
@@ -357,6 +365,10 @@ class DavidControlCenter:
             "pending_self_improvements": self_improvement_pending_count,
             "autonomous_self_improvement_mode": self.settings.autonomous_self_improvement_mode,
             "demo_mode": demo_mode,
+            "app_version": self.app_version,
+            "git_commit": self.git_commit,
+            "version_stamp": self.version_stamp,
+            "imported_bundle_count": len(self.list_imported_bundles(limit=500)),
             "safe_mode": self.settings.safe_mode,
             "rate_limit_seconds": self.settings.rate_limit_seconds,
             "allowed_commands": list(self.config.allowed_commands),
@@ -407,6 +419,9 @@ class DavidControlCenter:
             "max_iterations_default": self.config.max_iterations,
             "workspace_dir": str(self.config.workspace_dir),
             "goal_templates": self.goal_templates(),
+            "app_version": self.app_version,
+            "git_commit": self.git_commit,
+            "version_stamp": self.version_stamp,
         }
         if self._demo_mode_enabled():
             mock_settings = self._read_demo_json("mock_settings.json", default={})
@@ -2170,16 +2185,26 @@ class DavidControlCenter:
                     }
                 )
 
+        approvals = [a for a in self.list_approvals() if a.get("run_id") == run_id]
+        health_summary = self._build_run_health_summary(
+            meta=meta,
+            result=result if isinstance(result, dict) else {},
+            timeline=timeline,
+            audit=self.get_run_audit(run_id, limit=200) or [],
+            approvals=approvals,
+        )
+
         return {
             "meta": meta,
             "plan": plan,
             "result": result,
             "timeline": timeline,
             "iterations": iteration_rows,
-            "approvals": [a for a in self.list_approvals() if a.get("run_id") == run_id],
+            "approvals": approvals,
             "artifacts_dir": str(run_dir),
             "workspace_dir": str(self.config.workspace_dir),
             "file_summary": self.get_run_files(run_id),
+            "health_summary": health_summary,
         }
 
     def get_run_timeline(self, run_id: str, limit: int = 1000) -> list[dict[str, Any]] | None:
@@ -2371,6 +2396,91 @@ class DavidControlCenter:
             "likely_failure_cause": likely_cause,
         }
 
+    def _build_run_health_summary(
+        self,
+        *,
+        meta: dict[str, Any],
+        result: dict[str, Any],
+        timeline: list[dict[str, Any]],
+        audit: list[dict[str, Any]],
+        approvals: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        iterations = int(meta.get("iteration", 0) or 0)
+        iterations_until_green_raw = meta.get("iterations_until_green", result.get("iterations_until_green"))
+        iterations_until_green = None
+        if iterations_until_green_raw is not None:
+            try:
+                iterations_until_green = int(iterations_until_green_raw)
+            except (TypeError, ValueError):
+                iterations_until_green = None
+
+        started = self._parse_timestamp(meta.get("started_at", ""))
+        ended = self._parse_timestamp(meta.get("ended_at", ""))
+        elapsed_sec = None
+        if started is not None and ended is not None:
+            elapsed_sec = max(0.0, round((ended - started).total_seconds(), 3))
+
+        approval_count = len([row for row in approvals if isinstance(row, dict)])
+        if approval_count == 0 and isinstance(audit, list):
+            approval_count = sum(
+                1
+                for row in audit
+                if isinstance(row, dict)
+                and str(row.get("action", "")).strip().casefold().startswith("approval_")
+            )
+
+        memory_references = 0
+        used_memory = result.get("used_memory", {})
+        if isinstance(used_memory, dict):
+            for value in used_memory.values():
+                if isinstance(value, list):
+                    memory_references += len(value)
+        citations = result.get("citations", [])
+        if isinstance(citations, list):
+            memory_references = max(memory_references, len(citations))
+        if memory_references == 0 and isinstance(timeline, list):
+            for row in timeline:
+                if not isinstance(row, dict):
+                    continue
+                payload = row.get("payload", {})
+                if not isinstance(payload, dict):
+                    continue
+                used = payload.get("used_memory", {})
+                if isinstance(used, dict):
+                    count = 0
+                    for value in used.values():
+                        if isinstance(value, list):
+                            count += len(value)
+                    memory_references = max(memory_references, count)
+
+        failure_text = "\n".join(
+            [
+                str(meta.get("failure_explanation", "")),
+                str(meta.get("message", "")),
+                str(result.get("failure", "")),
+                str((result.get("failure_details", {}) or {}).get("summary", "")),
+                str((result.get("failure_details", {}) or {}).get("category", "")),
+            ]
+        ).strip()
+        top_error_category = "none"
+        if failure_text:
+            top_error_category = self._categorize_failure(failure_text)
+        status = str(meta.get("status", "")).strip().casefold()
+        if top_error_category == "none" and status in {"failed", "rejected"}:
+            top_error_category = "runtime"
+
+        return {
+            "iterations": iterations,
+            "iterations_until_green": iterations_until_green,
+            "elapsed_sec": elapsed_sec,
+            "approvals_count": approval_count,
+            "planner_model_used": str(meta.get("planner_model_used", "")).strip(),
+            "coder_model_used": str(meta.get("coder_model_used", "")).strip(),
+            "critic_model_used": str(meta.get("critic_model_used", "")).strip(),
+            "top_error_category": top_error_category,
+            "memory_items_referenced": memory_references,
+        }
+
     def retry_run(self, run_id: str) -> tuple[bool, dict[str, Any]]:
         if self._demo_mode_enabled():
             return False, {
@@ -2403,14 +2513,412 @@ class DavidControlCenter:
         if not run_dir.exists() or not run_dir.is_dir():
             return None
 
+        run_payload = self.get_run(run_id)
+        if not isinstance(run_payload, dict):
+            return None
+        manifest = {
+            "bundle_type": "david_run_bundle",
+            "bundle_schema": 1,
+            "exported_at": self._now_iso(),
+            "run_id": run_id,
+            "app_version": self.app_version,
+            "git_commit": self.git_commit,
+            "version_stamp": self.version_stamp,
+            "demo_mode": self._demo_mode_enabled(),
+            "read_only_import_supported": True,
+            "health_summary": run_payload.get("health_summary", {}),
+        }
+        redacted_memory = self._redacted_memory_snapshot()
+
         buff = io.BytesIO()
         with zipfile.ZipFile(buff, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
             for path in run_dir.rglob("*"):
                 if path.is_file():
                     rel = path.relative_to(run_dir).as_posix()
                     archive.write(path, arcname=f"{run_id}/{rel}")
+            archive.writestr(
+                f"{run_id}/bundle_manifest.json",
+                json.dumps(manifest, indent=2) + "\n",
+            )
+            archive.writestr(
+                f"{run_id}/memory_snapshot_redacted.json",
+                json.dumps(redacted_memory, indent=2) + "\n",
+            )
         buff.seek(0)
         return buff
+
+    def import_run_bundle(
+        self,
+        *,
+        file_name: str,
+        content: bytes,
+        actor: str = "web_ui",
+    ) -> tuple[bool, dict[str, Any]]:
+        if not isinstance(content, (bytes, bytearray)) or not content:
+            return False, {"error": "Bundle file is empty."}
+        if len(content) > 8 * 1024 * 1024:
+            return False, {"error": "Bundle exceeds maximum size (8MB)."}
+
+        try:
+            archive = zipfile.ZipFile(io.BytesIO(content), mode="r")
+        except zipfile.BadZipFile:
+            return False, {"error": "Invalid ZIP bundle."}
+
+        with archive:
+            infos = [item for item in archive.infolist() if not item.is_dir()]
+            if not infos:
+                return False, {"error": "Bundle has no files."}
+            if len(infos) > 3000:
+                return False, {"error": "Bundle has too many files."}
+
+            total_uncompressed = 0
+            for info in infos:
+                normalized = str(info.filename).replace("\\", "/")
+                if normalized.startswith("/") or normalized.startswith("../"):
+                    return False, {"error": "Bundle contains unsafe paths."}
+                if ".." in Path(normalized).parts:
+                    return False, {"error": "Bundle contains unsafe path traversal."}
+                if info.file_size > 4 * 1024 * 1024:
+                    return False, {"error": "Bundle contains oversized file entries."}
+                total_uncompressed += max(0, int(info.file_size))
+            if total_uncompressed > 24 * 1024 * 1024:
+                return False, {"error": "Bundle uncompressed payload is too large."}
+
+            file_names = [str(item.filename).replace("\\", "/") for item in infos]
+            root_candidates = []
+            for name in file_names:
+                if name.endswith("/meta.json"):
+                    root_candidates.append(name.rsplit("/meta.json", 1)[0])
+            if not root_candidates:
+                return False, {"error": "Bundle missing run metadata (meta.json)."}
+            run_root = sorted(root_candidates, key=len)[0].strip("/")
+            if not run_root:
+                return False, {"error": "Bundle root is invalid."}
+
+            def _read_text(rel_path: str) -> str:
+                path = f"{run_root}/{rel_path}".replace("//", "/")
+                try:
+                    return archive.read(path).decode("utf-8", errors="replace")
+                except KeyError:
+                    return ""
+
+            def _read_json(rel_path: str, default: Any) -> Any:
+                text = _read_text(rel_path)
+                if not text.strip():
+                    return default
+                try:
+                    return json.loads(text)
+                except json.JSONDecodeError:
+                    return default
+
+            def _read_jsonl(rel_path: str, *, limit: int = 2000) -> list[dict[str, Any]]:
+                text = _read_text(rel_path)
+                if not text.strip():
+                    return []
+                rows: list[dict[str, Any]] = []
+                for line in text.splitlines()[-max(1, min(limit, 20_000)) :]:
+                    try:
+                        item = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(item, dict):
+                        rows.append(item)
+                return rows
+
+            meta = _read_json("meta.json", default={})
+            if not isinstance(meta, dict) or not meta:
+                return False, {"error": "Bundle meta.json is invalid."}
+            run_id = str(meta.get("id", "")).strip() or run_root
+            plan = _read_json("plan.json", default={})
+            if not isinstance(plan, dict):
+                plan = {}
+            result = _read_json("result.json", default={})
+            if not isinstance(result, dict):
+                result = {}
+            timeline = _read_jsonl("timeline.jsonl", limit=3000)
+            if not timeline:
+                timeline_json = _read_json("timeline.json", default=[])
+                if isinstance(timeline_json, list):
+                    timeline = [row for row in timeline_json if isinstance(row, dict)]
+            audit = _read_jsonl("audit.jsonl", limit=3000)
+            file_summary = _read_json("file_summary.json", default={})
+            if not isinstance(file_summary, dict):
+                file_summary = {}
+            bundle_manifest = _read_json("bundle_manifest.json", default={})
+            if not isinstance(bundle_manifest, dict):
+                bundle_manifest = {}
+            memory_snapshot_redacted = _read_json("memory_snapshot_redacted.json", default={})
+            if not isinstance(memory_snapshot_redacted, dict):
+                memory_snapshot_redacted = {}
+
+            iteration_map: dict[int, str] = {}
+            iteration_prefix = f"{run_root}/iterations/"
+            for name in file_names:
+                if not name.startswith(iteration_prefix):
+                    continue
+                remainder = name[len(iteration_prefix) :]
+                parts = [part for part in remainder.split("/") if part]
+                if len(parts) < 2:
+                    continue
+                iter_name = parts[0]
+                try:
+                    iter_idx = int(iter_name)
+                except ValueError:
+                    continue
+                iteration_map[iter_idx] = iter_name
+
+            iterations: list[dict[str, Any]] = []
+            for iter_idx in sorted(iteration_map.keys()):
+                iter_name = iteration_map[iter_idx]
+                iter_base = f"iterations/{iter_name}"
+                iteration_row = {
+                    "iteration": f"{iter_idx:03d}",
+                    "coder": _read_json(f"{iter_base}/coder.json", default={}),
+                    "execution": _read_json(f"{iter_base}/execution.json", default=[]),
+                    "critic": _read_json(f"{iter_base}/critic.json", default={}),
+                    "diffs": _read_json(f"{iter_base}/diffs.json", default=[]),
+                    "risk": _read_json(f"{iter_base}/risk.json", default={}),
+                }
+                if not isinstance(iteration_row["coder"], dict):
+                    iteration_row["coder"] = {}
+                if not isinstance(iteration_row["execution"], list):
+                    iteration_row["execution"] = []
+                if not isinstance(iteration_row["critic"], dict):
+                    iteration_row["critic"] = {}
+                if not isinstance(iteration_row["diffs"], list):
+                    iteration_row["diffs"] = []
+                if not isinstance(iteration_row["risk"], dict):
+                    iteration_row["risk"] = {}
+                iterations.append(iteration_row)
+
+            health_summary = self._build_run_health_summary(
+                meta=meta,
+                result=result,
+                timeline=timeline,
+                audit=audit,
+                approvals=[],
+            )
+            imported_at = self._now_iso()
+            import_id = f"imp_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}_{uuid.uuid4().hex[:8]}"
+            view = {
+                "import_id": import_id,
+                "run_id": run_id,
+                "source_filename": str(file_name).strip() or "bundle.zip",
+                "imported_at": imported_at,
+                "read_only": True,
+                "meta": meta,
+                "plan": plan,
+                "result": result,
+                "timeline": timeline,
+                "iterations": iterations,
+                "audit": audit,
+                "file_summary": file_summary,
+                "bundle_manifest": bundle_manifest,
+                "memory_snapshot_redacted": memory_snapshot_redacted,
+                "health_summary": health_summary,
+                "actor": actor.strip() or "web_ui",
+                "version_stamp": self.version_stamp,
+            }
+
+        with self._lock:
+            self._imported_bundle_views[import_id] = view
+            self._imported_bundle_order.insert(0, import_id)
+            while len(self._imported_bundle_order) > self._max_imported_bundles:
+                stale = self._imported_bundle_order.pop()
+                self._imported_bundle_views.pop(stale, None)
+
+        event_payload = {
+            "import_id": import_id,
+            "run_id": run_id,
+            "source_filename": view["source_filename"],
+            "imported_at": imported_at,
+            "read_only": True,
+        }
+        self.publish_event("status", {"type": "bundle_imported", "payload": event_payload})
+        self.publish_event("logs", {"type": "bundle_imported", "payload": event_payload})
+        return True, event_payload
+
+    def list_imported_bundles(self, limit: int = 120) -> list[dict[str, Any]]:
+        max_limit = max(1, min(int(limit or 120), 500))
+        with self._lock:
+            order = list(self._imported_bundle_order)
+            views = dict(self._imported_bundle_views)
+        rows: list[dict[str, Any]] = []
+        for import_id in order:
+            view = views.get(import_id)
+            if not isinstance(view, dict):
+                continue
+            rows.append(
+                {
+                    "import_id": import_id,
+                    "run_id": str(view.get("run_id", "")).strip(),
+                    "source_filename": str(view.get("source_filename", "")).strip(),
+                    "imported_at": str(view.get("imported_at", "")).strip(),
+                    "read_only": True,
+                    "status": str((view.get("meta", {}) or {}).get("status", "")).strip(),
+                    "health_summary": view.get("health_summary", {}),
+                }
+            )
+            if len(rows) >= max_limit:
+                break
+        return rows
+
+    def get_imported_bundle(self, import_id: str) -> dict[str, Any] | None:
+        if not self._is_safe_import_id(import_id):
+            return None
+        with self._lock:
+            view = self._imported_bundle_views.get(import_id)
+            if not isinstance(view, dict):
+                return None
+            payload = self._clone_json(view)
+        payload["artifacts_dir"] = f"imported_bundle:{import_id}"
+        payload["workspace_dir"] = "imported_bundle_read_only"
+        return payload
+
+    def get_imported_bundle_timeline(self, import_id: str, limit: int = 1000) -> list[dict[str, Any]] | None:
+        view = self.get_imported_bundle(import_id)
+        if not view:
+            return None
+        rows = view.get("timeline", [])
+        if not isinstance(rows, list):
+            return []
+        return [row for row in rows if isinstance(row, dict)][-max(1, min(limit, 2000)) :]
+
+    def get_imported_bundle_audit(self, import_id: str, limit: int = 1000) -> list[dict[str, Any]] | None:
+        view = self.get_imported_bundle(import_id)
+        if not view:
+            return None
+        rows = view.get("audit", [])
+        if not isinstance(rows, list):
+            return []
+        clean = [row for row in rows if isinstance(row, dict)]
+        clean.sort(key=lambda row: str(row.get("timestamp_utc", "")))
+        return clean[-max(1, min(limit, 2000)) :]
+
+    def get_imported_bundle_files(self, import_id: str) -> dict[str, Any] | None:
+        view = self.get_imported_bundle(import_id)
+        if not view:
+            return None
+        summary = view.get("file_summary", {})
+        if not isinstance(summary, dict):
+            summary = {}
+        payload = self._clone_json(summary)
+        payload.setdefault("workspace_dir", "imported_bundle_read_only")
+        payload.setdefault("artifacts_dir", f"imported_bundle:{import_id}")
+        payload["read_only"] = True
+        return payload
+
+    @staticmethod
+    def _coerce_iteration_number(value: Any) -> int:
+        try:
+            return int(str(value).strip())
+        except (TypeError, ValueError):
+            return 0
+
+    def _compare_iteration_rows(self, rows: list[dict[str, Any]], iteration: int) -> dict[str, Any] | None:
+        if not rows:
+            return None
+        by_num: dict[int, dict[str, Any]] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            key = self._coerce_iteration_number(row.get("iteration", 0))
+            if key <= 0:
+                continue
+            by_num[key] = row
+        curr = by_num.get(iteration)
+        if not isinstance(curr, dict):
+            return None
+        prev = by_num.get(iteration - 1)
+        curr_exec = curr.get("execution", []) if isinstance(curr.get("execution"), list) else []
+        prev_exec = prev.get("execution", []) if isinstance(prev, dict) and isinstance(prev.get("execution"), list) else []
+        curr_diffs = curr.get("diffs", []) if isinstance(curr.get("diffs"), list) else []
+        prev_diffs = prev.get("diffs", []) if isinstance(prev, dict) and isinstance(prev.get("diffs"), list) else []
+
+        def _passed(exec_rows: list[dict[str, Any]]) -> bool:
+            if not exec_rows:
+                return False
+            return all(
+                int(item.get("returncode", 1)) == 0 and not bool(item.get("timed_out"))
+                for item in exec_rows
+                if isinstance(item, dict)
+            )
+
+        changed_now = sorted(
+            {
+                str(item.get("path", "")).strip()
+                for item in curr_diffs
+                if isinstance(item, dict) and str(item.get("path", "")).strip()
+            }
+        )
+        changed_prev = sorted(
+            {
+                str(item.get("path", "")).strip()
+                for item in prev_diffs
+                if isinstance(item, dict) and str(item.get("path", "")).strip()
+            }
+        )
+        new_changes = [path for path in changed_now if path not in changed_prev]
+        likely_cause = None
+        if _passed(prev_exec) and not _passed(curr_exec):
+            likely_cause = {
+                "reason": "First failing iteration after a passing iteration.",
+                "files": new_changes or changed_now,
+            }
+        return {
+            "iteration": iteration,
+            "previous_iteration": iteration - 1 if isinstance(prev, dict) else None,
+            "changed_files_current": changed_now,
+            "changed_files_previous": changed_prev,
+            "newly_changed_files": new_changes,
+            "passed_previous": _passed(prev_exec),
+            "passed_current": _passed(curr_exec),
+            "likely_failure_cause": likely_cause,
+        }
+
+    def get_imported_bundle_replay(self, import_id: str, iteration: int) -> dict[str, Any] | None:
+        view = self.get_imported_bundle(import_id)
+        if not view:
+            return None
+        rows = view.get("iterations", [])
+        if not isinstance(rows, list):
+            return None
+        clean = [row for row in rows if isinstance(row, dict)]
+        if not clean:
+            return None
+        clean.sort(key=lambda row: self._coerce_iteration_number(row.get("iteration", 0)))
+        idx = max(0, min(iteration - 1, len(clean) - 1))
+        current = clean[idx]
+        chosen = self._coerce_iteration_number(current.get("iteration", idx + 1))
+        compare = self._compare_iteration_rows(clean, chosen)
+        prev_iter = self._coerce_iteration_number(clean[idx - 1].get("iteration", 0)) if idx > 0 else None
+        next_iter = self._coerce_iteration_number(clean[idx + 1].get("iteration", 0)) if idx < len(clean) - 1 else None
+        return {
+            "import_id": import_id,
+            "run_id": str(view.get("run_id", "")).strip(),
+            "iteration": chosen,
+            "total_iterations": len(clean),
+            "has_prev": idx > 0,
+            "has_next": idx < len(clean) - 1,
+            "prev_iteration": prev_iter if prev_iter and prev_iter > 0 else None,
+            "next_iteration": next_iter if next_iter and next_iter > 0 else None,
+            "current": current,
+            "comparison": compare,
+            "read_only": True,
+        }
+
+    def get_imported_bundle_compare(self, import_id: str, iteration: int) -> dict[str, Any] | None:
+        view = self.get_imported_bundle(import_id)
+        if not view:
+            return None
+        rows = view.get("iterations", [])
+        if not isinstance(rows, list):
+            return None
+        clean = [row for row in rows if isinstance(row, dict)]
+        if not clean:
+            return None
+        clean.sort(key=lambda row: self._coerce_iteration_number(row.get("iteration", 0)))
+        return self._compare_iteration_rows(clean, max(1, int(iteration or 1)))
 
     def memory_snapshot(self) -> dict[str, Any]:
         if self._demo_mode_enabled():
@@ -2442,6 +2950,110 @@ class DavidControlCenter:
             "project_count": len(projects),
             "reflection_count": len(reflections),
             "legacy_archive_count": len([row for row in legacy_archive if isinstance(row, dict)]),
+        }
+
+    def _redacted_memory_snapshot(self) -> dict[str, Any]:
+        snapshot = self.memory_snapshot()
+        facts = snapshot.get("facts", []) if isinstance(snapshot.get("facts"), list) else []
+        lessons = snapshot.get("lessons", []) if isinstance(snapshot.get("lessons"), list) else []
+        reflections = snapshot.get("reflections", []) if isinstance(snapshot.get("reflections"), list) else []
+        conversations = snapshot.get("conversations", []) if isinstance(snapshot.get("conversations"), list) else []
+        values = snapshot.get("values", []) if isinstance(snapshot.get("values"), list) else []
+        projects = snapshot.get("projects", []) if isinstance(snapshot.get("projects"), list) else []
+
+        redacted_facts = []
+        for row in facts[-120:]:
+            if not isinstance(row, dict):
+                continue
+            redacted_facts.append(
+                {
+                    "subject": str(row.get("subject", "")).strip(),
+                    "predicate": str(row.get("predicate", "")).strip(),
+                    "object": "[redacted]",
+                    "timestamp": str(row.get("timestamp", row.get("last_updated", ""))).strip(),
+                }
+            )
+        redacted_conversations = []
+        for row in conversations[-180:]:
+            if not isinstance(row, dict):
+                continue
+            redacted_conversations.append(
+                {
+                    "session_id": str(row.get("session_id", "")).strip(),
+                    "role": str(row.get("role", "")).strip(),
+                    "intent": str(row.get("intent", "")).strip(),
+                    "timestamp_utc": str(row.get("timestamp_utc", "")).strip(),
+                    "text": "[redacted]",
+                }
+            )
+        redacted_values = []
+        for row in values[-120:]:
+            if not isinstance(row, dict):
+                continue
+            redacted_values.append(
+                {
+                    "category": str(row.get("category", "")).strip(),
+                    "category_label": str(row.get("category_label", "")).strip(),
+                    "principle": str(row.get("principle", "")).strip()[:140],
+                    "application": "[redacted]",
+                    "timestamp_utc": str(row.get("timestamp_utc", row.get("stored_at", ""))).strip(),
+                }
+            )
+        redacted_lessons = []
+        for row in lessons[-120:]:
+            if not isinstance(row, dict):
+                continue
+            redacted_lessons.append(
+                {
+                    "goal": str(row.get("goal", "")).strip(),
+                    "lesson": str(row.get("lesson", "")).strip()[:180],
+                    "tags": row.get("tags", []) if isinstance(row.get("tags"), list) else [],
+                    "timestamp_utc": str(row.get("timestamp_utc", "")).strip(),
+                }
+            )
+        redacted_reflections = []
+        for row in reflections[-120:]:
+            if not isinstance(row, dict):
+                continue
+            redacted_reflections.append(
+                {
+                    "goal": str(row.get("goal", "")).strip(),
+                    "lesson": str(row.get("lesson", "")).strip()[:180],
+                    "tags": row.get("tags", []) if isinstance(row.get("tags"), list) else [],
+                    "timestamp_utc": str(row.get("timestamp_utc", "")).strip(),
+                }
+            )
+        redacted_projects = []
+        for row in projects[-120:]:
+            if not isinstance(row, dict):
+                continue
+            redacted_projects.append(
+                {
+                    "project_slug": str(row.get("project_slug", "")).strip(),
+                    "project_relative_path": str(row.get("project_relative_path", "")).strip(),
+                    "architecture_summary": str(row.get("architecture_summary", "")).strip()[:220],
+                    "testing_approach": str(row.get("testing_approach", "")).strip()[:220],
+                    "known_weaknesses": row.get("known_weaknesses", []) if isinstance(row.get("known_weaknesses"), list) else [],
+                }
+            )
+
+        return {
+            "generated_at": self._now_iso(),
+            "redaction_policy": "objects, applications, and conversation text are redacted for portable debugging bundles.",
+            "counts": {
+                "facts": len(facts),
+                "values": len(values),
+                "lessons": len(lessons),
+                "reflections": len(reflections),
+                "conversations": len(conversations),
+                "projects": len(projects),
+            },
+            "facts": redacted_facts,
+            "values": redacted_values,
+            "lessons": redacted_lessons,
+            "reflections": redacted_reflections,
+            "conversations": redacted_conversations,
+            "projects": redacted_projects,
         }
 
     @staticmethod
@@ -8396,6 +9008,10 @@ class DavidControlCenter:
         return bool(RUN_ID_PATTERN.match(run_id))
 
     @staticmethod
+    def _is_safe_import_id(import_id: str) -> bool:
+        return bool(IMPORT_ID_PATTERN.match(import_id))
+
+    @staticmethod
     def _new_run_id() -> str:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
         return f"run_{stamp}_{uuid.uuid4().hex[:8]}"
@@ -8403,6 +9019,44 @@ class DavidControlCenter:
     @staticmethod
     def _now_iso() -> str:
         return datetime.now(timezone.utc).isoformat()
+
+    def _resolve_app_version(self) -> str:
+        explicit = str(os.getenv("DAVID_APP_VERSION", "")).strip()
+        if explicit:
+            return explicit[:64]
+        version_file = (self.project_root / "VERSION").resolve()
+        if version_file.exists() and version_file.is_file():
+            try:
+                text = version_file.read_text(encoding="utf-8").strip()
+            except OSError:
+                text = ""
+            if text:
+                return text[:64]
+        return "dev"
+
+    def _resolve_git_commit(self) -> str:
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=self.project_root,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+        except Exception:
+            return ""
+        if result.returncode != 0:
+            return ""
+        return str(result.stdout or "").strip()[:16]
+
+    @staticmethod
+    def _compose_version_stamp(app_version: str, git_commit: str) -> str:
+        clean_version = str(app_version or "dev").strip() or "dev"
+        clean_commit = str(git_commit or "").strip()
+        if clean_commit:
+            return f"{clean_version}+{clean_commit}"
+        return clean_version
 
     def _normalize_iso_timestamp(self, value: Any) -> str:
         text = str(value or "").strip()

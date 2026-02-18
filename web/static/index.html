@@ -16,6 +16,8 @@
         <p>Local, safety-first companion workspace for David</p>
       </div>
       <div class="row">
+        <button id="startWalkthroughBtn" type="button" class="ghost">Guided Walkthrough</button>
+        <div class="status-pill version-pill" id="versionStamp">dev</div>
         <div class="status-pill" id="globalStatus">idle</div>
         <div class="status-pill stream-pill fallback" id="streamStatus">
           <span class="dot" aria-hidden="true"></span>
@@ -202,6 +204,16 @@
 
       <section id="tab-runs" class="tab-panel">
         <article class="card">
+          <div class="row">
+            <h2>Bundle Viewer (Read-only)</h2>
+            <input id="bundleImportFile" type="file" accept=".zip,application/zip" />
+            <button id="importBundleBtn" class="ghost" type="button">Import Bundle</button>
+          </div>
+          <p class="muted">Import a portable run bundle to inspect timeline, diff/replay, and audit in read-only mode without mutating live state.</p>
+          <div id="importedBundleList" class="stack"></div>
+        </article>
+
+        <article class="card">
           <h2>Run History</h2>
           <div class="row">
             <input id="runSearch" type="text" placeholder="Search by run id / command / message" />
@@ -223,6 +235,8 @@
 
         <article class="card">
           <h2>Selected Run Timeline</h2>
+          <h3>Run Health Summary</h3>
+          <ul class="kv" id="runHealthSummary"></ul>
           <div id="timelineView" class="timeline"></div>
           <h3>Execution Results</h3>
           <div id="executionPanels" class="stack"></div>
@@ -500,6 +514,21 @@
         </article>
       </section>
     </main>
+
+    <section id="walkthroughOverlay" class="walkthrough-overlay hidden" aria-live="polite">
+      <article class="walkthrough-card">
+        <div class="walkthrough-head">
+          <strong id="walkthroughStepCounter">Step 1 / 7</strong>
+          <button id="walkthroughCloseBtn" class="btn-subtle" type="button">Dismiss</button>
+        </div>
+        <h3 id="walkthroughTitle">Guided Walkthrough</h3>
+        <p id="walkthroughText" class="muted"></p>
+        <div class="row">
+          <button id="walkthroughBackBtn" class="ghost" type="button">Back</button>
+          <button id="walkthroughNextBtn" type="button">Next</button>
+        </div>
+      </article>
+    </section>
 
     <div id="toastContainer" class="toast-container" aria-live="polite"></div>
 

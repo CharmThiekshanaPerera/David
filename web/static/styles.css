@@ -692,11 +692,37 @@ button.ghost:hover:not(:disabled) {
   background: var(--stream-fallback);
   animation: none;
 }
+.version-pill {
+  border-color: color-mix(in oklab, var(--cyan) 60%, var(--line));
+  background: color-mix(in oklab, var(--cyan) 14%, var(--panel-strong));
+  color: color-mix(in oklab, var(--cyan) 82%, var(--text));
+}
 .demo-pill {
   border-color: color-mix(in oklab, var(--warning) 65%, var(--line));
   background: color-mix(in oklab, var(--warning) 16%, var(--panel-strong));
   color: color-mix(in oklab, var(--warning) 78%, var(--text));
   font-weight: 700;
+}
+.walkthrough-highlight {
+  outline: 2px solid color-mix(in oklab, var(--blue) 72%, var(--line));
+  box-shadow: 0 0 0 4px color-mix(in oklab, var(--blue) 20%, transparent), var(--shadow-glow);
+  border-radius: 0.6rem;
+  transition: box-shadow var(--transition-med), outline-color var(--transition-med);
+}
+
+.imported-bundle-item {
+  border: 1px solid var(--line);
+  border-radius: 0.6rem;
+  padding: 0.55rem;
+  display: grid;
+  gap: 0.25rem;
+  background: color-mix(in oklab, var(--panel-soft) 90%, transparent);
+}
+.imported-bundle-item .row {
+  justify-content: space-between;
+}
+.imported-bundle-item.active {
+  border-color: color-mix(in oklab, var(--blue) 62%, var(--line));
 }
 
 /* Banners */
@@ -1339,6 +1365,34 @@ code {
   flex-wrap: wrap;
   font-size: 0.82rem;
   color: var(--text-muted);
+}
+
+/* ========== GUIDED WALKTHROUGH ========== */
+.walkthrough-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  background: rgba(4, 6, 10, 0.62);
+  backdrop-filter: blur(2px);
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+}
+.walkthrough-card {
+  width: min(560px, 100%);
+  border: 1px solid color-mix(in oklab, var(--blue) 44%, var(--line));
+  border-radius: 0.9rem;
+  padding: 0.9rem;
+  background: color-mix(in oklab, var(--panel-strong) 94%, transparent);
+  box-shadow: var(--shadow-soft);
+  display: grid;
+  gap: 0.7rem;
+}
+.walkthrough-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.6rem;
+  align-items: center;
 }
 
 /* ========== TOAST NOTIFICATIONS ========== */
