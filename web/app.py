@@ -50,10 +50,16 @@ def create_app(
                 "/api/teach",
                 "/api/chat",
                 "/api/memory/confirm_overwrite",
+                "/api/self_improvements/propose",
+                "/api/legacy_archive",
             }
             if request.path.startswith("/api/approval/") or request.path.startswith("/api/run/"):
                 protected.add(request.path)
             if request.path.startswith("/api/workspace/"):
+                protected.add(request.path)
+            if request.path.startswith("/api/self_improvements/"):
+                protected.add(request.path)
+            if request.path.startswith("/api/legacy_archive/"):
                 protected.add(request.path)
             if request.path in protected or request.path.startswith("/api/approval/") or request.path.startswith("/api/workspace/"):
                 token = request.headers.get("X-CSRF-Token", "").strip()
@@ -359,6 +365,87 @@ def create_app(
     @app.get("/api/settings")
     def api_settings_get():
         return jsonify({"ok": True, "data": center.get_settings()})
+
+    @app.get("/api/legacy_archive")
+    def api_legacy_archive_list():
+        try:
+            limit = int(request.args.get("limit", "200"))
+        except ValueError:
+            limit = 200
+        return jsonify({"ok": True, "data": center.list_legacy_archive(limit=limit)})
+
+    @app.post("/api/legacy_archive")
+    def api_legacy_archive_mark():
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return _json_error("JSON body must be an object.")
+        actor = str(payload.get("actor", "web_ui")).strip() or "web_ui"
+        ok, data = center.mark_legacy_moment(payload, actor=actor)
+        if not ok:
+            return _json_error(str(data.get("error", "Failed to save archive entry.")), status=409)
+        return jsonify({"ok": True, "data": data})
+
+    @app.post("/api/legacy_archive/<entry_id>/remove")
+    def api_legacy_archive_remove(entry_id: str):
+        payload = request.get_json(silent=True) or {}
+        if payload is None:
+            payload = {}
+        if not isinstance(payload, dict):
+            return _json_error("JSON body must be an object.")
+        actor = str(payload.get("actor", "web_ui")).strip() or "web_ui"
+        ok, data = center.remove_legacy_moment(entry_id, actor=actor)
+        if not ok:
+            return _json_error(str(data.get("error", "Failed to remove archive entry.")), status=409)
+        return jsonify({"ok": True, "data": data})
+
+    @app.get("/api/self_improvements")
+    def api_self_improvements_list():
+        try:
+            limit = int(request.args.get("limit", "160"))
+        except ValueError:
+            limit = 160
+        return jsonify({"ok": True, "data": center.list_self_improvements(limit=limit)})
+
+    @app.post("/api/self_improvements/propose")
+    def api_self_improvements_propose():
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return _json_error("JSON body must be an object.")
+        actor = str(payload.get("actor", "david_agent")).strip() or "david_agent"
+        ok, data = center.propose_self_improvement(payload, actor=actor)
+        if not ok:
+            return _json_error(str(data.get("error", "Failed to create proposal.")), status=409)
+        return jsonify({"ok": True, "data": data})
+
+    @app.post("/api/self_improvements/autonomous_cycle")
+    def api_self_improvements_autonomous_cycle():
+        payload = request.get_json(silent=True) or {}
+        if payload is None:
+            payload = {}
+        if not isinstance(payload, dict):
+            return _json_error("JSON body must be an object.")
+        trigger = str(payload.get("trigger", "manual")).strip() or "manual"
+        trigger_id = str(payload.get("trigger_id", "")).strip()
+        actor = str(payload.get("actor", "david_autonomous")).strip() or "david_autonomous"
+        data = center.autonomous_self_improvement_cycle(trigger=trigger, trigger_id=trigger_id, actor=actor)
+        status_text = str(data.get("status", "")).strip().lower()
+        if status_text == "error":
+            return _json_error(str(data.get("error", "Autonomous self-improvement cycle failed.")), status=409)
+        return jsonify({"ok": True, "data": data})
+
+    @app.post("/api/self_improvements/<proposal_id>/decision")
+    def api_self_improvements_decision(proposal_id: str):
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return _json_error("JSON body must be an object.")
+        decision = str(payload.get("decision", "")).strip().lower()
+        actor = str(payload.get("actor", "web_ui")).strip() or "web_ui"
+        note = str(payload.get("note", "")).strip()
+        ok, data = center.decide_self_improvement(proposal_id, decision=decision, actor=actor, note=note)
+        if not ok:
+            status = 400 if "decision must" in str(data.get("error", "")).lower() else 409
+            return _json_error(str(data.get("error", "Failed to update proposal.")), status=status)
+        return jsonify({"ok": True, "data": data})
 
     @app.get("/api/models")
     def api_models():

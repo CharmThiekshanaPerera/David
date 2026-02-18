@@ -340,16 +340,21 @@ http://127.0.0.1:8787
 
 - Dashboard: current status, progress, quick run/stop actions, pending approvals.
 - Dashboard includes a Growth Timeline with milestone drill-down across sessions/projects (lessons, reflections, run outcomes, memory growth, TDD completions, and iterations-until-green trends).
+- Dashboard includes a Legacy Archive panel where conversations, milestones, and teachings can be marked as `Significant Moments` with timestamped summaries.
+- Dashboard includes a `Proposed Improvements` panel backed by `workspace/agent_sandbox/`, where David drafts self-improvement proposals with diff previews for explicit user approve/reject decisions.
+- Proposed Improvements now includes an autonomous cycle trigger and transparent reasoning metadata (trigger, signals, rationale, and before/after patch view) for each self-initiated proposal.
 - Runs: run history, timeline, retry failed runs, explain-failure panel.
 - Diff Viewer: per-iteration workspace patch view.
 - Memory: facts/lessons + memory conflict detector.
 - Telemetry: success/error metrics and iteration-duration chart.
 - Logs: tail view of web + telemetry logs.
-- Settings: safe mode, rate limit, iteration override, risk thresholds, planner/coder/critic model config, default TDD mode, and Companion mode.
+- Settings: safe mode, rate limit, iteration override, risk thresholds, planner/coder/critic model config, default TDD mode, Companion mode, and autonomous self-improvement mode.
 - Memory & Chat: Advanced Chat mode with natural intent detection (`Teach` / `Ask` / `Goal` / `Chat`), confirm-gated memory writes, session history, memory citations, and searchable Facts/Conversations/Lessons/Reflections tabs.
+- Memory Insight Mode: every ask/chat answer can expand into a deterministic influence trace showing exactly which Facts, Conversations, and Lessons were used (for example `Fact #12`, `Lesson #7`, `Conversation #3`).
 - Companion mode (enabled by default) adds warm memory-first responses for `/ask` and web chat, with transparent AI identity and lesson-aware recall.
 - Goal runs are log-aware: David automatically reads recent tail logs and uses them as extra context when planning/coding fixes.
 - Reflection Engine: after terminal goal runs and meaningful conversations, David appends timestamped reflection lessons (append-only) and reuses them before future goals.
+- Autonomous Self-Improvement Loop: after goal completions and meaningful conversation reflections, David can draft sandboxed self-improvement proposals automatically while keeping core safety modules immutable and human approval required for merges.
 
 ### Goal templates
 
@@ -382,6 +387,8 @@ Use the `Memory & Chat` tab to interact naturally while keeping memory writes ex
    - `Lessons`,
    - `Reflections` (internal learning history, timestamped and preserved).
 6. `Explain why David answered this` shows citations for memory facts/conversation snippets and relevant lessons used in the answer.
+7. `Memory Insight` expands each answer with a readable reference summary such as `This answer was influenced by Fact #12 (...), Lesson #7 (...), and Conversation #3 (...)`.
+8. `Legacy Archive` stores Significant Moments as a reflective learning journal and is intentionally not positioned as a substitute for real-world relationships.
 7. Companion behavior safeguards:
    - David stays transparent that he is an AI companion and not a real human child.
    - Family and attachment language is handled with warm + transparent wording.
@@ -451,6 +458,13 @@ Use the `Memory & Chat` tab to interact naturally while keeping memory writes ex
 - `GET /api/logs/tail`
 - `GET /api/settings`
 - `POST /api/settings`
+- `GET /api/legacy_archive`
+- `POST /api/legacy_archive`
+- `POST /api/legacy_archive/<entry_id>/remove`
+- `GET /api/self_improvements`
+- `POST /api/self_improvements/propose`
+- `POST /api/self_improvements/autonomous_cycle`
+- `POST /api/self_improvements/<proposal_id>/decision`
 - `GET /api/models`
 - `GET /api/approvals`
 - `POST /api/approval/<approval_id>`
@@ -470,6 +484,10 @@ Use the `Memory & Chat` tab to interact naturally while keeping memory writes ex
 - Memory conflict approval gate for conflicting `--teach` facts.
 - Advanced Chat teach save gate (`confirm_save`) and explicit overwrite confirmation for conflicting facts.
 - Companion mode is deterministic memory-first behavior in web ask/chat and can be toggled in Settings.
+- Memory Insight Mode is deterministic and reference-based; it does not fabricate memory references and can be toggled in Settings.
+- Legacy Archive is framed as reflective continuity and explicitly maintains real-world relationship boundaries.
+- Self-improvement proposals are sandbox-first (`workspace/agent_sandbox/`) and can only merge to core code after explicit human approval.
+- Self-improvement merge flow blocks direct edits to safety logic files (`agent/safety.py`, `web/safety.py`).
 - Grief/calm support overlays never replace human support; crisis-risk responses include U.S. `988` guidance.
 - Safe mode can block write operations (read-only monitoring mode).
 - Run artifacts are stored under `data/runs/<run_id>/` (plan, iteration outputs, diffs, result bundle).

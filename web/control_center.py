@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import difflib
+import hashlib
 import io
 import json
 import logging
@@ -40,6 +41,14 @@ MEMORY_UNKNOWN_ANSWER = 'I do not know yet. Please teach me using --teach "...".
 REFLECTION_KIND = "reflection"
 REFLECTION_SOURCE = "reflection_engine"
 PROJECT_BRAIN_SOURCE = "project_brain_engine"
+SELF_IMPROVEMENT_SOURCE = "self_improvement_engine"
+SELF_IMPROVEMENT_BLOCKED_PATHS = {
+    "agent/safety.py",
+    "web/safety.py",
+}
+LEGACY_ARCHIVE_BOUNDARY_NOTE = (
+    "Legacy Archive is a reflective journal of shared learning and does not replace real-world relationships."
+)
 FAMILY_CONTEXT_PATTERNS = (
     r"\bfather\b",
     r"\bmother\b",
@@ -185,7 +194,9 @@ class ControlSettings:
     risky_multi_file_threshold: int = 4
     run_preview_default: bool = False
     companion_mode: bool = True
+    memory_insight_mode: bool = True
     parent_teaching_mode: bool = False
+    autonomous_self_improvement_mode: bool = True
     personality_warmth: int = 55
     personality_verbosity: int = 55
     personality_curiosity: int = 50
@@ -199,6 +210,12 @@ class ControlSettings:
         planner_model = str(data.get("planner_model", "")).strip()
         coder_model = str(data.get("coder_model", "")).strip()
         critic_model = str(data.get("critic_model", "")).strip()
+        def _pct(name: str, default: int) -> int:
+            try:
+                value = int(data.get(name, default))
+            except (TypeError, ValueError):
+                value = default
+            return max(0, min(100, value))
         return cls(
             safe_mode=bool(data.get("safe_mode", False)),
             rate_limit_seconds=max(0, int(data.get("rate_limit_seconds", 3))),
@@ -207,10 +224,12 @@ class ControlSettings:
             risky_multi_file_threshold=max(2, int(data.get("risky_multi_file_threshold", 4))),
             run_preview_default=bool(data.get("run_preview_default", False)),
             companion_mode=bool(data.get("companion_mode", True)),
+            memory_insight_mode=bool(data.get("memory_insight_mode", True)),
             parent_teaching_mode=bool(data.get("parent_teaching_mode", False)),
-            personality_warmth=max(0, min(100, int(data.get("personality_warmth", 55)))),
-            personality_verbosity=max(0, min(100, int(data.get("personality_verbosity", 55)))),
-            personality_curiosity=max(0, min(100, int(data.get("personality_curiosity", 50)))),
+            autonomous_self_improvement_mode=bool(data.get("autonomous_self_improvement_mode", True)),
+            personality_warmth=_pct("personality_warmth", 55),
+            personality_verbosity=_pct("personality_verbosity", 55),
+            personality_curiosity=_pct("personality_curiosity", 50),
             planner_model=planner_model,
             coder_model=coder_model,
             critic_model=critic_model,
@@ -239,7 +258,10 @@ class DavidControlCenter:
         self.data_root = (data_root or (self.project_root / "data")).resolve()
         self.runs_root = (self.data_root / "runs").resolve()
         self.settings_file = (self.data_root / "control_settings.json").resolve()
+        self.self_improvements_file = (self.data_root / "self_improvements.json").resolve()
+        self.agent_sandbox_root = (self.config.workspace_dir / "agent_sandbox").resolve()
         self.runs_root.mkdir(parents=True, exist_ok=True)
+        self.agent_sandbox_root.mkdir(parents=True, exist_ok=True)
 
         self._lock = threading.RLock()
         self._active_thread: threading.Thread | None = None
@@ -271,6 +293,11 @@ class DavidControlCenter:
         with self._lock:
             active = self._active_run_id
             pending_count = len([p for p in self._pending_approvals.values() if p.get("status") == "pending"])
+            self_improvement_pending_count = sum(
+                1
+                for item in self._self_improvement_rows()
+                if str(item.get("status", "")).strip().lower() == "pending"
+            )
 
         current_meta = self._read_run_meta(active) if active else None
         runs = self.get_runs(limit=30)
@@ -300,6 +327,8 @@ class DavidControlCenter:
             "latest_success": current_meta.get("success") if current_meta else (latest.get("success") if latest else None),
             "latest_message": current_meta.get("message", "") if current_meta else (latest.get("message", "") if latest else ""),
             "pending_approvals": pending_count,
+            "pending_self_improvements": self_improvement_pending_count,
+            "autonomous_self_improvement_mode": self.settings.autonomous_self_improvement_mode,
             "safe_mode": self.settings.safe_mode,
             "rate_limit_seconds": self.settings.rate_limit_seconds,
             "allowed_commands": list(self.config.allowed_commands),
@@ -834,6 +863,7 @@ class DavidControlCenter:
                 response = self._compose_companion_chat_response(
                     clean_message,
                     session_id=active_session_id,
+                    actor=actor_value,
                     force_transparency=is_first_assistant_turn,
                 )
             else:
@@ -843,6 +873,23 @@ class DavidControlCenter:
                     "message": clean_message,
                     "reply": (
                         "I can chat naturally. If you want me to remember something, switch to Teach and confirm save."
+                    ),
+                    "citations": [],
+                    "used_memory": {
+                        "facts": [],
+                        "conversations": [],
+                        "lessons": [],
+                        "values": [],
+                        "projects": [],
+                    },
+                    "memory_insight": self._build_memory_insight(
+                        enabled=bool(self.settings.memory_insight_mode and self._is_web_actor(actor_value)),
+                        matched_facts=[],
+                        matched_conversations=[],
+                        matched_lessons=[],
+                        facts_source=[],
+                        conversations_source=[],
+                        lessons_source=[],
                     ),
                     "timestamp_utc": self._now_iso(),
                 }
@@ -876,6 +923,7 @@ class DavidControlCenter:
             metadata={
                 "response_status": str(response.get("status", "")),
                 "citations": response.get("citations", []),
+                "memory_insight": response.get("memory_insight", {}),
                 "used_memory": response.get("used_memory", {}),
                 "takeaways": response.get("stored_facts", []),
             },
@@ -904,6 +952,15 @@ class DavidControlCenter:
         )
         if reflection:
             payload["reflection"] = reflection
+            try:
+                autonomous = self.autonomous_self_improvement_cycle(
+                    trigger="conversation",
+                    trigger_id=str(reflection.get("reflection_key", "")).strip(),
+                    actor="david_autonomous",
+                )
+                payload["autonomous_self_improvement"] = autonomous
+            except Exception:  # pragma: no cover - defensive boundary
+                self._logger.exception("autonomous self-improvement cycle failed for conversation")
         self.publish_event("status", {"type": "memory_chat_response", "payload": payload})
         self.publish_event("logs", {"type": "memory_chat_response", "payload": payload})
         return payload
@@ -1089,6 +1146,827 @@ class DavidControlCenter:
             rows = list(self._pending_approvals.values())
         rows.sort(key=lambda item: item.get("created_at", ""), reverse=True)
         return rows
+
+    def list_self_improvements(self, limit: int = 160) -> dict[str, Any]:
+        try:
+            limit_value = int(limit or 160)
+        except (TypeError, ValueError):
+            limit_value = 160
+        max_limit = max(1, min(limit_value, 500))
+        with self._lock:
+            rows = self._self_improvement_rows()
+        rows.sort(key=lambda item: str(item.get("created_at", "")), reverse=True)
+        pending_count = sum(1 for item in rows if str(item.get("status", "")).strip().lower() == "pending")
+        merged_count = sum(1 for item in rows if str(item.get("status", "")).strip().lower() == "merged")
+        autonomous_count = 0
+        for item in rows:
+            metadata = item.get("metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+            if bool(metadata.get("autonomous", False)) or str(item.get("actor", "")).strip().lower().startswith(
+                "david_autonomous"
+            ):
+                autonomous_count += 1
+        return {
+            "items": rows[:max_limit],
+            "total": len(rows),
+            "pending_count": pending_count,
+            "merged_count": merged_count,
+            "autonomous_count": autonomous_count,
+            "sandbox_root": str(self.agent_sandbox_root),
+        }
+
+    def propose_self_improvement(
+        self,
+        payload: dict[str, Any],
+        *,
+        actor: str = "david_agent",
+    ) -> tuple[bool, dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return False, {"error": "Payload must be an object."}
+        title = self._sanitize_user_text(payload.get("title", ""), field_name="title", max_chars=220)
+        summary = self._sanitize_user_text(payload.get("summary", ""), field_name="summary", max_chars=6_000)
+        rationale = str(payload.get("rationale", "")).replace("\x00", "").strip()
+        if rationale and len(rationale) > 8_000:
+            return False, {"error": "rationale exceeds max length (8000 chars)."}
+        metadata_raw = payload.get("metadata", {})
+        try:
+            metadata = self._sanitize_json_metadata(metadata_raw, max_chars=20_000)
+        except ValueError as exc:
+            return False, {"error": str(exc)}
+
+        files = payload.get("files", [])
+        if not isinstance(files, list) or not files:
+            return False, {"error": "files must be a non-empty list."}
+        if len(files) > 40:
+            return False, {"error": "files exceeds max count (40)."}
+
+        created_at = self._now_iso()
+        proposal_id = f"improve_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}_{uuid.uuid4().hex[:8]}"
+        proposal_dir = (self.agent_sandbox_root / proposal_id).resolve()
+        prototype_root = (proposal_dir / "prototype").resolve()
+        proposal_doc_path = (proposal_dir / "PROPOSAL.md").resolve()
+        metadata_path = (proposal_dir / "metadata.json").resolve()
+
+        changes: list[dict[str, Any]] = []
+        touched_paths: set[str] = set()
+        for idx, row in enumerate(files):
+            if not isinstance(row, dict):
+                return False, {"error": f"files[{idx}] must be an object."}
+            target_value = str(row.get("path", "")).strip()
+            content = str(row.get("content", "")).replace("\x00", "")
+            if len(content.encode("utf-8")) > 1_000_000:
+                return False, {"error": f"files[{idx}].content exceeds max size (1000000 bytes)."}
+            try:
+                target_path, normalized = self._resolve_project_file_path(target_value)
+            except ValueError as exc:
+                return False, {"error": str(exc)}
+            if self._is_self_improvement_blocked_path(normalized):
+                return False, {"error": f"Path '{normalized}' is blocked for self-improvement proposals."}
+            if normalized in touched_paths:
+                return False, {"error": f"Duplicate target path in files: {normalized}"}
+            touched_paths.add(normalized)
+
+            before_exists = target_path.exists() and target_path.is_file()
+            before_text = ""
+            if before_exists:
+                try:
+                    before_text = target_path.read_text(encoding="utf-8")
+                except OSError as exc:
+                    return False, {"error": f"Unable to read existing file '{normalized}': {exc}"}
+            before_lines = before_text.splitlines()
+            after_lines = content.splitlines()
+            diff_lines = list(
+                difflib.unified_diff(
+                    before_lines,
+                    after_lines,
+                    fromfile=f"a/{normalized}",
+                    tofile=f"b/{normalized}",
+                    lineterm="",
+                )
+            )
+            added = sum(1 for line in diff_lines if line.startswith("+") and not line.startswith("+++"))
+            removed = sum(1 for line in diff_lines if line.startswith("-") and not line.startswith("---"))
+
+            sandbox_file = (prototype_root / normalized).resolve()
+            if proposal_dir not in sandbox_file.parents:
+                return False, {"error": "Sandbox prototype path escaped proposal folder."}
+            sandbox_file.parent.mkdir(parents=True, exist_ok=True)
+            sandbox_file.write_text(content, encoding="utf-8")
+
+            changes.append(
+                {
+                    "path": normalized,
+                    "change_type": "new" if not before_exists else "edited",
+                    "sandbox_file": str(sandbox_file),
+                    "added": added,
+                    "removed": removed,
+                    "patch": "\n".join(diff_lines),
+                    "size_bytes": len(content.encode("utf-8")),
+                }
+            )
+
+        proposal_md = str(payload.get("proposal_markdown", "")).replace("\x00", "").strip()
+        if proposal_md and len(proposal_md) > 30_000:
+            return False, {"error": "proposal_markdown exceeds max length (30000 chars)."}
+        if not proposal_md:
+            lines = [
+                f"# Self-Improvement Proposal: {title}",
+                "",
+                f"- Proposal ID: `{proposal_id}`",
+                f"- Source: `{SELF_IMPROVEMENT_SOURCE}`",
+                f"- Created at (UTC): `{created_at}`",
+                f"- Actor: `{actor.strip() or 'david_agent'}`",
+                "",
+                "## Summary",
+                summary,
+                "",
+            ]
+            if rationale:
+                lines.extend(["## Rationale", rationale, ""])
+            if metadata:
+                lines.extend(["## Metadata", "```json", json.dumps(metadata, indent=2, sort_keys=True), "```", ""])
+            lines.append("## Proposed File Changes")
+            for item in changes:
+                lines.append(
+                    f"- `{item['path']}` ({item['change_type']}, +{item['added']} / -{item['removed']}, {item['size_bytes']} bytes)"
+                )
+            proposal_md = "\n".join(lines).strip()
+
+        proposal_dir.mkdir(parents=True, exist_ok=True)
+        proposal_doc_path.write_text(proposal_md + "\n", encoding="utf-8")
+        proposal = {
+            "id": proposal_id,
+            "title": title,
+            "summary": summary,
+            "rationale": rationale,
+            "status": "pending",
+            "created_at": created_at,
+            "updated_at": created_at,
+            "source": SELF_IMPROVEMENT_SOURCE,
+            "actor": actor.strip() or "david_agent",
+            "sandbox_dir": str(proposal_dir),
+            "proposal_doc": str(proposal_doc_path),
+            "changes": changes,
+            "metadata": metadata,
+            "decision": None,
+            "merge": None,
+        }
+        self._write_json(metadata_path, proposal)
+        with self._lock:
+            rows = self._self_improvement_rows()
+            rows.append(proposal)
+            self._save_self_improvement_rows(rows)
+        self.publish_event("status", {"type": "self_improvement_proposed", "payload": proposal})
+        self.publish_event("logs", {"type": "self_improvement_proposed", "payload": proposal})
+        return True, proposal
+
+    def decide_self_improvement(
+        self,
+        proposal_id: str,
+        *,
+        decision: str,
+        actor: str = "web_ui",
+        note: str = "",
+    ) -> tuple[bool, dict[str, Any]]:
+        clean_id = str(proposal_id).strip()
+        if not clean_id:
+            return False, {"error": "proposal_id is required."}
+        choice = str(decision).strip().lower()
+        if choice not in {"approve", "reject"}:
+            return False, {"error": "decision must be approve or reject."}
+        note_clean = str(note).replace("\x00", "").strip()
+        if len(note_clean) > 2_000:
+            return False, {"error": "note exceeds max length (2000 chars)."}
+
+        with self._lock:
+            rows = self._self_improvement_rows()
+            match_idx = -1
+            for idx, row in enumerate(rows):
+                if str(row.get("id", "")).strip() == clean_id:
+                    match_idx = idx
+                    break
+            if match_idx < 0:
+                return False, {"error": "Proposal not found."}
+            current = dict(rows[match_idx])
+            if str(current.get("status", "")).strip().lower() != "pending":
+                return False, {"error": "Proposal is already resolved."}
+
+        decided_at = self._now_iso()
+        decision_payload = {
+            "decision": choice,
+            "actor": actor.strip() or "web_ui",
+            "note": note_clean,
+            "decided_at": decided_at,
+        }
+        current["decision"] = decision_payload
+        current["updated_at"] = decided_at
+
+        if choice == "reject":
+            current["status"] = "rejected"
+            self._update_self_improvement_record(current)
+            event = {"proposal_id": clean_id, "decision": choice, "proposal": current}
+            self.publish_event("status", {"type": "self_improvement_decision", "payload": event})
+            self.publish_event("logs", {"type": "self_improvement_decision", "payload": event})
+            return True, current
+
+        if self.settings.safe_mode:
+            return False, {"error": "Safe mode is enabled. Disable read-only mode before approving merges."}
+
+        try:
+            merged = self._merge_self_improvement_proposal(current, actor=actor.strip() or "web_ui")
+        except Exception as exc:
+            failed = current.copy()
+            failed["status"] = "merge_failed"
+            failed["updated_at"] = self._now_iso()
+            failed["merge"] = {"error": str(exc), "merged_at": self._now_iso(), "actor": actor.strip() or "web_ui"}
+            self._update_self_improvement_record(failed)
+            return False, {"error": f"Merge failed: {exc}", "proposal": failed}
+
+        self._update_self_improvement_record(merged)
+        event = {"proposal_id": clean_id, "decision": choice, "proposal": merged}
+        self.publish_event("status", {"type": "self_improvement_decision", "payload": event})
+        self.publish_event("status", {"type": "self_improvement_merged", "payload": merged})
+        self.publish_event("logs", {"type": "self_improvement_decision", "payload": event})
+        self.publish_event("logs", {"type": "self_improvement_merged", "payload": merged})
+        return True, merged
+
+    def autonomous_self_improvement_cycle(
+        self,
+        *,
+        trigger: str = "manual",
+        trigger_id: str = "",
+        actor: str = "david_autonomous",
+    ) -> dict[str, Any]:
+        trigger_value = str(trigger).strip().lower() or "manual"
+        if trigger_value not in {"manual", "goal", "conversation"}:
+            trigger_value = "manual"
+        trigger_id_value = str(trigger_id).strip()
+        actor_value = str(actor).strip() or "david_autonomous"
+
+        if not self.settings.autonomous_self_improvement_mode:
+            return {
+                "status": "disabled",
+                "trigger": trigger_value,
+                "trigger_id": trigger_id_value,
+                "reason": "autonomous_self_improvement_mode_off",
+            }
+
+        run_meta: dict[str, Any] = {}
+        if trigger_value == "goal" and trigger_id_value:
+            run_payload = self.get_run(trigger_id_value)
+            if isinstance(run_payload, dict):
+                maybe_meta = run_payload.get("meta")
+                if isinstance(maybe_meta, dict):
+                    run_meta = dict(maybe_meta)
+        if not run_meta:
+            latest_goal_runs = [
+                row for row in self.get_runs(limit=120) if str(row.get("mode", "")).strip().lower() == "goal"
+            ]
+            if latest_goal_runs:
+                run_meta = dict(latest_goal_runs[0])
+
+        memory_payload = self._read_memory_payload()
+        lessons = memory_payload.get("lessons", []) if isinstance(memory_payload.get("lessons"), list) else []
+        reflection: dict[str, Any] | None = None
+        if trigger_value == "conversation" and trigger_id_value:
+            reflection = self._find_reflection_by_key(lessons, trigger_id_value)
+        if reflection is None:
+            reflection = self._latest_reflection_lesson(lessons)
+
+        signals = self._autonomous_self_improvement_signals(
+            trigger=trigger_value,
+            run_meta=run_meta,
+            reflection=reflection,
+        )
+        if not signals:
+            return {
+                "status": "skipped",
+                "trigger": trigger_value,
+                "trigger_id": trigger_id_value,
+                "reason": "no_actionable_signals",
+            }
+
+        run_id_value = str(run_meta.get("id", run_meta.get("run_id", ""))).strip()
+        reflection_key = str(reflection.get("reflection_key", "")).strip() if isinstance(reflection, dict) else ""
+        signal_codes = sorted(
+            {
+                str(item.get("code", "")).strip()
+                for item in signals
+                if isinstance(item, dict) and str(item.get("code", "")).strip()
+            }
+        )
+        signature_source = {
+            "trigger": trigger_value,
+            "trigger_id": trigger_id_value,
+            "run_id": run_id_value,
+            "reflection_key": reflection_key,
+            "signal_codes": signal_codes,
+        }
+        signature = hashlib.sha1(
+            json.dumps(signature_source, sort_keys=True, ensure_ascii=True).encode("utf-8")
+        ).hexdigest()[:18]
+        if self._self_improvement_signature_exists(signature):
+            return {
+                "status": "skipped",
+                "trigger": trigger_value,
+                "trigger_id": trigger_id_value,
+                "reason": "duplicate_signature",
+                "signature": signature,
+            }
+
+        if self._pending_autonomous_self_improvement_count() >= 3:
+            return {
+                "status": "skipped",
+                "trigger": trigger_value,
+                "trigger_id": trigger_id_value,
+                "reason": "pending_autonomous_queue_full",
+            }
+
+        summary = self._summarize_autonomous_signals(signals, max_items=2)
+        now_iso = self._now_iso()
+        analysis = {
+            "timestamp_utc": now_iso,
+            "trigger": trigger_value,
+            "trigger_id": trigger_id_value,
+            "run_id": run_id_value,
+            "run_status": str(run_meta.get("status", "")).strip().lower() if run_meta else "",
+            "reflection_key": reflection_key,
+            "signals": signals,
+            "analysis_summary": summary,
+            "safety_boundary": (
+                "Core safety modules remain immutable: agent/safety.py and web/safety.py are blocked."
+            ),
+        }
+        files = self._build_autonomous_self_improvement_files(analysis)
+        if not files:
+            return {
+                "status": "skipped",
+                "trigger": trigger_value,
+                "trigger_id": trigger_id_value,
+                "reason": "no_generated_files",
+            }
+
+        title_focus = str(signals[0].get("title", "")).strip() if signals else "Structured Learning"
+        title = f"Autonomous Improvement: {title_focus}"
+        rationale_lines = [
+            f"Trigger: {trigger_value}{f' ({trigger_id_value})' if trigger_id_value else ''}",
+            f"Run context: {run_id_value or '-'} / status={analysis.get('run_status', '-') or '-'}",
+            f"Reflection key: {reflection_key or '-'}",
+            "",
+            "Why this change was drafted:",
+            f"- {summary}",
+            "- Convert lessons into concrete planning and memory-indexing heuristics.",
+            "- Keep core safety constraints immutable and require human approval before merge.",
+        ]
+        ok, result = self.propose_self_improvement(
+            {
+                "title": title[:220],
+                "summary": (
+                    f"{summary} This proposal was drafted autonomously from structured reflections and run evidence."
+                )[:6000],
+                "rationale": "\n".join(rationale_lines)[:8000],
+                "files": files,
+                "metadata": {
+                    "autonomous": True,
+                    "trigger": trigger_value,
+                    "trigger_id": trigger_id_value,
+                    "run_id": run_id_value,
+                    "reflection_key": reflection_key,
+                    "signature": signature,
+                    "signal_codes": signal_codes,
+                    "analysis_summary": summary,
+                },
+            },
+            actor=actor_value,
+        )
+        if not ok:
+            return {
+                "status": "error",
+                "trigger": trigger_value,
+                "trigger_id": trigger_id_value,
+                "error": str(result.get("error", "Failed to create autonomous proposal.")),
+            }
+
+        proposed = dict(result)
+        self.publish_event(
+            "logs",
+            {
+                "type": "autonomous_self_improvement_cycle",
+                "payload": {
+                    "status": "proposed",
+                    "trigger": trigger_value,
+                    "trigger_id": trigger_id_value,
+                    "proposal_id": proposed.get("id", ""),
+                    "analysis_summary": summary,
+                },
+            },
+        )
+        return {
+            "status": "proposed",
+            "trigger": trigger_value,
+            "trigger_id": trigger_id_value,
+            "proposal_id": proposed.get("id", ""),
+            "analysis": analysis,
+            "proposal": proposed,
+        }
+
+    @staticmethod
+    def _find_reflection_by_key(lessons: list[Any], reflection_key: str) -> dict[str, Any] | None:
+        clean_key = str(reflection_key).strip()
+        if not clean_key:
+            return None
+        for row in reversed(lessons):
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("reflection_key", "")).strip() == clean_key:
+                return row
+        return None
+
+    @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _autonomous_self_improvement_signals(
+        self,
+        *,
+        trigger: str,
+        run_meta: dict[str, Any],
+        reflection: dict[str, Any] | None,
+    ) -> list[dict[str, str]]:
+        signals: dict[str, dict[str, str]] = {}
+
+        def _add_signal(code: str, title: str, evidence: str, upgrade: str) -> None:
+            clean_code = str(code).strip().lower()
+            if not clean_code:
+                return
+            if clean_code in signals:
+                return
+            signals[clean_code] = {
+                "code": clean_code,
+                "title": str(title).strip() or "Autonomous Improvement",
+                "evidence": str(evidence).strip(),
+                "upgrade": str(upgrade).strip(),
+            }
+
+        run_status = str(run_meta.get("status", "")).strip().lower() if run_meta else ""
+        run_id = str(run_meta.get("id", run_meta.get("run_id", ""))).strip() if run_meta else ""
+        tests_ran = bool(run_meta.get("tests_ran", False)) if run_meta else False
+        tests_passed = run_meta.get("tests_passed") if run_meta else None
+        iterations_used = max(0, self._safe_int(run_meta.get("iteration", 0) if run_meta else 0, default=0))
+        iterations_until_green = max(
+            0,
+            self._safe_int(run_meta.get("iterations_until_green", 0) if run_meta else 0, default=0),
+        )
+        run_duration_sec = self._run_total_execution_duration(run_id) if run_id else 0.0
+
+        if trigger == "goal" and run_meta:
+            _add_signal(
+                "goal_reflection_loop",
+                "Goal Reflection Loop",
+                (
+                    f"Goal run {run_id or '(latest)'} finished with status "
+                    f"'{run_status or 'unknown'}' and {max(iterations_used, 1)} iteration(s)."
+                ),
+                "Persist a structured reasoning playbook update so future plans reuse this execution pattern.",
+            )
+        if run_status and run_status not in {"success", "preview_ready"}:
+            _add_signal(
+                "run_reliability",
+                "Run Reliability Gap",
+                f"Latest goal run ended with status '{run_status}'.",
+                "Add stricter preflight checks and staged rollback planning before execution.",
+            )
+        if tests_ran and tests_passed is False:
+            _add_signal(
+                "edge_case_validation",
+                "Edge-Case Validation Gap",
+                "Tests failed after code changes, indicating missing edge cases or assertions.",
+                "Generate an edge-case checklist and prioritize tests-first updates before implementation edits.",
+            )
+        if max(iterations_used, iterations_until_green) >= 3:
+            _add_signal(
+                "iteration_efficiency",
+                "Iteration Efficiency",
+                f"Iterations until stable green were high ({max(iterations_used, iterations_until_green)}).",
+                "Break goals into smaller checkpoints and enforce narrower edit scopes per iteration.",
+            )
+        if run_duration_sec >= 45.0:
+            _add_signal(
+                "execution_latency",
+                "Execution Latency",
+                f"Longest recent run consumed about {run_duration_sec:.1f}s of command execution.",
+                "Prefer incremental tests and cache-friendly command sequencing before full-suite runs.",
+            )
+
+        reflection_text = str(reflection.get("lesson", "")).strip().lower() if isinstance(reflection, dict) else ""
+        if "step-by-step" in reflection_text or "step by step" in reflection_text:
+            _add_signal(
+                "explanation_structure",
+                "Explanation Structure",
+                "Recent conversation reflection indicates preference for step-by-step guidance.",
+                "Encode explicit step-order reasoning checkpoints in planning summaries.",
+            )
+        if "concise" in reflection_text or "brief" in reflection_text:
+            _add_signal(
+                "response_compaction",
+                "Response Compaction",
+                "Recent reflection indicates concise communication is preferred in context.",
+                "Add tighter summary compression before returning final responses.",
+            )
+        if "detailed" in reflection_text or "more detail" in reflection_text:
+            _add_signal(
+                "response_depth",
+                "Response Depth Calibration",
+                "Recent reflection indicates detailed explanation preference.",
+                "Attach optional deeper rationale blocks while preserving deterministic citations.",
+            )
+        if "tests failed" in reflection_text or "edge case" in reflection_text:
+            _add_signal(
+                "reflection_test_gap",
+                "Reflection-Test Gap",
+                "Reflection explicitly mentioned failed tests or edge-case coverage gaps.",
+                "Insert a reusable pre-merge edge-case test matrix before implementation finalization.",
+            )
+
+        if trigger == "manual" and not signals:
+            _add_signal(
+                "manual_review",
+                "Manual Self-Review",
+                "Manual autonomous cycle requested with no strong regression signal.",
+                "Persist current strengths and identify one constrained optimization target for next runs.",
+            )
+
+        ordered = list(signals.values())
+        ordered.sort(key=lambda row: str(row.get("code", "")))
+        return ordered
+
+    @staticmethod
+    def _summarize_autonomous_signals(signals: list[dict[str, str]], max_items: int = 2) -> str:
+        clean = [str(item.get("title", "")).strip() for item in signals if isinstance(item, dict)]
+        clean = [item for item in clean if item]
+        if not clean:
+            return "No specific weaknesses were detected in the latest autonomous review."
+        selected = clean[: max(1, min(max_items, 6))]
+        if len(clean) > len(selected):
+            return f"{'; '.join(selected)}; plus {len(clean) - len(selected)} additional signal(s)."
+        return "; ".join(selected) + "."
+
+    def _self_improvement_signature_exists(self, signature: str) -> bool:
+        clean = str(signature).strip()
+        if not clean:
+            return False
+        with self._lock:
+            rows = self._self_improvement_rows()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            metadata = row.get("metadata", {})
+            if not isinstance(metadata, dict):
+                continue
+            if str(metadata.get("signature", "")).strip() == clean:
+                return True
+        return False
+
+    def _pending_autonomous_self_improvement_count(self) -> int:
+        with self._lock:
+            rows = self._self_improvement_rows()
+        count = 0
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("status", "")).strip().lower() != "pending":
+                continue
+            metadata = row.get("metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+            if bool(metadata.get("autonomous", False)) or str(row.get("actor", "")).strip().lower().startswith(
+                "david_autonomous"
+            ):
+                count += 1
+        return count
+
+    def _build_autonomous_self_improvement_files(self, analysis: dict[str, Any]) -> list[dict[str, str]]:
+        if not isinstance(analysis, dict):
+            return []
+        signals = analysis.get("signals", [])
+        if not isinstance(signals, list) or not signals:
+            return []
+
+        signal_rows: list[dict[str, str]] = []
+        for row in signals:
+            if not isinstance(row, dict):
+                continue
+            signal_rows.append(
+                {
+                    "code": str(row.get("code", "")).strip(),
+                    "title": str(row.get("title", "")).strip(),
+                    "evidence": str(row.get("evidence", "")).strip(),
+                    "upgrade": str(row.get("upgrade", "")).strip(),
+                }
+            )
+        signal_rows = [row for row in signal_rows if row["code"] and row["upgrade"]]
+        if not signal_rows:
+            return []
+
+        recommended_actions: list[str] = []
+        for row in signal_rows:
+            action = row["upgrade"]
+            if action not in recommended_actions:
+                recommended_actions.append(action)
+
+        trigger_value = str(analysis.get("trigger", "manual")).strip()
+        trigger_id = str(analysis.get("trigger_id", "")).strip()
+        generated_at = str(analysis.get("timestamp_utc", self._now_iso())).strip() or self._now_iso()
+
+        playbook_lines = [
+            '"""Autonomous self-improvement playbook generated by David.',
+            "",
+            "This file is a proposed upgrade derived from run telemetry and reflection memory.",
+            "Core safety modules remain immutable and out of scope for autonomous edits.",
+            '"""',
+            "",
+            "from __future__ import annotations",
+            "",
+            f'GENERATED_AT_UTC = {json.dumps(generated_at, ensure_ascii=True)}',
+            f'TRIGGER = {json.dumps(trigger_value, ensure_ascii=True)}',
+            f'TRIGGER_ID = {json.dumps(trigger_id, ensure_ascii=True)}',
+            f"SIGNAL_CODES = {json.dumps([row['code'] for row in signal_rows], ensure_ascii=True)}",
+            "",
+            f"SIGNALS = {json.dumps(signal_rows, indent=2, ensure_ascii=True)}",
+            "",
+            "RECOMMENDED_ACTIONS = [",
+        ]
+        for action in recommended_actions:
+            playbook_lines.append(f"    {json.dumps(action, ensure_ascii=True)},")
+        playbook_lines.extend(
+            [
+                "]",
+                "",
+                "def recommended_actions() -> list[str]:",
+                "    return list(RECOMMENDED_ACTIONS)",
+                "",
+                "def latest_signals() -> list[dict[str, str]]:",
+                "    return [dict(item) for item in SIGNALS]",
+                "",
+            ]
+        )
+        playbook_content = "\n".join(playbook_lines)
+
+        state_payload = {
+            "generated_at_utc": generated_at,
+            "trigger": trigger_value,
+            "trigger_id": trigger_id,
+            "run_id": str(analysis.get("run_id", "")).strip(),
+            "run_status": str(analysis.get("run_status", "")).strip(),
+            "reflection_key": str(analysis.get("reflection_key", "")).strip(),
+            "analysis_summary": str(analysis.get("analysis_summary", "")).strip(),
+            "signals": signal_rows,
+            "recommended_actions": recommended_actions,
+            "safety_boundary": str(analysis.get("safety_boundary", "")).strip(),
+        }
+        state_content = json.dumps(state_payload, indent=2, ensure_ascii=True) + "\n"
+
+        history_rel = "docs/self_improvement_change_history.md"
+        history_abs = self.project_root / history_rel
+        history_existing = ""
+        if history_abs.exists() and history_abs.is_file():
+            try:
+                history_existing = history_abs.read_text(encoding="utf-8")
+            except OSError:
+                history_existing = ""
+        if not history_existing.strip():
+            history_existing = (
+                "# Self-Improvement Change History\n\n"
+                "This log tracks autonomous and manual self-improvement proposals with transparent reasoning.\n"
+            )
+
+        history_lines = [
+            f"## {generated_at}",
+            "",
+            f"- Trigger: `{trigger_value}`{f' (`{trigger_id}`)' if trigger_id else ''}",
+            f"- Run: `{state_payload['run_id'] or '-'}` / status: `{state_payload['run_status'] or '-'}`",
+            f"- Reflection: `{state_payload['reflection_key'] or '-'}`",
+            f"- Summary: {state_payload['analysis_summary'] or 'n/a'}",
+            "- Signals:",
+        ]
+        for row in signal_rows:
+            history_lines.append(f"  - `{row['code']}`: {row['title']} | {row['evidence']}")
+        history_lines.extend(
+            [
+                "- Proposed actions:",
+            ]
+        )
+        for action in recommended_actions:
+            history_lines.append(f"  - {action}")
+        history_lines.extend(["", "---", ""])
+        history_content = history_existing.rstrip() + "\n\n" + "\n".join(history_lines)
+
+        return [
+            {"path": "agent/self_improvement/autonomous_playbook.py", "content": playbook_content},
+            {"path": "agent/self_improvement/autonomous_state.json", "content": state_content},
+            {"path": history_rel, "content": history_content},
+        ]
+
+    def list_legacy_archive(self, limit: int = 200) -> dict[str, Any]:
+        try:
+            limit_value = int(limit or 200)
+        except (TypeError, ValueError):
+            limit_value = 200
+        max_limit = max(1, min(limit_value, 600))
+        payload = self._read_memory_payload()
+        rows = payload.get("legacy_archive", []) if isinstance(payload.get("legacy_archive"), list) else []
+        cleaned = [row for row in rows if isinstance(row, dict)]
+        cleaned.sort(key=lambda item: str(item.get("recorded_at", item.get("timestamp_utc", ""))), reverse=True)
+        return {
+            "items": cleaned[:max_limit],
+            "total": len(cleaned),
+            "boundary_note": LEGACY_ARCHIVE_BOUNDARY_NOTE,
+        }
+
+    def mark_legacy_moment(
+        self,
+        payload: dict[str, Any],
+        *,
+        actor: str = "web_ui",
+    ) -> tuple[bool, dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return False, {"error": "Payload must be an object."}
+        source_type = str(payload.get("source_type", "manual")).strip().lower() or "manual"
+        if source_type not in {"conversation", "milestone", "teaching", "lesson", "value", "manual"}:
+            return False, {"error": "source_type must be one of conversation|milestone|teaching|lesson|value|manual."}
+        source_id = str(payload.get("source_id", "")).strip()
+        try:
+            summary = self._sanitize_user_text(payload.get("summary", ""), field_name="summary", max_chars=320)
+        except ValueError as exc:
+            return False, {"error": str(exc)}
+        details = str(payload.get("details", "")).replace("\x00", "").strip()
+        if len(details) > 2_000:
+            return False, {"error": "details exceeds max length (2000 chars)."}
+        source_timestamp = self._normalize_iso_timestamp(payload.get("timestamp_utc", ""))
+        metadata = payload.get("metadata", {})
+        if metadata is None:
+            metadata = {}
+        if not isinstance(metadata, dict):
+            return False, {"error": "metadata must be an object."}
+
+        now = self._now_iso()
+        entry = {
+            "id": f"legacy_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}_{uuid.uuid4().hex[:8]}",
+            "kind": "significant_moment",
+            "source_type": source_type,
+            "source_id": source_id,
+            "summary": summary,
+            "details": details,
+            "timestamp_utc": source_timestamp,
+            "recorded_at": now,
+            "actor": actor.strip() or "web_ui",
+            "metadata": metadata,
+            "boundary_note": LEGACY_ARCHIVE_BOUNDARY_NOTE,
+        }
+
+        memory_payload = self._read_memory_payload()
+        rows = memory_payload.get("legacy_archive", []) if isinstance(memory_payload.get("legacy_archive"), list) else []
+        rows = [row for row in rows if isinstance(row, dict)]
+        rows.append(entry)
+        memory_payload["legacy_archive"] = rows[-1200:]
+        self._write_memory_payload(memory_payload)
+
+        event_payload = {"entry": entry, "total": len(memory_payload["legacy_archive"])}
+        self.publish_event("status", {"type": "memory_legacy_archive_saved", "payload": event_payload})
+        self.publish_event("logs", {"type": "memory_legacy_archive_saved", "payload": event_payload})
+        return True, entry
+
+    def remove_legacy_moment(
+        self,
+        entry_id: str,
+        *,
+        actor: str = "web_ui",
+    ) -> tuple[bool, dict[str, Any]]:
+        clean_id = str(entry_id).strip()
+        if not clean_id:
+            return False, {"error": "entry_id is required."}
+        memory_payload = self._read_memory_payload()
+        rows = memory_payload.get("legacy_archive", []) if isinstance(memory_payload.get("legacy_archive"), list) else []
+        cleaned = [row for row in rows if isinstance(row, dict)]
+        kept = [row for row in cleaned if str(row.get("id", "")).strip() != clean_id]
+        if len(kept) == len(cleaned):
+            return False, {"error": "Archive entry not found."}
+        memory_payload["legacy_archive"] = kept
+        self._write_memory_payload(memory_payload)
+        response = {
+            "removed_id": clean_id,
+            "removed": True,
+            "total": len(kept),
+            "actor": actor.strip() or "web_ui",
+            "timestamp_utc": self._now_iso(),
+        }
+        self.publish_event("status", {"type": "memory_legacy_archive_removed", "payload": response})
+        self.publish_event("logs", {"type": "memory_legacy_archive_removed", "payload": response})
+        return True, response
 
     def get_runs(self, search: str = "", status: str = "", limit: int = 100) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
@@ -1375,6 +2253,7 @@ class DavidControlCenter:
         all_lessons = payload.get("lessons", []) if isinstance(payload.get("lessons"), list) else []
         values = payload.get("values", []) if isinstance(payload.get("values"), list) else []
         projects = payload.get("projects", []) if isinstance(payload.get("projects"), list) else []
+        legacy_archive = payload.get("legacy_archive", []) if isinstance(payload.get("legacy_archive"), list) else []
         lessons = self._non_reflection_lessons(all_lessons)
         reflections = self._reflection_lessons(all_lessons)
         conversations = self._read_jsonl(self._conversations_file, limit=600)
@@ -1386,12 +2265,14 @@ class DavidControlCenter:
             "lessons": lessons[-300:],
             "reflections": reflections[-300:],
             "conversations": conversations[-300:],
+            "legacy_archive": [row for row in legacy_archive if isinstance(row, dict)][-300:],
             "sessions": self.chat_sessions(limit=120),
             "conflicts": conflicts,
             "conflict_count": len(conflicts),
             "values_count": len(values),
             "project_count": len(projects),
             "reflection_count": len(reflections),
+            "legacy_archive_count": len([row for row in legacy_archive if isinstance(row, dict)]),
         }
 
     @staticmethod
@@ -1639,6 +2520,93 @@ class DavidControlCenter:
                 }
             )
 
+        self_improvements = self._self_improvement_rows()
+        self_improvements.sort(key=lambda item: str(item.get("created_at", "")))
+        self_improvement_total = 0
+        self_improvement_merged = 0
+        autonomous_improvement_total = 0
+        for item in self_improvements:
+            if not isinstance(item, dict):
+                continue
+            created_at = str(item.get("created_at", "")).strip()
+            if not created_at:
+                continue
+            self_improvement_total += 1
+            metadata = item.get("metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+            status = str(item.get("status", "")).strip().lower() or "pending"
+            actor = str(item.get("actor", "")).strip()
+            autonomous = bool(metadata.get("autonomous", False)) or actor.lower().startswith("david_autonomous")
+            if autonomous:
+                autonomous_improvement_total += 1
+            if status == "merged":
+                self_improvement_merged += 1
+
+            trigger = str(metadata.get("trigger", "")).strip().lower() or "manual"
+            signal_codes = metadata.get("signal_codes", [])
+            if isinstance(signal_codes, list):
+                learned = [str(code).strip() for code in signal_codes if str(code).strip()]
+            else:
+                learned = []
+            if not learned:
+                learned = [str(item.get("title", "")).strip() or "self_improvement"]
+
+            milestones.append(
+                {
+                    "id": f"self_improvement:{str(item.get('id', '')).strip() or created_at}",
+                    "timestamp_utc": created_at,
+                    "category": "autonomous_self_improvement" if autonomous else "self_improvement",
+                    "title": "Autonomous Improvement Proposed" if autonomous else "Self-Improvement Proposed",
+                    "details": str(item.get("summary", "")).strip() or "A proposal was drafted for iterative improvement.",
+                    "goal": "",
+                    "learned": learned,
+                    "raw": {
+                        "proposal_id": str(item.get("id", "")).strip(),
+                        "status": status,
+                        "actor": actor,
+                        "trigger": trigger,
+                        "autonomous": autonomous,
+                        "merged_at": (item.get("merge") or {}).get("merged_at")
+                        if isinstance(item.get("merge"), dict)
+                        else "",
+                    },
+                }
+            )
+
+            if status in {"merged", "rejected", "merge_failed"}:
+                resolved_stamp = str(
+                    ((item.get("merge") or {}).get("merged_at") if isinstance(item.get("merge"), dict) else "")
+                    or ((item.get("decision") or {}).get("decided_at") if isinstance(item.get("decision"), dict) else "")
+                    or str(item.get("updated_at", "")).strip()
+                    or created_at
+                ).strip()
+                resolution_label = {
+                    "merged": "Improvement Merged",
+                    "rejected": "Improvement Rejected",
+                    "merge_failed": "Improvement Merge Failed",
+                }.get(status, "Improvement Updated")
+                milestones.append(
+                    {
+                        "id": (
+                            f"self_improvement_resolution:{str(item.get('id', '')).strip() or created_at}:{status}"
+                        ),
+                        "timestamp_utc": resolved_stamp,
+                        "category": f"self_improvement_{status}",
+                        "title": resolution_label,
+                        "details": str(item.get("summary", "")).strip() or "Proposal status changed.",
+                        "goal": "",
+                        "learned": learned,
+                        "raw": {
+                            "proposal_id": str(item.get("id", "")).strip(),
+                            "status": status,
+                            "actor": actor,
+                            "autonomous": autonomous,
+                            "trigger": trigger,
+                        },
+                    }
+                )
+
         milestones.sort(key=lambda row: str(row.get("timestamp_utc", "")))
         if len(milestones) > max_limit:
             milestones = milestones[-max_limit:]
@@ -1671,6 +2639,9 @@ class DavidControlCenter:
                 "milestone_count": len(milestones),
                 "reflection_count": len(reflections),
                 "reasoning_lesson_count": len(reasoning_lessons),
+                "self_improvement_total": self_improvement_total,
+                "self_improvement_merged": self_improvement_merged,
+                "autonomous_self_improvement_total": autonomous_improvement_total,
                 "latest_timestamp_utc": milestones[-1]["timestamp_utc"] if milestones else "",
             },
         }
@@ -1774,7 +2745,7 @@ class DavidControlCenter:
     def _read_memory_payload(self) -> dict[str, Any]:
         payload = self._read_json(
             self.config.memory_file,
-            default={"facts": [], "lessons": [], "preferences": [], "values": [], "projects": []},
+            default={"facts": [], "lessons": [], "preferences": [], "values": [], "projects": [], "legacy_archive": []},
         )
         if not isinstance(payload, dict):
             payload = {}
@@ -1790,6 +2761,8 @@ class DavidControlCenter:
             payload["projects"] = []
         if not isinstance(payload.get("conversations"), list):
             payload["conversations"] = []
+        if not isinstance(payload.get("legacy_archive"), list):
+            payload["legacy_archive"] = []
         return payload
 
     def _write_memory_payload(self, payload: dict[str, Any]) -> None:
@@ -1944,6 +2917,59 @@ class DavidControlCenter:
     @staticmethod
     def _compose_growth_transparency_line() -> str:
         return "I am software evolving through stored lessons, reflections, and run outcomes."
+
+    @staticmethod
+    def _clamp_percent(value: Any, default: int = 50) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = default
+        return max(0, min(100, parsed))
+
+    @staticmethod
+    def _is_web_actor(actor: str) -> bool:
+        return str(actor or "").strip().casefold().startswith("web")
+
+    def _companion_personality(self, actor: str) -> dict[str, Any]:
+        if not self._is_web_actor(actor):
+            return {
+                "enabled": False,
+                "warmth": 55,
+                "verbosity": 55,
+                "curiosity": 50,
+            }
+        return {
+            "enabled": True,
+            "warmth": self._clamp_percent(self.settings.personality_warmth, 55),
+            "verbosity": self._clamp_percent(self.settings.personality_verbosity, 55),
+            "curiosity": self._clamp_percent(self.settings.personality_curiosity, 50),
+        }
+
+    @staticmethod
+    def _level_bucket(level: int) -> str:
+        if level <= 33:
+            return "low"
+        if level >= 67:
+            return "high"
+        return "mid"
+
+    @classmethod
+    def _warmth_tone_line(cls, warmth: int) -> str:
+        bucket = cls._level_bucket(warmth)
+        if bucket == "low":
+            return "I will keep this concise and professional."
+        if bucket == "high":
+            return "Yay, you are doing great. I will keep cheering each small step."
+        return "I will keep this clear and steady."
+
+    @classmethod
+    def _curiosity_follow_up_lines(cls, curiosity: int, default_prompt: str) -> list[str]:
+        bucket = cls._level_bucket(curiosity)
+        if bucket == "low":
+            return []
+        if bucket == "high":
+            return [default_prompt, "I can also ask a quick check question if you want."]
+        return [default_prompt]
 
     def _session_has_assistant_turn(self, session_id: str) -> bool:
         clean_session = self._sanitize_session_id(session_id)
@@ -2124,6 +3150,195 @@ class DavidControlCenter:
             )
         return citations
 
+    @staticmethod
+    def _memory_insight_predicate_label(predicate: str) -> str:
+        text = str(predicate or "").strip().replace("_", " ")
+        if not text:
+            return "Fact"
+        return text[:1].upper() + text[1:]
+
+    @staticmethod
+    def _memory_insight_join(parts: list[str]) -> str:
+        cleaned = [str(item).strip() for item in parts if str(item).strip()]
+        if not cleaned:
+            return ""
+        if len(cleaned) == 1:
+            return cleaned[0]
+        if len(cleaned) == 2:
+            return f"{cleaned[0]} and {cleaned[1]}"
+        return f"{', '.join(cleaned[:-1])}, and {cleaned[-1]}"
+
+    def _memory_insight_fact_index(self, fact: dict[str, Any], all_facts: list[dict[str, Any]]) -> int:
+        target_id = str(fact.get("id", "")).strip()
+        if target_id:
+            for idx, row in enumerate(all_facts, start=1):
+                if not isinstance(row, dict):
+                    continue
+                if str(row.get("id", "")).strip() == target_id:
+                    return idx
+        target_key = (
+            str(fact.get("subject", "")).strip().casefold(),
+            str(fact.get("predicate", "")).strip().casefold(),
+            str(fact.get("object", "")).strip().casefold(),
+        )
+        for idx, row in enumerate(all_facts, start=1):
+            if not isinstance(row, dict):
+                continue
+            row_key = (
+                str(row.get("subject", "")).strip().casefold(),
+                str(row.get("predicate", "")).strip().casefold(),
+                str(row.get("object", "")).strip().casefold(),
+            )
+            if row_key == target_key:
+                return idx
+        return 0
+
+    def _memory_insight_lesson_index(self, lesson: dict[str, Any], all_lessons: list[dict[str, Any]]) -> int:
+        target_key = (
+            str(lesson.get("timestamp_utc", "")).strip(),
+            str(lesson.get("lesson", "")).strip(),
+            str(lesson.get("goal", "")).strip(),
+        )
+        for idx, row in enumerate(all_lessons, start=1):
+            if not isinstance(row, dict):
+                continue
+            row_key = (
+                str(row.get("timestamp_utc", "")).strip(),
+                str(row.get("lesson", "")).strip(),
+                str(row.get("goal", "")).strip(),
+            )
+            if row_key == target_key:
+                return idx
+        return 0
+
+    def _memory_insight_conversation_index(
+        self,
+        conversation: dict[str, Any],
+        all_conversations: list[dict[str, Any]],
+    ) -> int:
+        target_id = str(conversation.get("message_id", "")).strip()
+        if target_id:
+            for idx, row in enumerate(all_conversations, start=1):
+                if not isinstance(row, dict):
+                    continue
+                if str(row.get("message_id", "")).strip() == target_id:
+                    return idx
+        target_key = (
+            str(conversation.get("session_id", "")).strip(),
+            str(conversation.get("timestamp_utc", "")).strip(),
+            str(conversation.get("text", "")).strip(),
+        )
+        for idx, row in enumerate(all_conversations, start=1):
+            if not isinstance(row, dict):
+                continue
+            row_key = (
+                str(row.get("session_id", "")).strip(),
+                str(row.get("timestamp_utc", "")).strip(),
+                str(row.get("text", "")).strip(),
+            )
+            if row_key == target_key:
+                return idx
+        return 0
+
+    def _memory_insight_conversation_label(self, conversation: dict[str, Any]) -> str:
+        timestamp = self._parse_timestamp(conversation.get("timestamp_utc", ""))
+        if timestamp is not None:
+            return f"Summary from {timestamp.strftime('%B')} {timestamp.day}, {timestamp.year}"
+        return "Conversation summary"
+
+    def _build_memory_insight(
+        self,
+        *,
+        enabled: bool,
+        matched_facts: list[dict[str, Any]],
+        matched_conversations: list[dict[str, Any]],
+        matched_lessons: list[dict[str, Any]],
+        facts_source: list[dict[str, Any]],
+        conversations_source: list[dict[str, Any]],
+        lessons_source: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        if not enabled:
+            return {
+                "enabled": False,
+                "summary": "Memory Insight Mode is disabled.",
+                "influences": [],
+            }
+
+        influences: list[dict[str, Any]] = []
+        summary_items: list[str] = []
+
+        for row in matched_facts[:5]:
+            idx = self._memory_insight_fact_index(row, facts_source)
+            if idx <= 0:
+                continue
+            predicate = str(row.get("predicate", "")).strip()
+            label = self._memory_insight_predicate_label(predicate)
+            subject = str(row.get("subject", "")).strip() or "User"
+            object_value = str(row.get("object", "")).strip()
+            detail = f"{subject}.{predicate or 'fact'} = {object_value}" if object_value else f"{subject}.{predicate or 'fact'}"
+            influences.append(
+                {
+                    "type": "fact",
+                    "reference": f"Fact #{idx}",
+                    "index": idx,
+                    "label": label,
+                    "detail": detail,
+                    "timestamp": row.get("timestamp", row.get("last_updated", "")),
+                }
+            )
+            summary_items.append(f"Fact #{idx} ({label})")
+
+        for row in matched_lessons[:3]:
+            idx = self._memory_insight_lesson_index(row, lessons_source)
+            if idx <= 0:
+                continue
+            lesson_text = str(row.get("lesson", "")).strip()
+            label = lesson_text[:96] + ("..." if len(lesson_text) > 96 else "")
+            influences.append(
+                {
+                    "type": "lesson",
+                    "reference": f"Lesson #{idx}",
+                    "index": idx,
+                    "label": label or "Lesson memory",
+                    "detail": lesson_text,
+                    "timestamp": row.get("timestamp_utc", ""),
+                }
+            )
+            summary_items.append(f"Lesson #{idx} ({label or 'Lesson memory'})")
+
+        for row in matched_conversations[:3]:
+            idx = self._memory_insight_conversation_index(row, conversations_source)
+            if idx <= 0:
+                continue
+            label = self._memory_insight_conversation_label(row)
+            excerpt = str(row.get("text", "")).strip()
+            influences.append(
+                {
+                    "type": "conversation",
+                    "reference": f"Conversation #{idx}",
+                    "index": idx,
+                    "label": label,
+                    "detail": excerpt[:220],
+                    "timestamp": row.get("timestamp_utc", ""),
+                    "session_id": row.get("session_id", ""),
+                }
+            )
+            summary_items.append(f"Conversation #{idx} ({label})")
+
+        if summary_items:
+            summary = (
+                "This answer was influenced by "
+                f"{self._memory_insight_join(summary_items)}."
+            )
+        else:
+            summary = "No matching facts, conversations, or lessons influenced this answer."
+
+        return {
+            "enabled": True,
+            "summary": summary,
+            "influences": influences,
+        }
+
     def _compose_companion_ask_answer(
         self,
         *,
@@ -2133,12 +3348,19 @@ class DavidControlCenter:
         matched_lessons: list[dict[str, Any]],
         matched_values: list[dict[str, Any]],
         matched_projects: list[dict[str, Any]],
+        personality_enabled: bool,
+        warmth: int,
+        verbosity: int,
+        curiosity: int,
         force_transparency: bool,
     ) -> str:
         family_context = self._is_family_context(question)
         grief_context = self._is_grief_context(question)
         crisis_context = self._is_crisis_context(question)
         growth_context = self._is_growth_context(question)
+        verbosity_bucket = self._level_bucket(verbosity)
+        include_extended = verbosity_bucket != "low"
+        include_extra = verbosity_bucket == "high"
 
         parts: list[str] = []
         if matched_projects:
@@ -2154,11 +3376,11 @@ class DavidControlCenter:
             if lesson_text:
                 parts.append(f"You once told me this lesson: {lesson_text}.")
 
-        if matched_lessons:
+        if matched_lessons and include_extended:
             lesson_text = str(matched_lessons[0].get("lesson", "")).strip()
             if lesson_text:
                 parts.append(f"I also learned from earlier lessons: {lesson_text}.")
-        if matched_values:
+        if matched_values and (include_extended or not matched_lessons):
             value = matched_values[0]
             principle = str(value.get("principle", "")).strip()
             category_label = str(value.get("category_label", "")).strip() or self._teaching_category_label(
@@ -2166,9 +3388,17 @@ class DavidControlCenter:
             )
             if principle:
                 parts.append(f"I apply a taught {category_label.lower()} principle here: {principle}.")
+        if include_extra and len(matched_projects) > 1:
+            second = matched_projects[1]
+            secondary_slug = str(second.get("project_slug", "")).strip() or str(second.get("project_relative_path", "")).strip()
+            if secondary_slug:
+                parts.append(f"I also found related context in `{secondary_slug}`.")
 
         if not parts:
             parts.append(MEMORY_UNKNOWN_ANSWER)
+
+        if personality_enabled and (include_extended or self._level_bucket(warmth) != "mid"):
+            parts.append(self._warmth_tone_line(warmth))
 
         if crisis_context:
             parts.append(self._compose_crisis_support_line())
@@ -2177,6 +3407,9 @@ class DavidControlCenter:
         elif growth_context:
             parts.append(self._compose_growth_reference_line())
             parts.append(self._compose_growth_transparency_line())
+
+        if personality_enabled and not (crisis_context or grief_context):
+            parts.extend(self._curiosity_follow_up_lines(curiosity, "Would you like a short next-step suggestion?"))
 
         if force_transparency or family_context or grief_context or crisis_context:
             parts.append(self._compose_ai_transparency_line())
@@ -2188,6 +3421,7 @@ class DavidControlCenter:
         message: str,
         *,
         session_id: str,
+        actor: str,
         force_transparency: bool,
     ) -> dict[str, Any]:
         payload = self._read_memory_payload()
@@ -2207,6 +3441,19 @@ class DavidControlCenter:
             query_text=message,
             limit=2,
         )
+        conversation_source = [
+            row
+            for row in self._read_jsonl(self._conversations_file, limit=20_000)
+            if isinstance(row, dict) and str(row.get("role", "")) == "user"
+        ]
+        personality = self._companion_personality(actor)
+        personality_enabled = bool(personality.get("enabled", False))
+        warmth = int(personality.get("warmth", 55))
+        verbosity = int(personality.get("verbosity", 55))
+        curiosity = int(personality.get("curiosity", 50))
+        verbosity_bucket = self._level_bucket(verbosity)
+        include_extended = verbosity_bucket != "low"
+        include_extra = verbosity_bucket == "high"
 
         family_context = self._is_family_context(message)
         grief_context = self._is_grief_context(message)
@@ -2219,7 +3466,8 @@ class DavidControlCenter:
             lines.append(self._compose_project_brain_overview_line(matched_projects[0]))
         elif matched_facts:
             lines.append(self._fact_memory_sentence(matched_facts[0]))
-            lines.append("I am learning from what you gently teach me.")
+            if include_extended:
+                lines.append("I am learning from what you gently teach me.")
         elif matched_lessons:
             lesson_text = str(matched_lessons[0].get("lesson", "")).strip()
             if lesson_text:
@@ -2237,7 +3485,16 @@ class DavidControlCenter:
             if excerpt:
                 lines.append(f"You once told me: {excerpt}")
         else:
-            lines.append("I am here with you in the Dashboard, listening and learning.")
+            if personality_enabled and self._level_bucket(warmth) == "high":
+                lines.append("I am here with bright energy in your Dashboard, ready to help you learn.")
+            else:
+                lines.append("I am here with you in the Dashboard, listening and learning.")
+
+        if include_extra and len(matched_projects) > 1:
+            second = matched_projects[1]
+            secondary_slug = str(second.get("project_slug", "")).strip() or str(second.get("project_relative_path", "")).strip()
+            if secondary_slug:
+                lines.append(f"I also found related history in `{secondary_slug}`.")
 
         if crisis_context:
             lines.append(self._compose_crisis_support_line())
@@ -2247,7 +3504,18 @@ class DavidControlCenter:
             lines.append(self._compose_growth_reference_line())
             lines.append(self._compose_growth_transparency_line())
 
-        lines.append("Would you like to teach me one small memory or ask me a gentle question?")
+        if personality_enabled and (include_extended or self._level_bucket(warmth) != "mid"):
+            lines.append(self._warmth_tone_line(warmth))
+
+        if personality_enabled:
+            lines.extend(
+                self._curiosity_follow_up_lines(
+                    curiosity,
+                    "Would you like to teach me one small memory or ask me a gentle question?",
+                )
+            )
+        else:
+            lines.append("Would you like to teach me one small memory or ask me a gentle question?")
 
         if force_transparency or family_context or grief_context or crisis_context:
             lines.append(self._compose_ai_transparency_line())
@@ -2271,6 +3539,15 @@ class DavidControlCenter:
                 "values": matched_values[:3],
                 "projects": matched_projects[:2],
             },
+            "memory_insight": self._build_memory_insight(
+                enabled=bool(self.settings.memory_insight_mode and self._is_web_actor(actor)),
+                matched_facts=matched_facts,
+                matched_conversations=matched_conversations,
+                matched_lessons=matched_lessons,
+                facts_source=facts,
+                conversations_source=conversation_source,
+                lessons_source=lessons,
+            ),
             "matched_facts": matched_facts,
             "matched_conversations": matched_conversations,
             "matched_lessons": matched_lessons,
@@ -3648,6 +4925,12 @@ class DavidControlCenter:
             query_text=question,
             limit=2,
         )
+        conversation_source = [
+            row
+            for row in self._read_jsonl(self._conversations_file, limit=20_000)
+            if isinstance(row, dict) and str(row.get("role", "")) == "user"
+        ]
+        personality = self._companion_personality(actor)
 
         if not self.settings.companion_mode:
             answer = MEMORY_UNKNOWN_ANSWER
@@ -3684,6 +4967,15 @@ class DavidControlCenter:
                 values=matched_values,
                 projects=matched_projects,
             )
+            memory_insight = self._build_memory_insight(
+                enabled=bool(self.settings.memory_insight_mode and self._is_web_actor(actor)),
+                matched_facts=matched_facts,
+                matched_conversations=matched_conversations,
+                matched_lessons=[],
+                facts_source=facts,
+                conversations_source=conversation_source,
+                lessons_source=[],
+            )
             return {
                 "mode": "ask",
                 "status": "answered",
@@ -3700,6 +4992,7 @@ class DavidControlCenter:
                 "matched_projects": matched_projects,
                 "project_match_count": len(matched_projects),
                 "citations": citations,
+                "memory_insight": memory_insight,
                 "used_memory": {
                     "facts": matched_facts[:5],
                     "conversations": matched_conversations[:3],
@@ -3718,6 +5011,10 @@ class DavidControlCenter:
             matched_lessons=matched_lessons,
             matched_values=matched_values,
             matched_projects=matched_projects,
+            personality_enabled=bool(personality.get("enabled", False)),
+            warmth=int(personality.get("warmth", 55)),
+            verbosity=int(personality.get("verbosity", 55)),
+            curiosity=int(personality.get("curiosity", 50)),
             force_transparency=force_transparency,
         )
         citations = self._build_memory_citations(
@@ -3726,6 +5023,15 @@ class DavidControlCenter:
             lessons=matched_lessons,
             values=matched_values,
             projects=matched_projects,
+        )
+        memory_insight = self._build_memory_insight(
+            enabled=bool(self.settings.memory_insight_mode and self._is_web_actor(actor)),
+            matched_facts=matched_facts,
+            matched_conversations=matched_conversations,
+            matched_lessons=matched_lessons,
+            facts_source=facts,
+            conversations_source=conversation_source,
+            lessons_source=lessons,
         )
 
         return {
@@ -3744,6 +5050,7 @@ class DavidControlCenter:
             "matched_projects": matched_projects,
             "project_match_count": len(matched_projects),
             "citations": citations,
+            "memory_insight": memory_insight,
             "used_memory": {
                 "facts": matched_facts[:5],
                 "conversations": matched_conversations[:3],
@@ -3829,6 +5136,14 @@ class DavidControlCenter:
                     self._upsert_project_brain_from_run(run_id)
                 except Exception:  # pragma: no cover - defensive boundary
                     self._logger.exception("project brain update failed run_id=%s", run_id)
+                try:
+                    self.autonomous_self_improvement_cycle(
+                        trigger="goal",
+                        trigger_id=run_id,
+                        actor="david_autonomous",
+                    )
+                except Exception:  # pragma: no cover - defensive boundary
+                    self._logger.exception("autonomous self-improvement cycle failed run_id=%s", run_id)
             with self._lock:
                 if self._active_run_id == run_id:
                     self._active_run_id = None
@@ -5355,14 +6670,34 @@ class DavidControlCenter:
         self.publish_event("logs", {"type": "workspace_path_renamed", "payload": payload})
         return payload
 
-    def _resolve_workspace_path(self, relative_path: str) -> tuple[Path, str]:
+    @staticmethod
+    def _normalize_relative_path(relative_path: str) -> str:
         raw = str(relative_path).replace("\\", "/").strip()
         cleaned = "/".join(part for part in raw.split("/") if part not in {"", "."})
         if not cleaned:
             raise ValueError("Path cannot be empty.")
         if cleaned.startswith("..") or "/.." in cleaned:
-            raise ValueError("Path escapes workspace boundary.")
+            raise ValueError("Path escapes allowed boundary.")
+        return cleaned
 
+    @classmethod
+    def _is_self_improvement_blocked_path(cls, relative_path: str) -> bool:
+        normalized = str(relative_path).replace("\\", "/").strip().casefold()
+        return normalized in SELF_IMPROVEMENT_BLOCKED_PATHS
+
+    def _resolve_project_file_path(self, relative_path: str) -> tuple[Path, str]:
+        cleaned = self._normalize_relative_path(relative_path)
+        if cleaned.startswith(".git/") or cleaned == ".git":
+            raise ValueError("Path targets Git metadata and is not allowed.")
+        target = (self.project_root / cleaned).resolve()
+        if target == self.project_root or self.project_root not in target.parents:
+            raise ValueError("Path escapes project boundary.")
+        if target.exists() and target.is_dir():
+            raise ValueError("Target path is a folder. Expected a file path.")
+        return target, cleaned
+
+    def _resolve_workspace_path(self, relative_path: str) -> tuple[Path, str]:
+        cleaned = self._normalize_relative_path(relative_path)
         workspace_root = self.config.workspace_dir.resolve()
         candidate = (workspace_root / cleaned).resolve()
         if candidate == workspace_root or workspace_root not in candidate.parents:
@@ -5419,6 +6754,96 @@ class DavidControlCenter:
     def _write_json(path: Path, payload: Any) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+    def _self_improvement_rows(self) -> list[dict[str, Any]]:
+        payload = self._read_json(self.self_improvements_file, default={"proposals": []})
+        if not isinstance(payload, dict):
+            payload = {}
+        proposals = payload.get("proposals", [])
+        if not isinstance(proposals, list):
+            proposals = []
+        rows = [row for row in proposals if isinstance(row, dict)]
+        if rows != proposals:
+            self._save_self_improvement_rows(rows)
+        return rows
+
+    def _save_self_improvement_rows(self, rows: list[dict[str, Any]]) -> None:
+        self._write_json(self.self_improvements_file, {"proposals": rows})
+
+    def _update_self_improvement_record(self, proposal: dict[str, Any]) -> None:
+        clean_id = str(proposal.get("id", "")).strip()
+        if not clean_id:
+            return
+        with self._lock:
+            rows = self._self_improvement_rows()
+            for idx, row in enumerate(rows):
+                if str(row.get("id", "")).strip() == clean_id:
+                    rows[idx] = proposal
+                    break
+            else:
+                rows.append(proposal)
+            self._save_self_improvement_rows(rows)
+
+        sandbox_dir_raw = str(proposal.get("sandbox_dir", "")).strip()
+        if not sandbox_dir_raw:
+            return
+        try:
+            sandbox_dir = Path(sandbox_dir_raw).resolve()
+        except (OSError, ValueError):
+            return
+        if sandbox_dir != self.agent_sandbox_root and self.agent_sandbox_root not in sandbox_dir.parents:
+            return
+        metadata_path = sandbox_dir / "metadata.json"
+        self._write_json(metadata_path, proposal)
+
+    def _merge_self_improvement_proposal(self, proposal: dict[str, Any], *, actor: str) -> dict[str, Any]:
+        changes = proposal.get("changes", [])
+        if not isinstance(changes, list) or not changes:
+            raise ValueError("Proposal has no file changes to merge.")
+
+        merged_paths: list[str] = []
+        for idx, row in enumerate(changes):
+            if not isinstance(row, dict):
+                raise ValueError(f"Invalid change entry at index {idx}.")
+            normalized = str(row.get("path", "")).strip()
+            if not normalized:
+                raise ValueError(f"Missing path for change index {idx}.")
+            if self._is_self_improvement_blocked_path(normalized):
+                raise ValueError(f"Blocked safety path: {normalized}")
+            target_path, normalized = self._resolve_project_file_path(normalized)
+            sandbox_file_raw = str(row.get("sandbox_file", "")).strip()
+            if not sandbox_file_raw:
+                raise ValueError(f"Missing sandbox file for change '{normalized}'.")
+            try:
+                sandbox_file = Path(sandbox_file_raw).resolve()
+            except (OSError, ValueError) as exc:
+                raise ValueError(f"Invalid sandbox file for '{normalized}': {exc}") from exc
+            if sandbox_file == self.agent_sandbox_root or self.agent_sandbox_root not in sandbox_file.parents:
+                raise ValueError(f"Sandbox file escaped sandbox root: {sandbox_file}")
+            if not sandbox_file.exists() or not sandbox_file.is_file():
+                raise ValueError(f"Sandbox prototype file missing: {sandbox_file}")
+            try:
+                content = sandbox_file.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise ValueError(f"Unable to read sandbox file '{sandbox_file}': {exc}") from exc
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                target_path.write_text(content, encoding="utf-8")
+            except OSError as exc:
+                raise ValueError(f"Unable to merge '{normalized}': {exc}") from exc
+            merged_paths.append(normalized)
+
+        merged_at = self._now_iso()
+        updated = dict(proposal)
+        updated["status"] = "merged"
+        updated["updated_at"] = merged_at
+        updated["merge"] = {
+            "merged_at": merged_at,
+            "actor": actor.strip() or "web_ui",
+            "file_count": len(merged_paths),
+            "paths": merged_paths,
+        }
+        return updated
 
     @staticmethod
     def _read_jsonl(path: Path, limit: int) -> list[dict[str, Any]]:
@@ -5488,6 +6913,15 @@ class DavidControlCenter:
     def _now_iso() -> str:
         return datetime.now(timezone.utc).isoformat()
 
+    def _normalize_iso_timestamp(self, value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return self._now_iso()
+        parsed = self._parse_timestamp(text)
+        if parsed is None:
+            return self._now_iso()
+        return parsed.astimezone(timezone.utc).isoformat()
+
     @staticmethod
     def _sanitize_user_text(value: str, *, field_name: str, max_chars: int = 4_000) -> str:
         text = str(value).replace("\x00", "").strip()
@@ -5496,6 +6930,24 @@ class DavidControlCenter:
         if len(text) > max_chars:
             raise ValueError(f"{field_name} exceeds max length ({max_chars} chars).")
         return text
+
+    @staticmethod
+    def _sanitize_json_metadata(value: Any, *, max_chars: int = 20_000) -> dict[str, Any]:
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise ValueError("metadata must be an object.")
+        try:
+            normalized_text = json.dumps(value, ensure_ascii=True, sort_keys=True)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"metadata is not JSON serializable: {exc}") from exc
+        if len(normalized_text) > max_chars:
+            raise ValueError(f"metadata exceeds max length ({max_chars} chars).")
+        try:
+            normalized = json.loads(normalized_text)
+        except json.JSONDecodeError as exc:  # pragma: no cover - defensive
+            raise ValueError(f"metadata normalization failed: {exc}") from exc
+        return normalized if isinstance(normalized, dict) else {}
 
 
 def create_control_center(config: AgentConfig | None = None, data_root: Path | None = None) -> DavidControlCenter:

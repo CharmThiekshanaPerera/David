@@ -11,6 +11,8 @@ const state = {
   selectedRunFiles: null,
   telemetry: null,
   growthData: null,
+  legacyArchive: null,
+  selfImprovements: null,
   settings: null,
   logs: null,
   approvals: [],
@@ -98,6 +100,13 @@ const el = {
   growthTimeline: document.getElementById("growthTimeline"),
   growthMilestoneDetails: document.getElementById("growthMilestoneDetails"),
   growthRefreshBtn: document.getElementById("growthRefreshBtn"),
+  legacySummary: document.getElementById("legacySummary"),
+  legacyPanel: document.getElementById("legacyPanel"),
+  legacyRefreshBtn: document.getElementById("legacyRefreshBtn"),
+  selfImproveSummary: document.getElementById("selfImproveSummary"),
+  selfImprovePanel: document.getElementById("selfImprovePanel"),
+  selfImproveAutoBtn: document.getElementById("selfImproveAutoBtn"),
+  selfImproveRefreshBtn: document.getElementById("selfImproveRefreshBtn"),
   previewSummary: document.getElementById("previewSummary"),
   fileTree: document.getElementById("fileTree"),
   filePreview: document.getElementById("filePreview"),
@@ -138,7 +147,15 @@ const el = {
   settingMultiFile: document.getElementById("settingMultiFile"),
   settingPreviewDefault: document.getElementById("settingPreviewDefault"),
   settingCompanionMode: document.getElementById("settingCompanionMode"),
+  settingMemoryInsightMode: document.getElementById("settingMemoryInsightMode"),
   settingParentTeachingMode: document.getElementById("settingParentTeachingMode"),
+  settingAutonomousSelfImproveMode: document.getElementById("settingAutonomousSelfImproveMode"),
+  settingPersonalityWarmth: document.getElementById("settingPersonalityWarmth"),
+  settingPersonalityVerbosity: document.getElementById("settingPersonalityVerbosity"),
+  settingPersonalityCuriosity: document.getElementById("settingPersonalityCuriosity"),
+  settingPersonalityWarmthValue: document.getElementById("settingPersonalityWarmthValue"),
+  settingPersonalityVerbosityValue: document.getElementById("settingPersonalityVerbosityValue"),
+  settingPersonalityCuriosityValue: document.getElementById("settingPersonalityCuriosityValue"),
   settingPlannerModel: document.getElementById("settingPlannerModel"),
   settingCoderModel: document.getElementById("settingCoderModel"),
   settingCriticModel: document.getElementById("settingCriticModel"),
@@ -625,6 +642,12 @@ function renderChatHistory() {
         : Array.isArray(row.meta?.response?.citations)
         ? row.meta.response.citations
         : [];
+      const memoryInsight =
+        row.meta?.memory_insight && typeof row.meta.memory_insight === "object"
+          ? row.meta.memory_insight
+          : row.meta?.response?.memory_insight && typeof row.meta.response.memory_insight === "object"
+          ? row.meta.response.memory_insight
+          : null;
       const conflictHtml = conflictRows.length
         ? `<ul>${conflictRows
             .map(
@@ -640,6 +663,25 @@ function renderChatHistory() {
             .map((c) => `<span class="chip">[${escapeHtml(c.type || "memory")}] ${escapeHtml(c.subject || c.excerpt || c.object || c.id || "")}</span>`)
             .join("")}</div>`
         : "";
+      const insightRows = Array.isArray(memoryInsight?.influences) ? memoryInsight.influences : [];
+      const insightSummary = String(memoryInsight?.summary || "").trim();
+      const insightHtml =
+        memoryInsight && (insightSummary || insightRows.length)
+          ? `<details class="memory-fact-row"><summary><strong>Memory Insight</strong></summary><div>${
+              insightSummary ? escapeHtml(insightSummary) : "No memory influences recorded."
+            }</div>${
+              insightRows.length
+                ? `<div class="stack">${insightRows
+                    .map(
+                      (item) =>
+                        `<div><strong>${escapeHtml(item.reference || item.type || "Memory")}</strong>: ${escapeHtml(
+                          item.label || "-"
+                        )}<br/><span class="muted">${escapeHtml(item.detail || "")}</span></div>`
+                    )
+                    .join("")}</div>`
+                : ""
+            }</details>`
+          : "";
       const showQuickActions = kind === "ask" || kind === "teach" || kind === "system";
       const quickActions = showQuickActions
         ? `<div class="chat-chips"><button type="button" class="chip-btn" data-chat-chip="save-memory" data-chat-text="${escapeHtml(
@@ -648,7 +690,11 @@ function renderChatHistory() {
             row.text
           )}">Ask a follow-up</button><button type="button" class="chip-btn" data-chat-chip="teach-refine" data-chat-text="${escapeHtml(
             row.text
-          )}">Teach refinement</button></div>`
+          )}">Teach refinement</button><button type="button" class="chip-btn" data-chat-chip="mark-legacy" data-chat-text="${escapeHtml(
+            row.text
+          )}" data-chat-id="${escapeHtml(messageId)}" data-chat-kind="${escapeHtml(kind)}" data-chat-session="${escapeHtml(
+            row.session_id || ""
+          )}">Mark Significant</button></div>`
         : "";
       return `
         <div class="chat-row ${escapeHtml(alignment)}">
@@ -659,6 +705,7 @@ function renderChatHistory() {
             <div class="chat-text">${escapeHtml(row.text)}</div>
             ${conflictHtml}
             ${citationsHtml}
+            ${insightHtml}
             ${quickActions}
           </div>
         </div>
@@ -709,6 +756,77 @@ function kvList(target, entries) {
   target.innerHTML = entries
     .map(([k, v]) => `<li><span class="k">${escapeHtml(k)}</span><span>${escapeHtml(v)}</span></li>`)
     .join("");
+}
+
+function clampPercent(value, fallback = 50) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(0, Math.min(100, Math.round(parsed)));
+}
+
+function calibrationDescriptor(kind, value) {
+  const score = clampPercent(value, 50);
+  const bucket = score <= 33 ? "low" : score >= 67 ? "high" : "medium";
+  if (kind === "warmth") {
+    if (bucket === "low") return `${score} · concise/professional`;
+    if (bucket === "high") return `${score} · playful/encouraging`;
+    return `${score} · steady/friendly`;
+  }
+  if (kind === "verbosity") {
+    if (bucket === "low") return `${score} · brief responses`;
+    if (bucket === "high") return `${score} · detailed responses`;
+    return `${score} · balanced length`;
+  }
+  if (bucket === "low") return `${score} · fewer follow-ups`;
+  if (bucket === "high") return `${score} · frequent follow-ups`;
+  return `${score} · occasional follow-ups`;
+}
+
+function renderPersonalityCalibrationLabels() {
+  const warmth = clampPercent(el.settingPersonalityWarmth?.value, 55);
+  const verbosity = clampPercent(el.settingPersonalityVerbosity?.value, 55);
+  const curiosity = clampPercent(el.settingPersonalityCuriosity?.value, 50);
+  if (el.settingPersonalityWarmthValue) {
+    el.settingPersonalityWarmthValue.textContent = calibrationDescriptor("warmth", warmth);
+  }
+  if (el.settingPersonalityVerbosityValue) {
+    el.settingPersonalityVerbosityValue.textContent = calibrationDescriptor("verbosity", verbosity);
+  }
+  if (el.settingPersonalityCuriosityValue) {
+    el.settingPersonalityCuriosityValue.textContent = calibrationDescriptor("curiosity", curiosity);
+  }
+}
+
+function summarizeText(value, maxLen = 180) {
+  const text = String(value || "").trim().replace(/\s+/g, " ");
+  if (!text) return "";
+  if (text.length <= maxLen) return text;
+  return `${text.slice(0, Math.max(0, maxLen - 3)).trim()}...`;
+}
+
+async function markLegacyMoment(payload) {
+  const cleanPayload = payload && typeof payload === "object" ? payload : {};
+  const summary = summarizeText(cleanPayload.summary || "");
+  if (!summary) {
+    throw new Error("A summary is required to mark a Significant Moment.");
+  }
+  const body = {
+    source_type: String(cleanPayload.source_type || "manual"),
+    source_id: String(cleanPayload.source_id || ""),
+    summary,
+    details: summarizeText(cleanPayload.details || cleanPayload.summary || "", 1800),
+    timestamp_utc: String(cleanPayload.timestamp_utc || new Date().toISOString()),
+    metadata: cleanPayload.metadata && typeof cleanPayload.metadata === "object" ? cleanPayload.metadata : {},
+    actor: "web_ui",
+  };
+  const saved = await api("/api/legacy_archive", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  showToast("Saved to Legacy Archive.");
+  await refreshLegacyArchive().catch(() => {});
+  await refreshStatus().catch(() => {});
+  return saved;
 }
 
 function showToast(text) {
@@ -1023,6 +1141,7 @@ function renderStatus() {
     ["Last command", s.last_command || "-"],
     ["Latest success", fmtBool(s.latest_success)],
     ["Pending approvals", s.pending_approvals || 0],
+    ["Legacy archive entries", s.legacy_archive_count || 0],
     ["Safe mode", fmtBool(s.safe_mode)],
   ]);
 
@@ -1598,9 +1717,30 @@ function renderMemoryConversationsPanel() {
         <div><span class="muted">Role/Intent:</span> ${escapeHtml(row.role || "-")} / ${escapeHtml(row.intent || "-")}</div>
         <div>${escapeHtml(row.text || "")}</div>
         <div><span class="muted">When:</span> ${escapeHtml(fmtDate(row.timestamp_utc || ""))}</div>
+        <div class="row"><button type="button" class="ghost" data-legacy-convo="${escapeHtml(
+          row.message_id || row.timestamp_utc || ""
+        )}" data-legacy-summary="${escapeHtml(row.text || "")}" data-legacy-session="${escapeHtml(
+          row.session_id || ""
+        )}" data-legacy-ts="${escapeHtml(row.timestamp_utc || "")}">Mark Significant</button></div>
       </div>`
     )
     .join("");
+  el.memoryPanelConversations.querySelectorAll("button[data-legacy-convo]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      try {
+        await markLegacyMoment({
+          source_type: "conversation",
+          source_id: String(button.getAttribute("data-legacy-convo") || ""),
+          summary: String(button.getAttribute("data-legacy-summary") || ""),
+          details: String(button.getAttribute("data-legacy-summary") || ""),
+          timestamp_utc: String(button.getAttribute("data-legacy-ts") || ""),
+          metadata: { session_id: String(button.getAttribute("data-legacy-session") || "") },
+        });
+      } catch (err) {
+        setMessage(err.message);
+      }
+    });
+  });
 }
 
 function renderMemoryLessonsPanel() {
@@ -1626,9 +1766,27 @@ function renderMemoryLessonsPanel() {
         <div><strong>${escapeHtml(row.lesson || "")}</strong></div>
         <div><span class="muted">Goal:</span> ${escapeHtml(row.goal || "-")}</div>
         <div><span class="muted">Tags:</span> ${escapeHtml((row.tags || []).join(", ") || "-")}</div>
+        <div class="row"><button type="button" class="ghost" data-legacy-lesson="${escapeHtml(
+          row.timestamp_utc || row.lesson || ""
+        )}" data-legacy-summary="${escapeHtml(row.lesson || "")}" data-legacy-goal="${escapeHtml(row.goal || "")}">Mark Significant</button></div>
       </div>`
     )
     .join("");
+  el.memoryPanelLessons.querySelectorAll("button[data-legacy-lesson]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      try {
+        await markLegacyMoment({
+          source_type: "lesson",
+          source_id: String(button.getAttribute("data-legacy-lesson") || ""),
+          summary: String(button.getAttribute("data-legacy-summary") || ""),
+          details: `Goal: ${String(button.getAttribute("data-legacy-goal") || "-")}`,
+          metadata: { panel: "lessons" },
+        });
+      } catch (err) {
+        setMessage(err.message);
+      }
+    });
+  });
 }
 
 function renderMemoryValuesPanel() {
@@ -1653,9 +1811,29 @@ function renderMemoryValuesPanel() {
         <div><span class="muted">Principle:</span> ${escapeHtml(row.principle || "-")}</div>
         <div><span class="muted">Application:</span> ${escapeHtml(row.application || "-")}</div>
         <div><span class="muted">When:</span> ${escapeHtml(fmtDate(row.timestamp_utc || ""))}</div>
+        <div class="row"><button type="button" class="ghost" data-legacy-value="${escapeHtml(
+          row.timestamp_utc || row.principle || ""
+        )}" data-legacy-principle="${escapeHtml(row.principle || "")}" data-legacy-application="${escapeHtml(
+          row.application || ""
+        )}">Mark Significant</button></div>
       </div>`
     )
     .join("");
+  el.memoryPanelValues.querySelectorAll("button[data-legacy-value]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      try {
+        await markLegacyMoment({
+          source_type: "teaching",
+          source_id: String(button.getAttribute("data-legacy-value") || ""),
+          summary: String(button.getAttribute("data-legacy-principle") || ""),
+          details: String(button.getAttribute("data-legacy-application") || ""),
+          metadata: { panel: "values" },
+        });
+      } catch (err) {
+        setMessage(err.message);
+      }
+    });
+  });
 }
 
 function renderMemoryReflectionsPanel() {
@@ -1688,11 +1866,32 @@ function renderExplainWhy() {
   if (!el.memoryExplainView) return;
   const data = state.lastExplainWhy || {};
   const citations = Array.isArray(data.citations) ? data.citations : [];
-  if (!citations.length) {
+  const memoryInsight =
+    data.memory_insight && typeof data.memory_insight === "object" ? data.memory_insight : null;
+  const influences = Array.isArray(memoryInsight?.influences) ? memoryInsight.influences : [];
+  const insightSummary = String(memoryInsight?.summary || "").trim();
+  if (!citations.length && !influences.length && !insightSummary) {
     el.memoryExplainView.innerHTML = '<p class="muted">Ask a question to see cited memory facts and conversation evidence.</p>';
     return;
   }
-  el.memoryExplainView.innerHTML = citations
+  const insightHtml =
+    memoryInsight && (insightSummary || influences.length)
+      ? `<div class="memory-fact-row"><div><strong>Memory Insight</strong></div><div>${escapeHtml(
+          insightSummary || "No memory influences recorded."
+        )}</div>${
+          influences.length
+            ? `<div class="stack">${influences
+                .map(
+                  (item) =>
+                    `<div><strong>${escapeHtml(item.reference || item.type || "Memory")}</strong>: ${escapeHtml(
+                      item.label || "-"
+                    )}<br/><span class="muted">${escapeHtml(item.detail || "")}</span></div>`
+                )
+                .join("")}</div>`
+            : ""
+        }</div>`
+      : "";
+  const citationHtml = citations
     .map((item) => {
       if (item.type === "fact") {
         return `<div class="memory-fact-row"><div><code>${escapeHtml(item.subject || "")}.${escapeHtml(item.predicate || "")}</code> = ${escapeHtml(
@@ -1727,6 +1926,7 @@ function renderExplainWhy() {
       )}</div></div>`;
     })
     .join("");
+  el.memoryExplainView.innerHTML = `${insightHtml}${citationHtml}`;
 }
 
 function setMemoryPanelTab(tabName) {
@@ -1814,21 +2014,45 @@ function renderGrowthMilestoneDetails() {
   const selected =
     rows.find((item) => String(item?.id || "") === String(state.selectedGrowthMilestoneId || "")) || rows[rows.length - 1];
   state.selectedGrowthMilestoneId = String(selected?.id || "");
+  const selectedId = String(selected?.id || "");
   const learned = Array.isArray(selected?.learned) ? selected.learned : [];
   const metrics = selected?.metrics && typeof selected.metrics === "object" ? selected.metrics : {};
+  const raw = selected?.raw && typeof selected.raw === "object" ? selected.raw : {};
   el.growthMilestoneDetails.innerHTML = `
     <div class="memory-fact-row">
       <div><strong>${escapeHtml(selected?.title || "Milestone")}</strong></div>
       <div><span class="muted">When:</span> ${escapeHtml(fmtDate(selected?.timestamp_utc || ""))}</div>
       <div><span class="muted">Category:</span> ${escapeHtml(selected?.category || "-")}</div>
+      ${raw?.proposal_id ? `<div><span class="muted">Proposal:</span> ${escapeHtml(raw.proposal_id)}</div>` : ""}
+      ${raw?.status ? `<div><span class="muted">Proposal status:</span> ${escapeHtml(raw.status)}</div>` : ""}
+      ${raw?.trigger ? `<div><span class="muted">Trigger:</span> ${escapeHtml(raw.trigger)}</div>` : ""}
       <div><span class="muted">Details:</span> ${escapeHtml(selected?.details || "-")}</div>
       <div><span class="muted">Learned:</span> ${escapeHtml(learned.join(" | ") || "-")}</div>
       <div><span class="muted">Success rate:</span> ${escapeHtml(String(metrics.success_rate ?? "-"))}</div>
       <div><span class="muted">TDD successes:</span> ${escapeHtml(String(metrics.tdd_success_count ?? "-"))}</div>
       <div><span class="muted">Avg iterations until green:</span> ${escapeHtml(String(metrics.avg_iterations_until_green ?? "-"))}</div>
       <div><span class="muted">Memory size:</span> ${escapeHtml(String(metrics.memory_size_total ?? "-"))}</div>
+      <div class="row"><button type="button" class="ghost" data-growth-mark="${escapeHtml(selectedId)}">Mark Significant</button></div>
     </div>
   `;
+  const markBtn = el.growthMilestoneDetails.querySelector("button[data-growth-mark]");
+  markBtn?.addEventListener("click", async () => {
+    try {
+      await markLegacyMoment({
+        source_type: "milestone",
+        source_id: selectedId,
+        summary: summarizeText(selected?.title || "Milestone"),
+        details: summarizeText(`${selected?.details || ""} ${learned.join(" | ")}`, 1800),
+        timestamp_utc: String(selected?.timestamp_utc || ""),
+        metadata: {
+          category: selected?.category || "",
+          run_id: selected?.run_id || "",
+        },
+      });
+    } catch (err) {
+      setMessage(err.message);
+    }
+  });
 }
 
 function renderGrowthTimeline(data) {
@@ -1845,6 +2069,9 @@ function renderGrowthTimeline(data) {
     ["Avg iterations to green", summary.avg_iterations_until_green ?? "-"],
     ["Memory size", summary.memory_size_total ?? 0],
     ["Facts / Lessons / Reflections", `${summary.facts ?? 0} / ${summary.lessons ?? 0} / ${summary.reflections ?? 0}`],
+    ["Self-improvement proposals", summary.self_improvement_total ?? 0],
+    ["Autonomous proposals", summary.autonomous_self_improvement_total ?? 0],
+    ["Merged improvements", summary.self_improvement_merged ?? 0],
   ]);
 
   if (!state.selectedGrowthMilestoneId && milestones.length) {
@@ -1879,6 +2106,160 @@ function renderGrowthTimeline(data) {
   });
 
   renderGrowthMilestoneDetails();
+}
+
+function renderLegacyArchive(data) {
+  if (!el.legacyPanel || !el.legacySummary) return;
+  const payload = data && typeof data === "object" ? data : {};
+  state.legacyArchive = payload;
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  const boundaryNote = String(payload.boundary_note || "");
+  kvList(el.legacySummary, [
+    ["Significant moments", payload.total ?? items.length],
+    ["Archive note", boundaryNote || "-"],
+  ]);
+
+  if (!items.length) {
+    el.legacyPanel.innerHTML = '<p class="muted">No Significant Moments saved yet.</p>';
+    return;
+  }
+
+  el.legacyPanel.innerHTML = items
+    .map((item) => {
+      const entryId = String(item?.id || "");
+      const sourceType = String(item?.source_type || "manual");
+      const summary = String(item?.summary || "-");
+      const details = String(item?.details || "").trim();
+      const sourceId = String(item?.source_id || "").trim();
+      return `<div class="memory-fact-row">
+        <div><strong>${escapeHtml(summary)}</strong></div>
+        <div><span class="muted">Kind:</span> ${escapeHtml(sourceType)} · <span class="muted">When:</span> ${escapeHtml(
+          fmtDate(item?.timestamp_utc || item?.recorded_at || "")
+        )}</div>
+        ${sourceId ? `<div><span class="muted">Source ID:</span> <code>${escapeHtml(sourceId)}</code></div>` : ""}
+        ${details ? `<div>${escapeHtml(details)}</div>` : ""}
+        <div class="row"><button type="button" class="ghost" data-legacy-remove="${escapeHtml(entryId)}">Remove</button></div>
+      </div>`;
+    })
+    .join("");
+
+  el.legacyPanel.querySelectorAll("button[data-legacy-remove]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const entryId = String(button.getAttribute("data-legacy-remove") || "").trim();
+      if (!entryId) return;
+      try {
+        await api(`/api/legacy_archive/${encodeURIComponent(entryId)}/remove`, {
+          method: "POST",
+          body: JSON.stringify({ actor: "web_ui" }),
+        });
+        showToast("Removed from Legacy Archive.");
+        await refreshLegacyArchive();
+      } catch (err) {
+        setMessage(err.message);
+      }
+    });
+  });
+}
+
+function renderSelfImprovements(data) {
+  if (!el.selfImprovePanel || !el.selfImproveSummary) return;
+  const payload = data && typeof data === "object" ? data : {};
+  state.selfImprovements = payload;
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  const pendingCount = Number(payload.pending_count || 0);
+  const mergedCount = Number(payload.merged_count || 0);
+  const autonomousCount = Number(payload.autonomous_count || 0);
+  const sandboxRoot = String(payload.sandbox_root || "-");
+
+  kvList(el.selfImproveSummary, [
+    ["Total proposals", payload.total ?? items.length],
+    ["Pending approvals", pendingCount],
+    ["Merged", mergedCount],
+    ["Autonomous proposals", autonomousCount],
+    ["Sandbox root", sandboxRoot],
+  ]);
+
+  if (!items.length) {
+    el.selfImprovePanel.innerHTML = '<p class="muted">No proposed improvements yet.</p>';
+    return;
+  }
+
+  el.selfImprovePanel.innerHTML = items
+    .map((item) => {
+      const status = String(item?.status || "pending");
+      const canDecide = status === "pending";
+      const changes = Array.isArray(item?.changes) ? item.changes : [];
+      const decision = item?.decision && typeof item.decision === "object" ? item.decision : {};
+      const merge = item?.merge && typeof item.merge === "object" ? item.merge : {};
+      const metadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
+      const rationale = String(item?.rationale || "").trim();
+      const trigger = String(metadata?.trigger || "manual");
+      const signalCodes = Array.isArray(metadata?.signal_codes) ? metadata.signal_codes.map((code) => String(code || "").trim()).filter(Boolean) : [];
+      const analysisSummary = String(metadata?.analysis_summary || "").trim();
+      const autonomous = metadata?.autonomous === true || String(item?.actor || "").toLowerCase().startsWith("david_autonomous");
+      const changeHtml = changes.length
+        ? changes
+            .map((change) => {
+              const patch = String(change?.patch || "");
+              const path = String(change?.path || "-");
+              const badge = change?.change_type || "edited";
+              return `<details class="diff-block"><summary>${escapeHtml(path)} (+${escapeHtml(
+                change?.added ?? 0
+              )} / -${escapeHtml(change?.removed ?? 0)}) <span class="badge ${escapeHtml(badge)}">${escapeHtml(badge)}</span></summary><pre class="code">${
+                patch ? formatDiffPatch(patch) : escapeHtml("[no diff preview]")
+              }</pre></details>`;
+            })
+            .join("")
+        : '<p class="muted">No change details found.</p>';
+      return `<div class="approval">
+        <div><strong>${escapeHtml(item?.title || "Untitled proposal")}</strong></div>
+        <div class="muted">status=${escapeHtml(status)} · created=${escapeHtml(fmtDate(item?.created_at || ""))}</div>
+        <div class="muted">source=${escapeHtml(autonomous ? "autonomous_cycle" : "manual")} · trigger=${escapeHtml(trigger)} · actor=${escapeHtml(item?.actor || "-")}</div>
+        <div>${escapeHtml(item?.summary || "-")}</div>
+        ${analysisSummary ? `<div><span class="muted">Reasoning:</span> ${escapeHtml(analysisSummary)}</div>` : ""}
+        ${signalCodes.length ? `<div><span class="muted">Signals:</span> ${escapeHtml(signalCodes.join(" | "))}</div>` : ""}
+        ${rationale ? `<details><summary>Reasoning summary</summary><pre class="code">${escapeHtml(rationale)}</pre></details>` : ""}
+        <div class="muted">sandbox=${escapeHtml(item?.sandbox_dir || "-")}</div>
+        <div class="stack">${changeHtml}</div>
+        ${
+          canDecide
+            ? `<input data-self-improve-note="${escapeHtml(item?.id || "")}" type="text" placeholder="review note (optional)" />
+               <div class="row">
+                 <button data-self-improve-id="${escapeHtml(item?.id || "")}" data-self-improve-decision="approve">Approve & Merge</button>
+                 <button data-self-improve-id="${escapeHtml(item?.id || "")}" data-self-improve-decision="reject" class="danger">Reject</button>
+               </div>`
+            : `<div class="muted">Decision: ${escapeHtml(decision?.decision || "-")} by ${escapeHtml(
+                decision?.actor || "-"
+              )} at ${escapeHtml(fmtDate(decision?.decided_at || ""))}</div>
+               <div class="muted">Merge: ${escapeHtml(merge?.merged_at ? fmtDate(merge.merged_at) : "-")}</div>`
+        }
+      </div>`;
+    })
+    .join("");
+
+  el.selfImprovePanel.querySelectorAll("button[data-self-improve-id]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const proposalId = String(button.getAttribute("data-self-improve-id") || "").trim();
+      const decision = String(button.getAttribute("data-self-improve-decision") || "").trim();
+      if (!proposalId || !decision) return;
+      const noteInput = el.selfImprovePanel.querySelector(`input[data-self-improve-note="${proposalId}"]`);
+      try {
+        await api(`/api/self_improvements/${encodeURIComponent(proposalId)}/decision`, {
+          method: "POST",
+          body: JSON.stringify({
+            decision,
+            actor: "web_ui",
+            note: noteInput?.value || "",
+          }),
+        });
+        showToast(`Proposal ${decision}: ${proposalId}`);
+        await refreshSelfImprovements();
+        await refreshStatus().catch(() => {});
+      } catch (err) {
+        setMessage(err.message);
+      }
+    });
+  });
 }
 
 function renderTelemetry(data) {
@@ -1948,9 +2329,25 @@ function renderSettings(data) {
   if (el.settingCompanionMode) {
     el.settingCompanionMode.checked = safeData.companion_mode !== false;
   }
+  if (el.settingMemoryInsightMode) {
+    el.settingMemoryInsightMode.checked = safeData.memory_insight_mode !== false;
+  }
   if (el.settingParentTeachingMode) {
     el.settingParentTeachingMode.checked = !!safeData.parent_teaching_mode;
   }
+  if (el.settingAutonomousSelfImproveMode) {
+    el.settingAutonomousSelfImproveMode.checked = safeData.autonomous_self_improvement_mode !== false;
+  }
+  if (el.settingPersonalityWarmth) {
+    el.settingPersonalityWarmth.value = clampPercent(safeData.personality_warmth, 55);
+  }
+  if (el.settingPersonalityVerbosity) {
+    el.settingPersonalityVerbosity.value = clampPercent(safeData.personality_verbosity, 55);
+  }
+  if (el.settingPersonalityCuriosity) {
+    el.settingPersonalityCuriosity.value = clampPercent(safeData.personality_curiosity, 50);
+  }
+  renderPersonalityCalibrationLabels();
   if (el.settingTddMode) {
     el.settingTddMode.checked = !!safeData.tdd_mode;
   }
@@ -2002,7 +2399,11 @@ function renderSettings(data) {
     ["Critic model", safeData.critic_model || safeData.critic_model_default || "-"],
     ["Default TDD mode", fmtBool(safeData.tdd_mode)],
     ["Companion mode", fmtBool(safeData.companion_mode !== false)],
+    ["Memory Insight Mode", fmtBool(safeData.memory_insight_mode !== false)],
     ["Parent Teaching Mode", fmtBool(safeData.parent_teaching_mode)],
+    ["Warmth", calibrationDescriptor("warmth", safeData.personality_warmth ?? 55)],
+    ["Verbosity", calibrationDescriptor("verbosity", safeData.personality_verbosity ?? 55)],
+    ["Curiosity", calibrationDescriptor("curiosity", safeData.personality_curiosity ?? 50)],
     ["Allowed commands", (safeData.allowed_commands || []).join(", ")],
     ["Workspace", safeData.workspace_dir || "-"],
     ["Default max iterations", safeData.max_iterations_default || 0],
@@ -2181,6 +2582,14 @@ async function refreshGrowth() {
   renderGrowthTimeline(await api("/api/growth_timeline?limit=240"));
 }
 
+async function refreshLegacyArchive() {
+  renderLegacyArchive(await api("/api/legacy_archive?limit=260"));
+}
+
+async function refreshSelfImprovements() {
+  renderSelfImprovements(await api("/api/self_improvements?limit=200"));
+}
+
 async function refreshLogs() {
   renderLogs(await api("/api/logs/tail?limit=400"));
 }
@@ -2260,10 +2669,14 @@ function setupSSE() {
               session_id: mem.session_id || mem.assistant_turn?.session_id || state.selectedChatSessionId,
               response,
               citations: response.citations || [],
+              memory_insight: response.memory_insight || {},
               conflicts: response.conflicts || [],
             });
-            if (response?.citations) {
-              state.lastExplainWhy = { citations: response.citations };
+            if (response?.citations || response?.memory_insight) {
+              state.lastExplainWhy = {
+                citations: response.citations || [],
+                memory_insight: response.memory_insight || {},
+              };
             }
             if (mem?.session_id) {
               state.selectedChatSessionId = mem.session_id;
@@ -2272,8 +2685,14 @@ function setupSSE() {
           } else if (payload.type === "memory_ask_answered") {
             const hitCount = Number(mem.matched_count || 0);
             const suffix = hitCount > 0 ? ` (matched facts: ${hitCount})` : "";
-            pushChatMessage("ask", `${mem.answer || "No answer returned."}${suffix}`);
-            state.lastExplainWhy = { citations: mem.citations || [] };
+            pushChatMessage("ask", `${mem.answer || "No answer returned."}${suffix}`, {
+              memory_insight: mem.memory_insight || {},
+              citations: mem.citations || [],
+            });
+            state.lastExplainWhy = {
+              citations: mem.citations || [],
+              memory_insight: mem.memory_insight || {},
+            };
           } else if (payload.type === "memory_teach_completed") {
             const storedCount = Number(mem.stored_count || 0);
             const skipped = Array.isArray(mem.skipped_items) ? mem.skipped_items.length : 0;
@@ -2294,10 +2713,24 @@ function setupSSE() {
         }
         await refreshMemory().catch(() => {});
         await refreshGrowth().catch(() => {});
+        await refreshLegacyArchive().catch(() => {});
       }
-      const growthEventTypes = new Set(["run_success", "run_failed", "run_stopped", "run_rejected", "memory_reflection_saved"]);
+      const growthEventTypes = new Set([
+        "run_success",
+        "run_failed",
+        "run_stopped",
+        "run_rejected",
+        "memory_reflection_saved",
+        "self_improvement_proposed",
+        "self_improvement_decision",
+        "self_improvement_merged",
+      ]);
       if (growthEventTypes.has(String(payload?.type || ""))) {
         await refreshGrowth().catch(() => {});
+      }
+      const selfImproveEventTypes = new Set(["self_improvement_proposed", "self_improvement_decision", "self_improvement_merged"]);
+      if (selfImproveEventTypes.has(String(payload?.type || ""))) {
+        await refreshSelfImprovements().catch(() => {});
       }
       if (payload?.meta) {
         state.status = payload.meta;
@@ -2335,8 +2768,12 @@ async function handleMemoryAsk(question) {
   pushChatMessage("ask", `${result.answer || "No answer returned."}${suffix}`, {
     session_id: state.selectedChatSessionId,
     citations: result.citations || [],
+    memory_insight: result.memory_insight || {},
   });
-  state.lastExplainWhy = { citations: result.citations || [] };
+  state.lastExplainWhy = {
+    citations: result.citations || [],
+    memory_insight: result.memory_insight || {},
+  };
   setCliOutput(JSON.stringify(result, null, 2));
   await refreshMemory().catch(() => {});
 }
@@ -2472,10 +2909,14 @@ async function handleAdvancedChat(rawMessage) {
     session_id: result.assistant_turn?.session_id || state.selectedChatSessionId,
     response,
     citations: response.citations || [],
+    memory_insight: response.memory_insight || {},
     conflicts: response.conflicts || [],
   });
-  if (Array.isArray(response.citations) && response.citations.length) {
-    state.lastExplainWhy = { citations: response.citations };
+  if ((Array.isArray(response.citations) && response.citations.length) || response.memory_insight) {
+    state.lastExplainWhy = {
+      citations: response.citations || [],
+      memory_insight: response.memory_insight || {},
+    };
   }
   if (responseStatus === "overwrite_confirmation_required") {
     state.pendingTeachMessage = text;
@@ -2670,6 +3111,27 @@ function wireActions() {
 
   el.refreshLogsBtn.addEventListener("click", () => refreshLogs().catch((e) => setMessage(e.message)));
   el.growthRefreshBtn?.addEventListener("click", () => refreshGrowth().catch((e) => setMessage(e.message)));
+  el.legacyRefreshBtn?.addEventListener("click", () => refreshLegacyArchive().catch((e) => setMessage(e.message)));
+  el.selfImproveAutoBtn?.addEventListener("click", async () => {
+    try {
+      const result = await api("/api/self_improvements/autonomous_cycle", {
+        method: "POST",
+        body: JSON.stringify({ trigger: "manual", actor: "david_autonomous" }),
+      });
+      const status = String(result?.status || "unknown");
+      if (status === "proposed") {
+        showToast(`Autonomous proposal drafted: ${result?.proposal_id || "-"}`);
+      } else {
+        showToast(`Autonomous cycle: ${status}`);
+      }
+      await refreshSelfImprovements();
+      await refreshGrowth().catch(() => {});
+      await refreshStatus().catch(() => {});
+    } catch (err) {
+      setMessage(err.message);
+    }
+  });
+  el.selfImproveRefreshBtn?.addEventListener("click", () => refreshSelfImprovements().catch((e) => setMessage(e.message)));
   el.logsSearch.addEventListener("input", () => renderLogs(state.logs || {}));
   el.logsLevelFilter.addEventListener("change", () => renderLogs(state.logs || {}));
 
@@ -2683,7 +3145,14 @@ function wireActions() {
         risky_multi_file_threshold: Number(el.settingMultiFile.value || 4),
         run_preview_default: !!el.settingPreviewDefault.checked,
         companion_mode: el.settingCompanionMode ? !!el.settingCompanionMode.checked : true,
+        memory_insight_mode: el.settingMemoryInsightMode ? !!el.settingMemoryInsightMode.checked : true,
         parent_teaching_mode: el.settingParentTeachingMode ? !!el.settingParentTeachingMode.checked : false,
+        autonomous_self_improvement_mode: el.settingAutonomousSelfImproveMode
+          ? !!el.settingAutonomousSelfImproveMode.checked
+          : true,
+        personality_warmth: clampPercent(el.settingPersonalityWarmth?.value, 55),
+        personality_verbosity: clampPercent(el.settingPersonalityVerbosity?.value, 55),
+        personality_curiosity: clampPercent(el.settingPersonalityCuriosity?.value, 50),
         planner_model: el.settingPlannerModel?.value || "",
         coder_model: el.settingCoderModel?.value || "",
         critic_model: el.settingCriticModel?.value || "",
@@ -2695,6 +3164,11 @@ function wireActions() {
     } catch (err) {
       setMessage(err.message);
     }
+  });
+
+  [el.settingPersonalityWarmth, el.settingPersonalityVerbosity, el.settingPersonalityCuriosity].forEach((node) => {
+    node?.addEventListener("input", () => renderPersonalityCalibrationLabels());
+    node?.addEventListener("change", () => renderPersonalityCalibrationLabels());
   });
 
   el.cliSendBtn.addEventListener("click", async () => {
@@ -2831,6 +3305,26 @@ function wireActions() {
         el.memoryChatInput.focus();
       }
       updateIntentPreview();
+      return;
+    }
+    if (chip === "mark-legacy") {
+      const messageId = String(chipBtn.getAttribute("data-chat-id") || "").trim();
+      const sessionId = String(chipBtn.getAttribute("data-chat-session") || "").trim();
+      const kind = String(chipBtn.getAttribute("data-chat-kind") || "chat").trim();
+      try {
+        await markLegacyMoment({
+          source_type: "conversation",
+          source_id: messageId,
+          summary: summarizeText(sourceText, 180),
+          details: sourceText,
+          metadata: {
+            session_id: sessionId,
+            kind,
+          },
+        });
+      } catch (err) {
+        setMessage(err.message);
+      }
     }
   });
 
@@ -2922,6 +3416,8 @@ async function bootstrap() {
     safeRefresh("runs", refreshRuns),
     safeRefresh("memory", refreshMemory),
     safeRefresh("growth", refreshGrowth),
+    safeRefresh("legacy archive", refreshLegacyArchive),
+    safeRefresh("self improvements", refreshSelfImprovements),
     safeRefresh("telemetry", refreshTelemetry),
     safeRefresh("logs", refreshLogs),
     safeRefresh("workspace", refreshWorkspaceTargets),
@@ -2941,6 +3437,8 @@ async function bootstrap() {
         safeRefresh("status", refreshStatus, { silent: true }),
         safeRefresh("runs", refreshRuns, { silent: true }),
         safeRefresh("approvals", refreshApprovals, { silent: true }),
+        safeRefresh("legacy archive", refreshLegacyArchive, { silent: true }),
+        safeRefresh("self improvements", refreshSelfImprovements, { silent: true }),
         safeRefresh("logs", refreshLogs, { silent: true }),
       ]);
       setupSSE();
@@ -2949,6 +3447,8 @@ async function bootstrap() {
 
   setInterval(() => refreshMemory().catch(() => {}), 6000);
   setInterval(() => refreshGrowth().catch(() => {}), 7000);
+  setInterval(() => refreshLegacyArchive().catch(() => {}), 8000);
+  setInterval(() => refreshSelfImprovements().catch(() => {}), 9000);
   setInterval(() => refreshTelemetry().catch(() => {}), 5000);
 }
 

@@ -15,7 +15,9 @@ class FakeCenter:
         self._subscribers = {}
         self._facts = []
         self._conversations = []
+        self._legacy_archive = []
         self._pending_overwrites = {}
+        self._self_improvements = []
         self._settings = {
             "safe_mode": False,
             "rate_limit_seconds": 3,
@@ -24,7 +26,12 @@ class FakeCenter:
             "risky_multi_file_threshold": 4,
             "run_preview_default": False,
             "companion_mode": True,
+            "memory_insight_mode": True,
             "parent_teaching_mode": False,
+            "autonomous_self_improvement_mode": True,
+            "personality_warmth": 55,
+            "personality_verbosity": 55,
+            "personality_curiosity": 50,
             "model": "qwen2.5-coder:1.5b",
             "planner_model": "qwen2.5-coder:1.5b",
             "coder_model": "qwen2.5-coder:1.5b",
@@ -56,6 +63,9 @@ class FakeCenter:
             "latest_success": None,
             "latest_message": "",
             "pending_approvals": 0,
+            "pending_self_improvements": 0,
+            "autonomous_self_improvement_mode": True,
+            "legacy_archive_count": len(self._legacy_archive),
             "safe_mode": False,
             "rate_limit_seconds": 3,
             "allowed_commands": ["python", "pytest"],
@@ -238,11 +248,13 @@ class FakeCenter:
             "projects": [],
             "lessons": [],
             "reflections": [],
+            "legacy_archive": list(self._legacy_archive),
             "conflicts": conflicts,
             "conflict_count": len(conflicts),
             "values_count": 0,
             "project_count": 0,
             "reflection_count": 0,
+            "legacy_archive_count": len(self._legacy_archive),
         }
 
     def ask_memory(self, question, actor="web_ui"):
@@ -259,6 +271,18 @@ class FakeCenter:
             "answer": answer,
             "matched_facts": list(self._facts[-8:]),
             "matched_count": len(self._facts[-8:]),
+            "memory_insight": {
+                "enabled": True,
+                "summary": "This answer was influenced by Fact #1 (Father name).",
+                "influences": [
+                    {
+                        "type": "fact",
+                        "reference": "Fact #1",
+                        "label": "Father name",
+                        "detail": "David.father_name = Charm Thiekshana",
+                    }
+                ],
+            },
             "actor": actor,
         }
 
@@ -523,6 +547,137 @@ class FakeCenter:
     def list_ollama_models(self):
         return ["qwen2.5-coder:1.5b", "llama3.2:3b"]
 
+    def list_legacy_archive(self, limit=200):
+        items = list(self._legacy_archive)[: int(limit or 200)]
+        return {
+            "items": items,
+            "total": len(self._legacy_archive),
+            "boundary_note": "Legacy Archive is a reflective journal and not a substitute for real-world relationships.",
+        }
+
+    def mark_legacy_moment(self, payload, actor="web_ui"):
+        summary = str(payload.get("summary", "")).strip()
+        if not summary:
+            return False, {"error": "summary cannot be empty."}
+        entry = {
+            "id": f"legacy_{len(self._legacy_archive) + 1}",
+            "kind": "significant_moment",
+            "source_type": str(payload.get("source_type", "manual")),
+            "source_id": str(payload.get("source_id", "")),
+            "summary": summary,
+            "details": str(payload.get("details", "")),
+            "timestamp_utc": str(payload.get("timestamp_utc", "2026-01-01T00:00:00+00:00")),
+            "recorded_at": "2026-01-01T00:00:00+00:00",
+            "actor": actor,
+            "metadata": payload.get("metadata", {}),
+        }
+        self._legacy_archive.insert(0, entry)
+        return True, entry
+
+    def remove_legacy_moment(self, entry_id, actor="web_ui"):
+        clean_id = str(entry_id).strip()
+        before = len(self._legacy_archive)
+        self._legacy_archive = [row for row in self._legacy_archive if str(row.get("id", "")) != clean_id]
+        if len(self._legacy_archive) == before:
+            return False, {"error": "Archive entry not found."}
+        return True, {
+            "removed_id": clean_id,
+            "removed": True,
+            "total": len(self._legacy_archive),
+            "actor": actor,
+            "timestamp_utc": "2026-01-01T00:00:01+00:00",
+        }
+
+    def list_self_improvements(self, limit=160):
+        rows = list(self._self_improvements)[: int(limit or 160)]
+        pending = sum(1 for row in rows if str(row.get("status", "")) == "pending")
+        merged = sum(1 for row in rows if str(row.get("status", "")) == "merged")
+        autonomous = sum(1 for row in rows if bool((row.get("metadata") or {}).get("autonomous", False)))
+        return {
+            "items": rows,
+            "total": len(self._self_improvements),
+            "pending_count": pending,
+            "merged_count": merged,
+            "autonomous_count": autonomous,
+            "sandbox_root": "/tmp/workspace/agent_sandbox",
+        }
+
+    def propose_self_improvement(self, payload, actor="david_agent"):
+        if not str(payload.get("title", "")).strip():
+            return False, {"error": "title cannot be empty."}
+        proposal_id = f"improve_{len(self._self_improvements) + 1}"
+        item = {
+            "id": proposal_id,
+            "title": str(payload.get("title", "")).strip(),
+            "summary": str(payload.get("summary", "")).strip(),
+            "status": "pending",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+            "actor": actor,
+            "sandbox_dir": f"/tmp/workspace/agent_sandbox/{proposal_id}",
+            "changes": payload.get("files", []),
+            "decision": None,
+            "merge": None,
+        }
+        self._self_improvements.insert(0, item)
+        return True, item
+
+    def decide_self_improvement(self, proposal_id, decision, actor="web_ui", note=""):
+        for idx, row in enumerate(self._self_improvements):
+            if str(row.get("id")) != str(proposal_id):
+                continue
+            if row.get("status") != "pending":
+                return False, {"error": "Proposal is already resolved."}
+            choice = str(decision).lower()
+            if choice not in {"approve", "reject"}:
+                return False, {"error": "decision must be approve or reject."}
+            updated = dict(row)
+            updated["decision"] = {
+                "decision": choice,
+                "actor": actor,
+                "note": note,
+                "decided_at": "2026-01-01T00:00:01+00:00",
+            }
+            updated["status"] = "merged" if choice == "approve" else "rejected"
+            updated["updated_at"] = "2026-01-01T00:00:01+00:00"
+            if choice == "approve":
+                updated["merge"] = {
+                    "merged_at": "2026-01-01T00:00:01+00:00",
+                    "actor": actor,
+                    "file_count": len(updated.get("changes", [])),
+                    "paths": [],
+                }
+            self._self_improvements[idx] = updated
+            return True, updated
+        return False, {"error": "Proposal not found."}
+
+    def autonomous_self_improvement_cycle(self, trigger="manual", trigger_id="", actor="david_autonomous"):
+        proposal_id = f"improve_auto_{len(self._self_improvements) + 1}"
+        proposal = {
+            "id": proposal_id,
+            "title": "Autonomous Improvement: Iteration Efficiency",
+            "summary": "Drafted from reflections.",
+            "status": "pending",
+            "created_at": "2026-01-02T00:00:00+00:00",
+            "updated_at": "2026-01-02T00:00:00+00:00",
+            "actor": actor,
+            "source": "self_improvement_engine",
+            "sandbox_dir": f"/tmp/workspace/agent_sandbox/{proposal_id}",
+            "proposal_doc": f"/tmp/workspace/agent_sandbox/{proposal_id}/PROPOSAL.md",
+            "changes": [],
+            "metadata": {"autonomous": True, "trigger": trigger, "trigger_id": trigger_id},
+            "decision": None,
+            "merge": None,
+        }
+        self._self_improvements.insert(0, proposal)
+        return {
+            "status": "proposed",
+            "trigger": trigger,
+            "trigger_id": trigger_id,
+            "proposal_id": proposal_id,
+            "proposal": proposal,
+        }
+
     def list_approvals(self):
         return []
 
@@ -588,6 +743,81 @@ def test_growth_timeline_endpoint(client):
     data = payload["data"]
     assert data["summary"]["goal_runs_total"] == 1
     assert data["milestones"][0]["category"] == "project_success"
+
+
+def test_legacy_archive_mark_list_remove_endpoints(client):
+    empty = client.get("/api/legacy_archive")
+    assert empty.status_code == 200
+    assert empty.get_json()["data"]["total"] == 0
+
+    marked = client.post(
+        "/api/legacy_archive",
+        json={
+            "source_type": "conversation",
+            "source_id": "msg_1",
+            "summary": "Shared a meaningful learning moment.",
+            "details": "Conversation about growth and resilience.",
+        },
+    )
+    assert marked.status_code == 200
+    entry = marked.get_json()["data"]
+    assert entry["kind"] == "significant_moment"
+    assert entry["source_type"] == "conversation"
+
+    listed = client.get("/api/legacy_archive")
+    assert listed.status_code == 200
+    listed_data = listed.get_json()["data"]
+    assert listed_data["total"] == 1
+    assert listed_data["items"][0]["id"] == entry["id"]
+
+    removed = client.post(f"/api/legacy_archive/{entry['id']}/remove", json={})
+    assert removed.status_code == 200
+    assert removed.get_json()["data"]["removed"] is True
+
+def test_self_improvements_propose_list_and_decide_endpoints(client):
+    empty = client.get("/api/self_improvements")
+    assert empty.status_code == 200
+    assert empty.get_json()["data"]["total"] == 0
+
+    created = client.post(
+        "/api/self_improvements/propose",
+        json={
+            "title": "Improve memory retrieval",
+            "summary": "Prototype a faster lookup path.",
+            "files": [{"path": "agent/memory.py", "content": "print('demo')\n"}],
+        },
+    )
+    assert created.status_code == 200
+    created_data = created.get_json()["data"]
+    assert created_data["status"] == "pending"
+
+    listed = client.get("/api/self_improvements")
+    assert listed.status_code == 200
+    listed_data = listed.get_json()["data"]
+    assert listed_data["total"] == 1
+    proposal_id = listed_data["items"][0]["id"]
+
+    approved = client.post(
+        f"/api/self_improvements/{proposal_id}/decision",
+        json={"decision": "approve", "note": "Looks safe to merge."},
+    )
+    assert approved.status_code == 200
+    approved_data = approved.get_json()["data"]
+    assert approved_data["status"] == "merged"
+    assert approved_data["decision"]["decision"] == "approve"
+
+
+def test_self_improvements_autonomous_cycle_endpoint(client):
+    response = client.post("/api/self_improvements/autonomous_cycle", json={"trigger": "manual"})
+    assert response.status_code == 200
+    payload = response.get_json()["data"]
+    assert payload["status"] == "proposed"
+    assert payload["trigger"] == "manual"
+    listed = client.get("/api/self_improvements")
+    assert listed.status_code == 200
+    listed_payload = listed.get_json()["data"]
+    assert listed_payload["total"] >= 1
+    assert listed_payload["autonomous_count"] >= 1
 
 
 def test_run_files_and_timeline_endpoints(client):

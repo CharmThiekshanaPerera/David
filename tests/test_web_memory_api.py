@@ -300,6 +300,25 @@ def test_api_settings_toggle_companion_mode(memory_client) -> None:
     assert refreshed.get_json()["data"]["companion_mode"] is False
 
 
+def test_api_settings_memory_insight_mode_default_true(memory_client) -> None:
+    client, _config = memory_client
+    settings = client.get("/api/settings")
+    assert settings.status_code == 200
+    payload = settings.get_json()["data"]
+    assert payload["memory_insight_mode"] is True
+
+
+def test_api_settings_toggle_memory_insight_mode(memory_client) -> None:
+    client, _config = memory_client
+    updated = client.post("/api/settings", json={"memory_insight_mode": False})
+    assert updated.status_code == 200
+    assert updated.get_json()["data"]["memory_insight_mode"] is False
+
+    refreshed = client.get("/api/settings")
+    assert refreshed.status_code == 200
+    assert refreshed.get_json()["data"]["memory_insight_mode"] is False
+
+
 def test_api_settings_toggle_parent_teaching_mode(memory_client) -> None:
     client, _config = memory_client
 
@@ -310,6 +329,55 @@ def test_api_settings_toggle_parent_teaching_mode(memory_client) -> None:
     refreshed = client.get("/api/settings")
     assert refreshed.status_code == 200
     assert refreshed.get_json()["data"]["parent_teaching_mode"] is True
+
+
+def test_api_settings_autonomous_self_improvement_mode_defaults_true(memory_client) -> None:
+    client, _config = memory_client
+    settings = client.get("/api/settings")
+    assert settings.status_code == 200
+    payload = settings.get_json()["data"]
+    assert payload["autonomous_self_improvement_mode"] is True
+
+
+def test_api_settings_toggle_autonomous_self_improvement_mode(memory_client) -> None:
+    client, _config = memory_client
+    updated = client.post("/api/settings", json={"autonomous_self_improvement_mode": False})
+    assert updated.status_code == 200
+    assert updated.get_json()["data"]["autonomous_self_improvement_mode"] is False
+
+    refreshed = client.get("/api/settings")
+    assert refreshed.status_code == 200
+    assert refreshed.get_json()["data"]["autonomous_self_improvement_mode"] is False
+
+
+def test_api_settings_personality_calibration_defaults_present(memory_client) -> None:
+    client, _config = memory_client
+    settings = client.get("/api/settings")
+    assert settings.status_code == 200
+    payload = settings.get_json()["data"]
+    assert int(payload["personality_warmth"]) == 55
+    assert int(payload["personality_verbosity"]) == 55
+    assert int(payload["personality_curiosity"]) == 50
+
+
+def test_api_settings_toggle_personality_calibration(memory_client) -> None:
+    client, _config = memory_client
+    updated = client.post(
+        "/api/settings",
+        json={"personality_warmth": 10, "personality_verbosity": 20, "personality_curiosity": 90},
+    )
+    assert updated.status_code == 200
+    data = updated.get_json()["data"]
+    assert int(data["personality_warmth"]) == 10
+    assert int(data["personality_verbosity"]) == 20
+    assert int(data["personality_curiosity"]) == 90
+
+    refreshed = client.get("/api/settings")
+    assert refreshed.status_code == 200
+    again = refreshed.get_json()["data"]
+    assert int(again["personality_warmth"]) == 10
+    assert int(again["personality_verbosity"]) == 20
+    assert int(again["personality_curiosity"]) == 90
 
 
 def test_companion_ask_starts_with_you_once_told_me(memory_client) -> None:
@@ -348,6 +416,77 @@ def test_companion_ask_includes_relevant_lesson_citation(memory_client) -> None:
     citations = payload.get("citations", [])
     assert any(str(item.get("type", "")) == "lesson" for item in citations)
     assert "Celebrate small progress every day." in str(payload.get("answer", ""))
+
+
+def test_memory_insight_mode_provides_structured_references(memory_client) -> None:
+    client, config = memory_client
+    session_id = "session_insight_refs"
+
+    teach = client.post(
+        "/api/chat",
+        json={
+            "message": "Hi David I am your dad. My Name is Charm Thiekshana.",
+            "intent": "teach",
+            "confirm_save": True,
+            "session_id": session_id,
+        },
+    )
+    assert teach.status_code == 200
+
+    primer = client.post(
+        "/api/chat",
+        json={
+            "message": "Please use step-by-step guidance in your explanations.",
+            "intent": "chat",
+            "session_id": session_id,
+        },
+    )
+    assert primer.status_code == 200
+
+    memory_payload = json.loads(config.memory_file.read_text(encoding="utf-8"))
+    memory_payload["lessons"] = [
+        {
+            "timestamp_utc": "2026-02-01T00:00:00+00:00",
+            "goal": "companion style",
+            "lesson": "User prefers step-by-step guidance.",
+            "tags": ["preference", "clarity"],
+            "context": "chat",
+        }
+    ]
+    config.memory_file.write_text(json.dumps(memory_payload) + "\n", encoding="utf-8")
+
+    ask = client.post(
+        "/api/chat",
+        json={
+            "message": "Who is your father? Please answer with step-by-step guidance.",
+            "intent": "ask",
+            "session_id": session_id,
+        },
+    )
+    assert ask.status_code == 200
+    response = ask.get_json()["data"]["response"]
+    insight = response.get("memory_insight", {})
+    assert insight.get("enabled") is True
+    assert str(insight.get("summary", "")).startswith("This answer was influenced by")
+    influences = insight.get("influences", [])
+    assert isinstance(influences, list)
+    kinds = {str(item.get("type", "")) for item in influences}
+    assert "fact" in kinds
+    assert "lesson" in kinds
+    assert "conversation" in kinds
+    assert all("#" in str(item.get("reference", "")) for item in influences)
+
+
+def test_memory_insight_mode_disabled_returns_no_influences(memory_client) -> None:
+    client, _config = memory_client
+    disable = client.post("/api/settings", json={"memory_insight_mode": False})
+    assert disable.status_code == 200
+
+    ask = client.post("/api/ask", json={"question": "Who is your father?"})
+    assert ask.status_code == 200
+    insight = ask.get_json()["data"].get("memory_insight", {})
+    assert insight.get("enabled") is False
+    assert insight.get("influences") == []
 
 
 def test_companion_family_answer_is_warm_and_transparent(memory_client) -> None:
@@ -430,6 +569,49 @@ def test_companion_chat_sensitive_turn_repeats_transparency(memory_client) -> No
     third_reply = str(third.get_json()["data"]["response"]["reply"])
     assert "support system" in third_reply
     assert "I am an AI companion in your Dashboard" in third_reply
+
+
+def test_companion_personality_calibration_affects_web_tone_only(memory_client) -> None:
+    client, _config = memory_client
+
+    low = client.post(
+        "/api/settings",
+        json={"personality_warmth": 0, "personality_verbosity": 0, "personality_curiosity": 0},
+    )
+    assert low.status_code == 200
+
+    low_chat = client.post(
+        "/api/chat",
+        json={"message": "Hello David", "intent": "chat", "session_id": "session_tone_low"},
+    )
+    assert low_chat.status_code == 200
+    low_reply = str(low_chat.get_json()["data"]["response"]["reply"])
+    assert "I will keep this concise and professional." in low_reply
+    assert "Would you like to teach me one small memory or ask me a gentle question?" not in low_reply
+
+    high = client.post(
+        "/api/settings",
+        json={"personality_warmth": 100, "personality_verbosity": 100, "personality_curiosity": 100},
+    )
+    assert high.status_code == 200
+
+    high_chat = client.post(
+        "/api/chat",
+        json={"message": "Hello David", "intent": "chat", "session_id": "session_tone_high"},
+    )
+    assert high_chat.status_code == 200
+    high_reply = str(high_chat.get_json()["data"]["response"]["reply"])
+    assert "Yay, you are doing great." in high_reply
+    assert "Would you like to teach me one small memory or ask me a gentle question?" in high_reply
+    assert "quick check question" in high_reply
+
+    non_web_actor = client.post(
+        "/api/chat",
+        json={"message": "Hello David", "intent": "chat", "session_id": "session_tone_cli", "actor": "cli_runner"},
+    )
+    assert non_web_actor.status_code == 200
+    non_web_reply = str(non_web_actor.get_json()["data"]["response"]["reply"])
+    assert "Yay, you are doing great." not in non_web_reply
 
 
 def test_companion_growth_chat_references_learning(memory_client) -> None:
@@ -605,3 +787,169 @@ def test_project_brain_recall_returns_architecture_overview(memory_client) -> No
     assert snapshot.status_code == 200
     snapshot_payload = snapshot.get_json()["data"]
     assert int(snapshot_payload.get("project_count", 0)) >= 1
+
+
+def test_legacy_archive_persists_significant_moments(memory_client) -> None:
+    client, config = memory_client
+    marked = client.post(
+        "/api/legacy_archive",
+        json={
+            "source_type": "teaching",
+            "source_id": "value_patience_1",
+            "summary": "User taught patience during debugging.",
+            "details": "Apply patience by investigating failures step by step.",
+            "timestamp_utc": "2026-05-14T10:30:00+00:00",
+            "metadata": {"category": "values"},
+        },
+    )
+    assert marked.status_code == 200
+    entry = marked.get_json()["data"]
+    assert entry["kind"] == "significant_moment"
+    assert entry["source_type"] == "teaching"
+
+    listed = client.get("/api/legacy_archive")
+    assert listed.status_code == 200
+    payload = listed.get_json()["data"]
+    assert int(payload.get("total", 0)) >= 1
+    assert any(str(item.get("id", "")) == str(entry.get("id", "")) for item in payload.get("items", []))
+
+    memory_raw = json.loads(config.memory_file.read_text(encoding="utf-8"))
+    archive = memory_raw.get("legacy_archive", [])
+    assert any(str(item.get("id", "")) == str(entry.get("id", "")) for item in archive)
+
+    snapshot = client.get("/api/memory")
+    assert snapshot.status_code == 200
+    snap_data = snapshot.get_json()["data"]
+    assert int(snap_data.get("legacy_archive_count", 0)) >= 1
+    assert any(str(item.get("id", "")) == str(entry.get("id", "")) for item in snap_data.get("legacy_archive", []))
+
+
+def test_legacy_archive_remove_entry(memory_client) -> None:
+    client, _config = memory_client
+    marked = client.post(
+        "/api/legacy_archive",
+        json={
+            "source_type": "milestone",
+            "source_id": "run:demo_1",
+            "summary": "First successful project completion.",
+            "details": "Reached green tests with fewer iterations.",
+        },
+    )
+    assert marked.status_code == 200
+    entry_id = str(marked.get_json()["data"]["id"])
+
+    removed = client.post(f"/api/legacy_archive/{entry_id}/remove", json={})
+    assert removed.status_code == 200
+    removed_payload = removed.get_json()["data"]
+    assert removed_payload["removed"] is True
+    assert removed_payload["removed_id"] == entry_id
+
+    listed = client.get("/api/legacy_archive")
+    assert listed.status_code == 200
+    items = listed.get_json()["data"].get("items", [])
+    assert all(str(item.get("id", "")) != entry_id for item in items)
+
+
+def test_self_improvement_sandbox_proposal_lifecycle(memory_client) -> None:
+    client, config = memory_client
+    target_path = "agent/prototype_improvement.py"
+    target_file = config.project_root / target_path
+    assert not target_file.exists()
+
+    proposed = client.post(
+        "/api/self_improvements/propose",
+        json={
+            "title": "Optimize memory lookup",
+            "summary": "Prototype indexed retrieval for repeated ask flows.",
+            "rationale": "Lower repeated token scanning overhead in chat sessions.",
+            "files": [
+                {
+                    "path": target_path,
+                    "content": "def optimized_lookup():\n    return 'ok'\n",
+                }
+            ],
+        },
+    )
+    assert proposed.status_code == 200
+    proposal = proposed.get_json()["data"]
+    assert proposal["status"] == "pending"
+    assert "agent_sandbox" in str(proposal.get("sandbox_dir", ""))
+    assert Path(str(proposal.get("proposal_doc", ""))).exists()
+
+    listed = client.get("/api/self_improvements")
+    assert listed.status_code == 200
+    listed_payload = listed.get_json()["data"]
+    assert int(listed_payload.get("total", 0)) >= 1
+    proposal_id = str(proposal.get("id", ""))
+    assert any(str(item.get("id", "")) == proposal_id for item in listed_payload.get("items", []))
+
+    approved = client.post(
+        f"/api/self_improvements/{proposal_id}/decision",
+        json={"decision": "approve", "note": "Merge prototype into main code."},
+    )
+    assert approved.status_code == 200
+    approved_payload = approved.get_json()["data"]
+    assert approved_payload["status"] == "merged"
+    assert str(approved_payload.get("decision", {}).get("decision", "")) == "approve"
+    assert target_file.exists()
+    assert "optimized_lookup" in target_file.read_text(encoding="utf-8")
+
+
+def test_meaningful_chat_triggers_autonomous_self_improvement(memory_client) -> None:
+    client, _config = memory_client
+    chat = client.post(
+        "/api/chat",
+        json={"message": "Please explain this step-by-step and keep the structure consistent.", "intent": "chat"},
+    )
+    assert chat.status_code == 200
+    payload = chat.get_json()["data"]
+    cycle = payload.get("autonomous_self_improvement", {})
+    assert str(cycle.get("status", "")) in {"proposed", "skipped"}
+
+    listed = client.get("/api/self_improvements")
+    assert listed.status_code == 200
+    rows = listed.get_json()["data"].get("items", [])
+    assert any(bool((row.get("metadata") or {}).get("autonomous", False)) for row in rows)
+
+
+def test_self_improvement_blocks_safety_logic_paths(memory_client) -> None:
+    client, _config = memory_client
+    blocked = client.post(
+        "/api/self_improvements/propose",
+        json={
+            "title": "Unsafe safety rewrite",
+            "summary": "Attempt to modify protected safety file should fail.",
+            "files": [{"path": "web/safety.py", "content": "# blocked\n"}],
+        },
+    )
+    assert blocked.status_code == 409
+    payload = blocked.get_json()
+    assert payload["ok"] is False
+    assert "blocked" in str(payload.get("error", "")).lower()
+
+
+def test_self_improvement_approve_blocked_when_safe_mode_enabled(memory_client) -> None:
+    client, _config = memory_client
+    proposed = client.post(
+        "/api/self_improvements/propose",
+        json={
+            "title": "Small refactor",
+            "summary": "Prepare a simple merge candidate.",
+            "files": [{"path": "agent/refactor_demo.py", "content": "x = 1\n"}],
+        },
+    )
+    assert proposed.status_code == 200
+    proposal_id = str(proposed.get_json()["data"]["id"])
+
+    safe = client.post("/api/settings", json={"safe_mode": True})
+    assert safe.status_code == 200
+    assert safe.get_json()["data"]["safe_mode"] is True
+
+    blocked = client.post(
+        f"/api/self_improvements/{proposal_id}/decision",
+        json={"decision": "approve"},
+    )
+    assert blocked.status_code == 409
+    payload = blocked.get_json()
+    assert payload["ok"] is False
+    assert "safe mode" in str(payload.get("error", "")).lower()

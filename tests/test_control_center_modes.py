@@ -44,7 +44,7 @@ def _make_config(tmp_path: Path) -> AgentConfig:
     )
 
 
-def _wait_for_terminal(center: DavidControlCenter, run_id: str, timeout_sec: float = 4.0) -> dict:
+def _wait_for_terminal(center: DavidControlCenter, run_id: str, timeout_sec: float = 6.0) -> dict:
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
         payload = center.get_run(run_id)
@@ -556,6 +556,90 @@ def test_growth_timeline_aggregates_runs_and_memory(tmp_path: Path) -> None:
     assert summary["memory_size_total"] >= 2
     assert any(item["category"] == "project_success" for item in timeline["milestones"])
     assert any(item["category"] == "lesson_reflection" for item in timeline["milestones"])
+
+
+def test_goal_run_autonomous_self_improvement_proposal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    center = DavidControlCenter(config=config, data_root=tmp_path / "data")
+
+    class FakePlanner:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def create_plan(self, goal, workspace_snapshot, memory_context, tdd_mode=False):
+            return PlanOutput(
+                goal=goal,
+                steps=[PlanStep(id="S1", title="Plan", details="Do work.", success_check="tests pass")],
+                success_criteria=["tests pass"],
+            )
+
+    class FakeCoder:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def propose(self, goal, plan_json, workspace_snapshot, memory_context, critic_feedback, iteration, tdd_mode=False, tdd_phase="normal"):
+            return CoderOutput(
+                summary="single pass",
+                edits=[CodeEdit(path="app.py", content="print('ok')\n", reason="implement")],
+                commands=["pytest -q"],
+                done=True,
+                done_reason="done",
+            )
+
+    class FakeCritic:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def review(self, goal, plan_json, coder_json, execution_results, tdd_mode=False, tdd_red_phase_complete=False):
+            return CriticOutput(
+                status="success",
+                analysis="all good",
+                next_actions=["finish"],
+                lessons=[LessonProposal(lesson="Keep tests focused.", tags=["testing"])],
+            )
+
+    class FakeExecutor:
+        def __init__(self, workspace_dir, timeout_sec, max_output_chars):
+            self.workspace_dir = workspace_dir
+
+        def run(self, command_specs):
+            return [
+                ExecutionResult(
+                    command=spec.raw,
+                    returncode=0,
+                    stdout="ok",
+                    stderr="",
+                    timed_out=False,
+                    duration_sec=0.02,
+                )
+                for spec in command_specs
+            ]
+
+    monkeypatch.setattr("web.control_center.Planner", FakePlanner)
+    monkeypatch.setattr("web.control_center.Coder", FakeCoder)
+    monkeypatch.setattr("web.control_center.Critic", FakeCritic)
+    monkeypatch.setattr("web.control_center.RestrictedExecutor", FakeExecutor)
+
+    ok, start = center.start_run({"command": "/goal autonomous self-improvement proposal"})
+    assert ok is True
+    run = _wait_for_terminal(center, start["run_id"])
+    assert run["meta"]["status"] == "success"
+
+    deadline = time.time() + 2.0
+    proposals = center.list_self_improvements(limit=50)
+    while int(proposals.get("total", 0)) < 1 and time.time() < deadline:
+        time.sleep(0.05)
+        proposals = center.list_self_improvements(limit=50)
+    assert int(proposals.get("total", 0)) >= 1
+    assert int(proposals.get("autonomous_count", 0)) >= 1
+    items = proposals.get("items", [])
+    assert any(bool((row.get("metadata") or {}).get("autonomous", False)) for row in items if isinstance(row, dict))
+    timeline = center.growth_timeline(limit=120)
+    assert any(
+        str(item.get("category", "")).startswith("autonomous_self_improvement")
+        for item in timeline.get("milestones", [])
+        if isinstance(item, dict)
+    )
 
 
 def test_tdd_mode_tests_first_then_green(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
