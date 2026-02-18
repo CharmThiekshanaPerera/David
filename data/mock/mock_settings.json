@@ -1,0 +1,23 @@
+{
+  "safe_mode": false,
+  "rate_limit_seconds": 3,
+  "max_iterations_override": 0,
+  "risky_large_edit_bytes": 50000,
+  "risky_multi_file_threshold": 4,
+  "run_preview_default": false,
+  "companion_mode": true,
+  "memory_insight_mode": true,
+  "parent_teaching_mode": false,
+  "autonomous_self_improvement_mode": true,
+  "demo_mode": true,
+  "personality_warmth": 68,
+  "personality_verbosity": 58,
+  "personality_curiosity": 62,
+  "planner_model": "qwen2.5-coder:7b",
+  "coder_model": "qwen2.5-coder:7b",
+  "critic_model": "llama3.1:8b",
+  "tdd_mode": false,
+  "ui_theme_default": "dark",
+  "ui_background_enabled": true,
+  "demo_badge_text": "DEMO"
+}

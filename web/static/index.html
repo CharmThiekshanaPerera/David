@@ -21,6 +21,7 @@
           <span class="dot" aria-hidden="true"></span>
           <span id="streamStatusText">polling fallback</span>
         </div>
+        <div class="status-pill demo-pill hidden" id="demoBadge">DEMO</div>
       </div>
     </header>
 
@@ -391,6 +392,7 @@
             <label class="check"><input id="settingMemoryInsightMode" type="checkbox" checked /> Memory Insight Mode</label>
             <label class="check"><input id="settingParentTeachingMode" type="checkbox" /> Parent Teaching Mode default</label>
             <label class="check"><input id="settingAutonomousSelfImproveMode" type="checkbox" checked /> Autonomous self-improvement mode</label>
+            <label class="check"><input id="settingDemoMode" type="checkbox" /> Demo mode (fixtures)</label>
             <label class="field">
               Warmth (tone only)
               <input id="settingPersonalityWarmth" type="range" min="0" max="100" step="1" />
@@ -406,6 +408,10 @@
               <input id="settingPersonalityCuriosity" type="range" min="0" max="100" step="1" />
               <span id="settingPersonalityCuriosityValue" class="muted">50</span>
             </label>
+          </div>
+          <div class="row">
+            <button id="loadDemoDataBtn" type="button" class="ghost">Load Demo Data</button>
+            <button id="resetDemoDataBtn" type="button" class="ghost">Reset Demo</button>
           </div>
           <button id="saveSettingsBtn">Save Settings</button>
           <ul class="kv" id="settingsInfo"></ul>

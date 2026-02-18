@@ -1,0 +1,6 @@
+{
+  "status": "failed",
+  "message": "Tests regressed after additional validation change.",
+  "failure": "AssertionError in tests/test_validator.py::test_invalid_token",
+  "likely_failure_cause": "First failing iteration after a passing iteration."
+}

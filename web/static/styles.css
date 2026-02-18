@@ -692,6 +692,12 @@ button.ghost:hover:not(:disabled) {
   background: var(--stream-fallback);
   animation: none;
 }
+.demo-pill {
+  border-color: color-mix(in oklab, var(--warning) 65%, var(--line));
+  background: color-mix(in oklab, var(--warning) 16%, var(--panel-strong));
+  color: color-mix(in oklab, var(--warning) 78%, var(--text));
+  font-weight: 700;
+}
 
 /* Banners */
 .banner {

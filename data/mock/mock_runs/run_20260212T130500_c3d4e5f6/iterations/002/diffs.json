@@ -1,0 +1,32 @@
+[
+  {
+    "path": "src/deploy.py",
+    "change_type": "edited",
+    "workspace_path": "workspace/projects/deploy_refactor/src/deploy.py",
+    "added": 11,
+    "removed": 5,
+    "before_preview": "def deploy_release(env): ...",
+    "after_preview": "def deploy_release(env, checks=True): ...",
+    "patch": "--- a/src/deploy.py\n+++ b/src/deploy.py\n@@ -2,2 +2,3 @@\n-def deploy_release(env):\n-    return run(env)\n+def deploy_release(env, checks=True):\n+    if checks:\n+        verify_rollout(env)"
+  },
+  {
+    "path": "src/pipeline.py",
+    "change_type": "edited",
+    "workspace_path": "workspace/projects/deploy_refactor/src/pipeline.py",
+    "added": 5,
+    "removed": 2,
+    "before_preview": "steps = ['build']",
+    "after_preview": "steps = ['build','verify','deploy']",
+    "patch": "--- a/src/pipeline.py\n+++ b/src/pipeline.py\n@@ -4 +4 @@\n-steps = ['build']\n+steps = ['build','verify','deploy']"
+  },
+  {
+    "path": "tests/test_deploy.py",
+    "change_type": "edited",
+    "workspace_path": "workspace/projects/deploy_refactor/tests/test_deploy.py",
+    "added": 7,
+    "removed": 1,
+    "before_preview": "def test_deploy_pipeline(): ...",
+    "after_preview": "def test_deploy_pipeline():\n    assert 'verify' in steps",
+    "patch": "--- a/tests/test_deploy.py\n+++ b/tests/test_deploy.py\n@@ -7 +7,2 @@\n-def test_deploy_pipeline():\n+def test_deploy_pipeline():\n+    assert 'verify' in steps"
+  }
+]

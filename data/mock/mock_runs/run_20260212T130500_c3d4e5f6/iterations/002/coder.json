@@ -1,0 +1,11 @@
+{
+  "summary": "Updated deployment orchestrator and test harness.",
+  "edits": [
+    {"path": "src/deploy.py", "reason": "new rollout checks"},
+    {"path": "src/pipeline.py", "reason": "align with deploy"},
+    {"path": "tests/test_deploy.py", "reason": "update assertions"}
+  ],
+  "commands": ["pytest -q"],
+  "done": false,
+  "done_reason": "Awaiting risk approval."
+}

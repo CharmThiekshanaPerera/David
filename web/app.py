@@ -52,6 +52,8 @@ def create_app(
                 "/api/memory/confirm_overwrite",
                 "/api/self_improvements/propose",
                 "/api/legacy_archive",
+                "/api/demo/load",
+                "/api/demo/reset",
             }
             if request.path.startswith("/api/approval/") or request.path.startswith("/api/run/"):
                 protected.add(request.path)
@@ -460,6 +462,39 @@ def create_app(
             data = center.update_settings(payload)
         except ValueError as exc:
             return _json_error(str(exc), status=400)
+        return jsonify({"ok": True, "data": data})
+
+    @app.post("/api/demo/load")
+    def api_demo_load():
+        payload = request.get_json(silent=True) or {}
+        if payload is None:
+            payload = {}
+        if not isinstance(payload, dict):
+            return _json_error("JSON body must be an object.")
+        actor = str(payload.get("actor", "web_ui")).strip() or "web_ui"
+        confirm_overwrite = bool(payload.get("confirm_overwrite", payload.get("force", False)))
+        ok, data = center.load_demo_data(force=confirm_overwrite, actor=actor)
+        if not ok:
+            response = {
+                "ok": False,
+                "error": str(data.get("error", "Failed to load demo fixtures.")),
+            }
+            if bool(data.get("requires_confirmation", False)):
+                response["requires_confirmation"] = True
+            return jsonify(response), 409
+        return jsonify({"ok": True, "data": data})
+
+    @app.post("/api/demo/reset")
+    def api_demo_reset():
+        payload = request.get_json(silent=True) or {}
+        if payload is None:
+            payload = {}
+        if not isinstance(payload, dict):
+            return _json_error("JSON body must be an object.")
+        actor = str(payload.get("actor", "web_ui")).strip() or "web_ui"
+        ok, data = center.reset_demo_data(actor=actor)
+        if not ok:
+            return _json_error(str(data.get("error", "Failed to reset demo fixtures.")), status=409)
         return jsonify({"ok": True, "data": data})
 
     @app.get("/api/approvals")

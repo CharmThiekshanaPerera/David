@@ -1,0 +1,8 @@
+{
+  "status": "success",
+  "analysis": "Companion helper landed with passing tests.",
+  "next_actions": ["Document usage in README"],
+  "lessons": [
+    {"lesson": "Project isolation under workspace/projects keeps runs clean.", "tags": ["workspace", "isolation"]}
+  ]
+}

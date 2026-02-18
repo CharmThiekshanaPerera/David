@@ -1,0 +1,43 @@
+{
+  "artifacts_dir": "data/runs/run_20260211T113000_b2c3d4e5",
+  "workspace_dir": "workspace",
+  "project_slug": "validator_hardening",
+  "project_path": "workspace/projects/validator_hardening",
+  "created": [
+    {
+      "path": "src/validator.py",
+      "change_type": "new",
+      "workspace_path": "workspace/projects/validator_hardening/src/validator.py",
+      "added": 30,
+      "removed": 0,
+      "after_preview": "def validate_token(text):\n    ..."
+    }
+  ],
+  "modified": [
+    {
+      "path": "tests/test_validator.py",
+      "change_type": "edited",
+      "workspace_path": "workspace/projects/validator_hardening/tests/test_validator.py",
+      "added": 4,
+      "removed": 2,
+      "after_preview": "def test_invalid_token():\n    ..."
+    }
+  ],
+  "project_files": [
+    "src/validator.py",
+    "tests/test_validator.py"
+  ],
+  "workspace_files": [
+    {"path": "projects/validator_hardening/src/validator.py", "change_type": "workspace", "workspace_path": "workspace/projects/validator_hardening/src/validator.py", "added": 0, "removed": 0, "after_preview": "def validate_token(text):\n    ..."},
+    {"path": "projects/validator_hardening/tests/test_validator.py", "change_type": "workspace", "workspace_path": "workspace/projects/validator_hardening/tests/test_validator.py", "added": 0, "removed": 0, "after_preview": "def test_invalid_token():\n    ..."}
+  ],
+  "workspace_dirs": [
+    "projects",
+    "projects/validator_hardening",
+    "projects/validator_hardening/src",
+    "projects/validator_hardening/tests"
+  ],
+  "workspace_file_total": 2,
+  "workspace_dir_total": 4,
+  "workspace_files_truncated": false
+}

@@ -63,11 +63,13 @@ const state = {
   theme: localStorage.getItem("dcc_theme") === "light" ? "light" : "dark",
   bgDisabled: localStorage.getItem("dcc_bg_disabled") === "1",
   reducedMotion: window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+  demoBadgeText: "DEMO",
 };
 
 const el = {
   tabs: document.getElementById("tabs"),
   globalStatus: document.getElementById("globalStatus"),
+  demoBadge: document.getElementById("demoBadge"),
   streamStatus: document.getElementById("streamStatus"),
   streamStatusText: document.getElementById("streamStatusText"),
   runningBanner: document.getElementById("runningBanner"),
@@ -150,6 +152,7 @@ const el = {
   settingMemoryInsightMode: document.getElementById("settingMemoryInsightMode"),
   settingParentTeachingMode: document.getElementById("settingParentTeachingMode"),
   settingAutonomousSelfImproveMode: document.getElementById("settingAutonomousSelfImproveMode"),
+  settingDemoMode: document.getElementById("settingDemoMode"),
   settingPersonalityWarmth: document.getElementById("settingPersonalityWarmth"),
   settingPersonalityVerbosity: document.getElementById("settingPersonalityVerbosity"),
   settingPersonalityCuriosity: document.getElementById("settingPersonalityCuriosity"),
@@ -162,6 +165,8 @@ const el = {
   settingTddMode: document.getElementById("settingTddMode"),
   refreshModelsBtn: document.getElementById("refreshModelsBtn"),
   saveSettingsBtn: document.getElementById("saveSettingsBtn"),
+  loadDemoDataBtn: document.getElementById("loadDemoDataBtn"),
+  resetDemoDataBtn: document.getElementById("resetDemoDataBtn"),
   settingsInfo: document.getElementById("settingsInfo"),
   themeDarkBtn: document.getElementById("themeDarkBtn"),
   themeLightBtn: document.getElementById("themeLightBtn"),
@@ -385,7 +390,9 @@ async function api(path, options = {}) {
   const response = await fetch(path, { ...options, headers });
   const json = await response.json().catch(() => ({}));
   if (!response.ok || !json.ok) {
-    throw new Error(json?.error || json?.data?.error || `Request failed (${response.status})`);
+    const err = new Error(json?.error || json?.data?.error || `Request failed (${response.status})`);
+    err.response = json;
+    throw err;
   }
   return json.data;
 }
@@ -1073,6 +1080,33 @@ function setStreamState(label) {
   }
 }
 
+function renderDemoBadge() {
+  if (!el.demoBadge) return;
+  const enabled = !!(state.status?.demo_mode || state.settings?.demo_mode);
+  el.demoBadge.classList.toggle("hidden", !enabled);
+  if (enabled) {
+    const label = String(state.settings?.demo_badge_text || state.demoBadgeText || "DEMO").trim() || "DEMO";
+    el.demoBadge.textContent = label;
+  }
+}
+
+function applyDemoUiDefaults(settingsData) {
+  const data = settingsData && typeof settingsData === "object" ? settingsData : {};
+  if (!(state.status?.demo_mode || data.demo_mode)) return;
+  if (Object.prototype.hasOwnProperty.call(data, "demo_badge_text")) {
+    state.demoBadgeText = String(data.demo_badge_text || "").trim() || "DEMO";
+  }
+  const themeStored = localStorage.getItem("dcc_theme");
+  const bgStored = localStorage.getItem("dcc_bg_disabled");
+  const themeDefault = String(data.ui_theme_default || "").trim().toLowerCase();
+  if (!themeStored && (themeDefault === "dark" || themeDefault === "light")) {
+    applyTheme(themeDefault, false);
+  }
+  if (bgStored === null && typeof data.ui_background_enabled === "boolean") {
+    setBackgroundEnabled(!!data.ui_background_enabled);
+  }
+}
+
 function renderRunConfigSummary(planner, coder, critic, tdd) {
   if (!el.runConfigSummary) return;
   el.runConfigSummary.innerHTML = `
@@ -1142,6 +1176,7 @@ function renderStatus() {
     ["Latest success", fmtBool(s.latest_success)],
     ["Pending approvals", s.pending_approvals || 0],
     ["Legacy archive entries", s.legacy_archive_count || 0],
+    ["Demo mode", fmtBool(s.demo_mode)],
     ["Safe mode", fmtBool(s.safe_mode)],
   ]);
 
@@ -1149,6 +1184,7 @@ function renderStatus() {
   toggleRunningBanner(s);
   updateButtonState();
   renderRunConfigSummary(s.planner_model_used, s.coder_model_used, s.critic_model_used, s.tdd_mode);
+  renderDemoBadge();
 }
 
 function renderArtifacts(details) {
@@ -2307,6 +2343,7 @@ function renderLogs(data) {
 function renderSettings(data) {
   const safeData = data && typeof data === "object" ? data : {};
   state.settings = safeData;
+  applyDemoUiDefaults(safeData);
   state.goalTemplates = Array.isArray(safeData.goal_templates) ? safeData.goal_templates : [];
   if (el.settingSafeMode) {
     el.settingSafeMode.value = String(!!safeData.safe_mode);
@@ -2337,6 +2374,9 @@ function renderSettings(data) {
   }
   if (el.settingAutonomousSelfImproveMode) {
     el.settingAutonomousSelfImproveMode.checked = safeData.autonomous_self_improvement_mode !== false;
+  }
+  if (el.settingDemoMode) {
+    el.settingDemoMode.checked = !!safeData.demo_mode || !!state.status?.demo_mode;
   }
   if (el.settingPersonalityWarmth) {
     el.settingPersonalityWarmth.value = clampPercent(safeData.personality_warmth, 55);
@@ -2401,6 +2441,8 @@ function renderSettings(data) {
     ["Companion mode", fmtBool(safeData.companion_mode !== false)],
     ["Memory Insight Mode", fmtBool(safeData.memory_insight_mode !== false)],
     ["Parent Teaching Mode", fmtBool(safeData.parent_teaching_mode)],
+    ["Demo mode", fmtBool(safeData.demo_mode)],
+    ["Demo env override", fmtBool(safeData.demo_mode_env_override)],
     ["Warmth", calibrationDescriptor("warmth", safeData.personality_warmth ?? 55)],
     ["Verbosity", calibrationDescriptor("verbosity", safeData.personality_verbosity ?? 55)],
     ["Curiosity", calibrationDescriptor("curiosity", safeData.personality_curiosity ?? 50)],
@@ -2409,6 +2451,7 @@ function renderSettings(data) {
     ["Default max iterations", safeData.max_iterations_default || 0],
     ["Goal templates", (state.goalTemplates || []).length],
   ]);
+  renderDemoBadge();
 }
 
 function handleRunCompletionNotification() {
@@ -3135,6 +3178,67 @@ function wireActions() {
   el.logsSearch.addEventListener("input", () => renderLogs(state.logs || {}));
   el.logsLevelFilter.addEventListener("change", () => renderLogs(state.logs || {}));
 
+  el.loadDemoDataBtn?.addEventListener("click", async () => {
+    try {
+      try {
+        await api("/api/demo/load", {
+          method: "POST",
+          body: JSON.stringify({ confirm_overwrite: false, actor: "web_ui" }),
+        });
+      } catch (err) {
+        const requiresConfirmation = !!err?.response?.requires_confirmation;
+        if (!requiresConfirmation) {
+          throw err;
+        }
+        const approved = window.confirm(
+          "Live data already exists. Replace runs/memory/conversations with deterministic demo fixtures?"
+        );
+        if (!approved) return;
+        await api("/api/demo/load", {
+          method: "POST",
+          body: JSON.stringify({ confirm_overwrite: true, actor: "web_ui" }),
+        });
+      }
+      showToast("Demo fixtures loaded.");
+      await Promise.all([
+        refreshSettings().catch(() => {}),
+        refreshStatus().catch(() => {}),
+        refreshRuns().catch(() => {}),
+        refreshApprovals().catch(() => {}),
+        refreshMemory().catch(() => {}),
+        refreshTelemetry().catch(() => {}),
+        refreshLogs().catch(() => {}),
+        refreshWorkspaceTargets().catch(() => {}),
+      ]);
+    } catch (err) {
+      setMessage(err.message);
+    }
+  });
+
+  el.resetDemoDataBtn?.addEventListener("click", async () => {
+    const approved = window.confirm("Reset demo data to the baseline fixtures?");
+    if (!approved) return;
+    try {
+      await api("/api/demo/reset", {
+        method: "POST",
+        body: JSON.stringify({ actor: "web_ui" }),
+      });
+      showToast("Demo fixtures reset.");
+      await Promise.all([
+        refreshSettings().catch(() => {}),
+        refreshStatus().catch(() => {}),
+        refreshRuns().catch(() => {}),
+        refreshApprovals().catch(() => {}),
+        refreshMemory().catch(() => {}),
+        refreshTelemetry().catch(() => {}),
+        refreshLogs().catch(() => {}),
+        refreshWorkspaceTargets().catch(() => {}),
+      ]);
+    } catch (err) {
+      setMessage(err.message);
+    }
+  });
+
   el.saveSettingsBtn.addEventListener("click", async () => {
     try {
       const payload = {
@@ -3150,6 +3254,7 @@ function wireActions() {
         autonomous_self_improvement_mode: el.settingAutonomousSelfImproveMode
           ? !!el.settingAutonomousSelfImproveMode.checked
           : true,
+        demo_mode: el.settingDemoMode ? !!el.settingDemoMode.checked : false,
         personality_warmth: clampPercent(el.settingPersonalityWarmth?.value, 55),
         personality_verbosity: clampPercent(el.settingPersonalityVerbosity?.value, 55),
         personality_curiosity: clampPercent(el.settingPersonalityCuriosity?.value, 50),

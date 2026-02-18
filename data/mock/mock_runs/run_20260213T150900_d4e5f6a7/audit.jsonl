@@ -1,0 +1,2 @@
+{"timestamp_utc":"2026-05-13T15:09:00+00:00","action":"run_started","payload":{"actor":"demo_seed"}}
+{"timestamp_utc":"2026-05-13T15:09:22+00:00","action":"run_success","payload":{"tests_passed":true}}

@@ -1,0 +1,7 @@
+2026-05-10T10:15:00Z INFO server boot complete
+2026-05-10T10:15:01Z INFO stream status connected
+2026-05-10T10:15:09Z WARN approval gate triggered for large multi-file edit
+2026-05-10T10:15:18Z INFO run run_20260210T101500_a1b2c3d4 finished success
+2026-05-11T11:30:31Z ERROR pytest failed: AssertionError in tests/test_cli.py::test_edge_case
+2026-05-11T11:31:50Z WARN sse connection dropped, retrying
+2026-05-11T11:32:10Z INFO switched to polling fallback

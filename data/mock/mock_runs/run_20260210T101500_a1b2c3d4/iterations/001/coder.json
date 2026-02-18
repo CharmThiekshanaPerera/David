@@ -1,0 +1,9 @@
+{
+  "summary": "Created failing tests for add/list/done and invalid index.",
+  "edits": [
+    {"path": "tests/test_cli.py", "reason": "red phase"}
+  ],
+  "commands": ["pytest -q"],
+  "done": false,
+  "done_reason": "Need implementation for tests."
+}

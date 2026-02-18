@@ -1,0 +1,13 @@
+{
+  "goal": "Build TODO CLI with strict TDD",
+  "steps": [
+    {"id": "S1", "title": "Write failing tests", "details": "Create red tests for add/list/done and invalid index handling.", "success_check": "pytest fails first"},
+    {"id": "S2", "title": "Implement CLI", "details": "Implement parser and storage to satisfy tests.", "success_check": "pytest becomes green"},
+    {"id": "S3", "title": "Capture lessons", "details": "Store TDD iteration lessons and edge-case notes.", "success_check": "memory updated"}
+  ],
+  "success_criteria": [
+    "All CLI tests pass",
+    "Edge-case validation is covered",
+    "TDD sequence is preserved"
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "status": "retry",
+  "analysis": "Red phase observed. Proceed to implementation.",
+  "next_actions": ["Implement CLI parser", "Keep tests unchanged"],
+  "lessons": [
+    {"lesson": "In TDD mode, keep failing tests as baseline before implementation.", "tags": ["tdd"]}
+  ]
+}

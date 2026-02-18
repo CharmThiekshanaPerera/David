@@ -1,0 +1,9 @@
+{
+  "summary": "Refactored pipeline module boundaries.",
+  "edits": [
+    {"path": "src/pipeline.py", "reason": "modularize steps"}
+  ],
+  "commands": ["pytest -q"],
+  "done": false,
+  "done_reason": "Needs deployment flow update."
+}

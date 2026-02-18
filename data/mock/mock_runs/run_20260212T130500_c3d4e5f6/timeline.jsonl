@@ -1,0 +1,4 @@
+{"timestamp_utc":"2026-05-12T13:05:00+00:00","step":"run_started","payload":{"mode":"goal"}}
+{"timestamp_utc":"2026-05-12T13:05:12+00:00","step":"iteration_started","payload":{"iteration":1}}
+{"timestamp_utc":"2026-05-12T13:05:20+00:00","step":"iteration_started","payload":{"iteration":2}}
+{"timestamp_utc":"2026-05-12T13:05:24+00:00","step":"approval_requested","payload":{"approval_id":"appr_demo_001","requires_typed_confirmation":true}}

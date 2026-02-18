@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import logging
+import os
 import queue
 import re
 import shutil
@@ -197,6 +198,7 @@ class ControlSettings:
     memory_insight_mode: bool = True
     parent_teaching_mode: bool = False
     autonomous_self_improvement_mode: bool = True
+    demo_mode: bool = False
     personality_warmth: int = 55
     personality_verbosity: int = 55
     personality_curiosity: int = 50
@@ -227,6 +229,7 @@ class ControlSettings:
             memory_insight_mode=bool(data.get("memory_insight_mode", True)),
             parent_teaching_mode=bool(data.get("parent_teaching_mode", False)),
             autonomous_self_improvement_mode=bool(data.get("autonomous_self_improvement_mode", True)),
+            demo_mode=bool(data.get("demo_mode", False)),
             personality_warmth=_pct("personality_warmth", 55),
             personality_verbosity=_pct("personality_verbosity", 55),
             personality_curiosity=_pct("personality_curiosity", 50),
@@ -259,6 +262,7 @@ class DavidControlCenter:
         self.runs_root = (self.data_root / "runs").resolve()
         self.settings_file = (self.data_root / "control_settings.json").resolve()
         self.self_improvements_file = (self.data_root / "self_improvements.json").resolve()
+        self.mock_data_root = (self.project_root / "data" / "mock").resolve()
         self.agent_sandbox_root = (self.config.workspace_dir / "agent_sandbox").resolve()
         self.runs_root.mkdir(parents=True, exist_ok=True)
         self.agent_sandbox_root.mkdir(parents=True, exist_ok=True)
@@ -275,6 +279,14 @@ class DavidControlCenter:
         self._pending_parent_teaching: dict[str, dict[str, Any]] = {}
         self._chat_session_by_actor: dict[str, str] = {}
         self._conversations_file = self.config.memory_file.parent / "conversations.jsonl"
+        self._demo_runtime: dict[str, Any] = {
+            "initialized": False,
+            "approvals": [],
+            "pending_overwrites": {},
+            "conversation_appends": [],
+            "pending_parent_teaching": {},
+            "approval_audit_appends": {},
+        }
         self._ensure_conversation_store()
 
         self._logger = logging.getLogger("david.control_center")
@@ -290,14 +302,29 @@ class DavidControlCenter:
         ensure_workspace_layout(self.config.workspace_dir)
 
     def get_status(self) -> dict[str, Any]:
+        demo_mode = self._demo_mode_enabled()
         with self._lock:
             active = self._active_run_id
-            pending_count = len([p for p in self._pending_approvals.values() if p.get("status") == "pending"])
-            self_improvement_pending_count = sum(
-                1
-                for item in self._self_improvement_rows()
-                if str(item.get("status", "")).strip().lower() == "pending"
-            )
+            if demo_mode:
+                pending_count = len(
+                    [
+                        p
+                        for p in self._demo_list_approvals_runtime()
+                        if str(p.get("status", "")).strip().lower() == "pending"
+                    ]
+                )
+                self_improvement_pending_count = sum(
+                    1
+                    for item in self._demo_self_improvement_rows()
+                    if str(item.get("status", "")).strip().lower() == "pending"
+                )
+            else:
+                pending_count = len([p for p in self._pending_approvals.values() if p.get("status") == "pending"])
+                self_improvement_pending_count = sum(
+                    1
+                    for item in self._self_improvement_rows()
+                    if str(item.get("status", "")).strip().lower() == "pending"
+                )
 
         current_meta = self._read_run_meta(active) if active else None
         runs = self.get_runs(limit=30)
@@ -329,6 +356,7 @@ class DavidControlCenter:
             "pending_approvals": pending_count,
             "pending_self_improvements": self_improvement_pending_count,
             "autonomous_self_improvement_mode": self.settings.autonomous_self_improvement_mode,
+            "demo_mode": demo_mode,
             "safe_mode": self.settings.safe_mode,
             "rate_limit_seconds": self.settings.rate_limit_seconds,
             "allowed_commands": list(self.config.allowed_commands),
@@ -368,8 +396,9 @@ class DavidControlCenter:
                     continue
 
     def get_settings(self) -> dict[str, Any]:
-        return {
+        payload = {
             **asdict(self.settings),
+            "demo_mode_env_override": self._demo_mode_env_enabled(),
             "model": self.config.model,
             "planner_model_default": self.config.planner_model,
             "coder_model_default": self.config.coder_model,
@@ -379,6 +408,16 @@ class DavidControlCenter:
             "workspace_dir": str(self.config.workspace_dir),
             "goal_templates": self.goal_templates(),
         }
+        if self._demo_mode_enabled():
+            mock_settings = self._read_demo_json("mock_settings.json", default={})
+            if isinstance(mock_settings, dict):
+                if "ui_theme_default" in mock_settings:
+                    payload["ui_theme_default"] = str(mock_settings.get("ui_theme_default", "dark")).strip() or "dark"
+                if "ui_background_enabled" in mock_settings:
+                    payload["ui_background_enabled"] = bool(mock_settings.get("ui_background_enabled"))
+                if "demo_badge_text" in mock_settings:
+                    payload["demo_badge_text"] = str(mock_settings.get("demo_badge_text", "DEMO")).strip() or "DEMO"
+        return payload
 
     def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
         current = asdict(self.settings)
@@ -403,6 +442,12 @@ class DavidControlCenter:
         return None
 
     def list_ollama_models(self) -> list[str]:
+        if self._demo_mode_enabled():
+            payload = self._read_demo_json("mock_models.json", default={})
+            rows = payload.get("models", []) if isinstance(payload, dict) else []
+            models = [str(item).strip() for item in rows if str(item).strip()]
+            if models:
+                return sorted(set(models))
         tags_url = self.config.ollama_url.replace("/api/chat", "/api/tags")
         try:
             response = requests.get(tags_url, timeout=(5, 10))
@@ -462,6 +507,10 @@ class DavidControlCenter:
         )
 
     def start_run(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        if self._demo_mode_enabled():
+            return False, {
+                "error": "Demo mode is active. Runs are read from deterministic mock fixtures. Disable demo mode to execute live runs.",
+            }
         template_id = str(payload.get("template_id", "")).strip()
         template = self._template_by_id(template_id)
         if template_id and template is None:
@@ -703,6 +752,11 @@ class DavidControlCenter:
         return {"intent": intent, "confidence": confidence, "topics": self._extract_topics(text), "reason": reason}
 
     def ask_memory(self, question: str, actor: str = "web_ui") -> dict[str, Any]:
+        if self._demo_mode_enabled():
+            payload = self._demo_ask_memory(question, actor=actor.strip() or "web_ui")
+            self.publish_event("status", {"type": "memory_ask_answered", "payload": payload})
+            self.publish_event("logs", {"type": "memory_ask_answered", "payload": payload})
+            return payload
         clean_question = self._sanitize_user_text(question, field_name="question")
         payload = self._ask_memory_first(clean_question, actor=actor.strip() or "web_ui", session_id="")
         self.publish_event("status", {"type": "memory_ask_answered", "payload": payload})
@@ -716,6 +770,15 @@ class DavidControlCenter:
         confirm_conflict: bool = False,
         actor: str = "web_ui",
     ) -> dict[str, Any]:
+        if self._demo_mode_enabled():
+            payload = self._demo_teach_memory(
+                message,
+                actor=actor.strip() or "web_ui",
+                confirm_conflict=confirm_conflict,
+            )
+            self.publish_event("status", {"type": "memory_teach_completed", "payload": payload})
+            self.publish_event("logs", {"type": "memory_teach_completed", "payload": payload})
+            return payload
         if self.settings.safe_mode:
             raise ValueError("Safe mode is enabled. /teach is blocked in read-only mode.")
 
@@ -752,6 +815,18 @@ class DavidControlCenter:
         session_id: str = "",
         actor: str = "web_ui",
     ) -> dict[str, Any]:
+        if self._demo_mode_enabled():
+            payload = self._demo_chat_message(
+                message,
+                intent=intent,
+                confirm_save=confirm_save,
+                parent_teaching_mode=parent_teaching_mode,
+                session_id=session_id,
+                actor=actor,
+            )
+            self.publish_event("status", {"type": "memory_chat_response", "payload": payload})
+            self.publish_event("logs", {"type": "memory_chat_response", "payload": payload})
+            return payload
         clean_message = self._sanitize_user_text(message, field_name="message")
         actor_value = actor.strip() or "web_ui"
         detected = self.classify_chat_intent(clean_message)
@@ -966,6 +1041,26 @@ class DavidControlCenter:
         return payload
 
     def memory_facts(self, query: str = "", limit: int = 500) -> dict[str, Any]:
+        if self._demo_mode_enabled():
+            payload = self._demo_memory_payload_runtime()
+            facts = payload.get("facts", []) if isinstance(payload.get("facts"), list) else []
+            conflicts = self._detect_memory_conflicts(facts)
+            query_tokens = set(self._tokenize_text(query))
+            filtered: list[dict[str, Any]] = []
+            for row in facts:
+                if not isinstance(row, dict):
+                    continue
+                if query_tokens:
+                    text = f"{row.get('subject', '')} {row.get('predicate', '')} {row.get('object', '')}"
+                    if not (query_tokens & set(self._tokenize_text(text))):
+                        continue
+                filtered.append(row)
+            return {
+                "facts": filtered[-max(1, min(limit, 5000)) :],
+                "conflicts": conflicts,
+                "conflict_count": len(conflicts),
+                "total": len(filtered),
+            }
         payload = self._read_memory_payload()
         facts = payload.get("facts", []) if isinstance(payload.get("facts"), list) else []
         conflicts = self._detect_memory_conflicts(facts)
@@ -988,6 +1083,16 @@ class DavidControlCenter:
         }
 
     def memory_conversations(self, session_id: str = "", limit: int = 500) -> dict[str, Any]:
+        if self._demo_mode_enabled():
+            rows = self._demo_conversation_rows_runtime()[-max(1, min(limit, 5000)) :]
+            clean_session = self._sanitize_session_id(session_id)
+            if clean_session:
+                rows = [row for row in rows if str(row.get("session_id", "")) == clean_session]
+            return {
+                "conversations": rows,
+                "session_id": clean_session,
+                "total": len(rows),
+            }
         rows = self._read_jsonl(self._conversations_file, limit=max(1, min(limit, 5000)))
         clean_session = self._sanitize_session_id(session_id)
         if clean_session:
@@ -999,7 +1104,10 @@ class DavidControlCenter:
         }
 
     def chat_sessions(self, limit: int = 120) -> list[dict[str, Any]]:
-        rows = self._read_jsonl(self._conversations_file, limit=20_000)
+        if self._demo_mode_enabled():
+            rows = self._demo_conversation_rows_runtime()
+        else:
+            rows = self._read_jsonl(self._conversations_file, limit=20_000)
         grouped: dict[str, dict[str, Any]] = {}
         for row in rows:
             if not isinstance(row, dict):
@@ -1048,6 +1156,8 @@ class DavidControlCenter:
         decision: str,
         actor: str = "web_ui",
     ) -> tuple[bool, dict[str, Any]]:
+        if self._demo_mode_enabled():
+            return self._demo_confirm_memory_overwrite(overwrite_id, decision=decision, actor=actor)
         clean_id = str(overwrite_id).strip()
         if not clean_id:
             return False, {"error": "overwrite_id is required."}
@@ -1099,6 +1209,14 @@ class DavidControlCenter:
         actor: str = "local_user",
         confirmation: str = "",
     ) -> tuple[bool, dict[str, Any]]:
+        if self._demo_mode_enabled():
+            return self._demo_submit_approval(
+                approval_id=approval_id,
+                decision=decision,
+                note=note,
+                actor=actor,
+                confirmation=confirmation,
+            )
         choice = decision.strip().lower()
         if choice not in {"approve", "reject"}:
             return False, {"error": "Decision must be approve or reject."}
@@ -1142,6 +1260,8 @@ class DavidControlCenter:
         return True, {"approval_id": approval_id, "decision": choice}
 
     def list_approvals(self) -> list[dict[str, Any]]:
+        if self._demo_mode_enabled():
+            return self._demo_list_approvals_runtime()
         with self._lock:
             rows = list(self._pending_approvals.values())
         rows.sort(key=lambda item: item.get("created_at", ""), reverse=True)
@@ -1153,8 +1273,11 @@ class DavidControlCenter:
         except (TypeError, ValueError):
             limit_value = 160
         max_limit = max(1, min(limit_value, 500))
-        with self._lock:
-            rows = self._self_improvement_rows()
+        if self._demo_mode_enabled():
+            rows = self._demo_self_improvement_rows()
+        else:
+            with self._lock:
+                rows = self._self_improvement_rows()
         rows.sort(key=lambda item: str(item.get("created_at", "")), reverse=True)
         pending_count = sum(1 for item in rows if str(item.get("status", "")).strip().lower() == "pending")
         merged_count = sum(1 for item in rows if str(item.get("status", "")).strip().lower() == "merged")
@@ -1182,6 +1305,8 @@ class DavidControlCenter:
         *,
         actor: str = "david_agent",
     ) -> tuple[bool, dict[str, Any]]:
+        if self._demo_mode_enabled():
+            return False, {"error": "Demo mode is active. Direct self-improvement proposal writes are disabled."}
         if not isinstance(payload, dict):
             return False, {"error": "Payload must be an object."}
         title = self._sanitize_user_text(payload.get("title", ""), field_name="title", max_chars=220)
@@ -1329,6 +1454,8 @@ class DavidControlCenter:
         actor: str = "web_ui",
         note: str = "",
     ) -> tuple[bool, dict[str, Any]]:
+        if self._demo_mode_enabled():
+            return False, {"error": "Demo mode is active. Proposal decisions are read-only."}
         clean_id = str(proposal_id).strip()
         if not clean_id:
             return False, {"error": "proposal_id is required."}
@@ -1970,7 +2097,11 @@ class DavidControlCenter:
 
     def get_runs(self, search: str = "", status: str = "", limit: int = 100) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
-        for run_dir in self.runs_root.iterdir():
+        if self._demo_mode_enabled():
+            run_dirs = self._demo_run_dirs()
+        else:
+            run_dirs = [item for item in self.runs_root.iterdir()]
+        for run_dir in run_dirs:
             if not run_dir.is_dir():
                 continue
             meta = self._read_json(run_dir / "meta.json", default=None)
@@ -2008,7 +2139,8 @@ class DavidControlCenter:
         if not self._is_safe_run_id(run_id):
             return None
 
-        run_dir = self._run_dir(run_id)
+        run_root = self._demo_runs_root() if self._demo_mode_enabled() else None
+        run_dir = self._run_dir(run_id, runs_root=run_root)
         meta = self._read_json(run_dir / "meta.json", default=None)
         if not isinstance(meta, dict):
             return None
@@ -2016,6 +2148,10 @@ class DavidControlCenter:
         plan = self._read_json(run_dir / "plan.json", default={})
         result = self._read_json(run_dir / "result.json", default={})
         timeline = self._read_jsonl(run_dir / "timeline.jsonl", limit=1_000)
+        if not timeline:
+            timeline_json = self._read_json(run_dir / "timeline.json", default=[])
+            if isinstance(timeline_json, list):
+                timeline = [row for row in timeline_json if isinstance(row, dict)][-1000:]
 
         iteration_rows: list[dict[str, Any]] = []
         iterations_dir = run_dir / "iterations"
@@ -2049,26 +2185,48 @@ class DavidControlCenter:
     def get_run_timeline(self, run_id: str, limit: int = 1000) -> list[dict[str, Any]] | None:
         if not self._is_safe_run_id(run_id):
             return None
-        run_dir = self._run_dir(run_id)
+        run_root = self._demo_runs_root() if self._demo_mode_enabled() else None
+        run_dir = self._run_dir(run_id, runs_root=run_root)
         if not run_dir.exists():
             return None
-        return self._read_jsonl(run_dir / "timeline.jsonl", limit=max(1, min(limit, 2000)))
+        rows = self._read_jsonl(run_dir / "timeline.jsonl", limit=max(1, min(limit, 2000)))
+        if rows:
+            return rows
+        timeline_json = self._read_json(run_dir / "timeline.json", default=[])
+        if isinstance(timeline_json, list):
+            clean = [row for row in timeline_json if isinstance(row, dict)]
+            return clean[-max(1, min(limit, 2000)) :]
+        return []
 
     def get_run_audit(self, run_id: str, limit: int = 1000) -> list[dict[str, Any]] | None:
         if not self._is_safe_run_id(run_id):
             return None
-        run_dir = self._run_dir(run_id)
+        run_root = self._demo_runs_root() if self._demo_mode_enabled() else None
+        run_dir = self._run_dir(run_id, runs_root=run_root)
         if not run_dir.exists():
             return None
-        return self._read_jsonl(run_dir / "audit.jsonl", limit=max(1, min(limit, 2000)))
+        rows = self._read_jsonl(run_dir / "audit.jsonl", limit=max(1, min(limit, 2000)))
+        if self._demo_mode_enabled():
+            self._ensure_demo_runtime()
+            with self._lock:
+                appends = self._demo_runtime.get("approval_audit_appends", {}).get(run_id, [])
+            if isinstance(appends, list):
+                rows.extend([row for row in appends if isinstance(row, dict)])
+        rows.sort(key=lambda row: str(row.get("timestamp_utc", "")))
+        return rows[-max(1, min(limit, 2000)) :]
 
     def get_run_files(self, run_id: str) -> dict[str, Any] | None:
         if not self._is_safe_run_id(run_id):
             return None
 
-        run_dir = self._run_dir(run_id)
+        run_root = self._demo_runs_root() if self._demo_mode_enabled() else None
+        run_dir = self._run_dir(run_id, runs_root=run_root)
         if not run_dir.exists():
             return None
+        if self._demo_mode_enabled():
+            summary = self._read_json(run_dir / "file_summary.json", default=None)
+            if isinstance(summary, dict):
+                return summary
         meta = self._read_json(run_dir / "meta.json", default={})
         project_slug = ""
         project_path_str = ""
@@ -2134,7 +2292,8 @@ class DavidControlCenter:
     def get_run_replay(self, run_id: str, iteration: int) -> dict[str, Any] | None:
         if not self._is_safe_run_id(run_id):
             return None
-        run_dir = self._run_dir(run_id)
+        run_root = self._demo_runs_root() if self._demo_mode_enabled() else None
+        run_dir = self._run_dir(run_id, runs_root=run_root)
         iterations_dir = run_dir / "iterations"
         if not iterations_dir.exists():
             return None
@@ -2170,7 +2329,8 @@ class DavidControlCenter:
     def compare_iterations(self, run_id: str, iteration: int) -> dict[str, Any] | None:
         if not self._is_safe_run_id(run_id):
             return None
-        run_dir = self._run_dir(run_id)
+        run_root = self._demo_runs_root() if self._demo_mode_enabled() else None
+        run_dir = self._run_dir(run_id, runs_root=run_root)
         iterations_dir = run_dir / "iterations"
         if not iterations_dir.exists():
             return None
@@ -2212,6 +2372,10 @@ class DavidControlCenter:
         }
 
     def retry_run(self, run_id: str) -> tuple[bool, dict[str, Any]]:
+        if self._demo_mode_enabled():
+            return False, {
+                "error": "Demo mode is active. Retry is disabled to keep fixture runs deterministic.",
+            }
         current = self.get_run(run_id)
         if not current:
             return False, {"error": "Run not found."}
@@ -2234,7 +2398,8 @@ class DavidControlCenter:
     def run_bundle_zip(self, run_id: str) -> io.BytesIO | None:
         if not self._is_safe_run_id(run_id):
             return None
-        run_dir = self._run_dir(run_id)
+        run_root = self._demo_runs_root() if self._demo_mode_enabled() else None
+        run_dir = self._run_dir(run_id, runs_root=run_root)
         if not run_dir.exists() or not run_dir.is_dir():
             return None
 
@@ -2248,7 +2413,12 @@ class DavidControlCenter:
         return buff
 
     def memory_snapshot(self) -> dict[str, Any]:
-        payload = self._read_memory_payload()
+        if self._demo_mode_enabled():
+            payload = self._demo_memory_payload_runtime()
+            conversations = self._demo_conversation_rows_runtime()[-300:]
+        else:
+            payload = self._read_memory_payload()
+            conversations = self._read_jsonl(self._conversations_file, limit=600)
         facts = payload.get("facts", []) if isinstance(payload.get("facts"), list) else []
         all_lessons = payload.get("lessons", []) if isinstance(payload.get("lessons"), list) else []
         values = payload.get("values", []) if isinstance(payload.get("values"), list) else []
@@ -2256,7 +2426,6 @@ class DavidControlCenter:
         legacy_archive = payload.get("legacy_archive", []) if isinstance(payload.get("legacy_archive"), list) else []
         lessons = self._non_reflection_lessons(all_lessons)
         reflections = self._reflection_lessons(all_lessons)
-        conversations = self._read_jsonl(self._conversations_file, limit=600)
         conflicts = self._detect_memory_conflicts(facts)
         return {
             "facts": facts[-300:],
@@ -2414,7 +2583,7 @@ class DavidControlCenter:
 
     def growth_timeline(self, limit: int = 120) -> dict[str, Any]:
         max_limit = max(10, min(limit, 500))
-        payload = self._read_memory_payload()
+        payload = self._demo_memory_payload_runtime() if self._demo_mode_enabled() else self._read_memory_payload()
         facts = payload.get("facts", []) if isinstance(payload.get("facts"), list) else []
         lessons = payload.get("lessons", []) if isinstance(payload.get("lessons"), list) else []
         reflections = self._reflection_lessons(lessons)
@@ -2520,7 +2689,7 @@ class DavidControlCenter:
                 }
             )
 
-        self_improvements = self._self_improvement_rows()
+        self_improvements = self._demo_self_improvement_rows() if self._demo_mode_enabled() else self._self_improvement_rows()
         self_improvements.sort(key=lambda item: str(item.get("created_at", "")))
         self_improvement_total = 0
         self_improvement_merged = 0
@@ -2647,8 +2816,12 @@ class DavidControlCenter:
         }
 
     def telemetry_tail(self, limit: int = 100) -> dict[str, Any]:
-        events = self._read_jsonl(self.config.logs_dir / "telemetry.jsonl", limit=max(1, min(limit, 1000)))
-        metrics = self._read_json(self.config.logs_dir / "metrics.json", default={"iterations": []})
+        if self._demo_mode_enabled():
+            events = self._read_demo_jsonl("mock_telemetry.jsonl", limit=max(1, min(limit, 1000)))
+            metrics = self._read_demo_json("mock_metrics.json", default={"iterations": []})
+        else:
+            events = self._read_jsonl(self.config.logs_dir / "telemetry.jsonl", limit=max(1, min(limit, 1000)))
+            metrics = self._read_json(self.config.logs_dir / "metrics.json", default={"iterations": []})
         rows = metrics.get("iterations", []) if isinstance(metrics, dict) else []
         if not isinstance(rows, list):
             rows = []
@@ -2689,6 +2862,29 @@ class DavidControlCenter:
         }
 
     def logs_tail(self, limit: int = 200) -> dict[str, Any]:
+        if self._demo_mode_enabled():
+            logs_text = self._read_demo_json("mock_logs.txt", default=None)
+            if isinstance(logs_text, str):
+                lines = logs_text.splitlines()
+            else:
+                path = (self._demo_fixture_root() / "mock_logs.txt").resolve()
+                lines = self._tail_lines(path, max(1, min(limit, 2000)))
+            payload: dict[str, Any] = {
+                "web_control_center.log": lines[-max(1, min(limit, 2000)) :],
+                "telemetry.jsonl": self._tail_lines(
+                    (self._demo_fixture_root() / "mock_telemetry.jsonl").resolve(),
+                    max(1, min(limit, 2000)),
+                ),
+            }
+            runs = self.get_runs(limit=1)
+            if runs:
+                run_id = str(runs[0].get("id", "")).strip()
+                if run_id and self._is_safe_run_id(run_id):
+                    timeline_path = self._run_dir(run_id, runs_root=self._demo_runs_root()) / "timeline.jsonl"
+                    payload[f"run_{run_id}_timeline.jsonl"] = self._tail_lines(
+                        timeline_path, max(1, min(limit, 2000))
+                    )
+            return payload
         files = [
             self.config.logs_dir / "web_control_center.log",
             self.config.logs_dir / "telemetry.jsonl",
@@ -6459,6 +6655,49 @@ class DavidControlCenter:
         return rows, dir_rows, total_files, total_dirs, truncated
 
     def workspace_tree(self, limit: int = 20_000) -> dict[str, Any]:
+        if self._demo_mode_enabled():
+            entries: list[dict[str, str]] = []
+            seen: set[tuple[str, str]] = set()
+            workspace_files_total = 0
+            workspace_dirs_total = 0
+            for run_dir in self._demo_run_dirs():
+                summary = self._read_json(run_dir / "file_summary.json", default={})
+                if not isinstance(summary, dict):
+                    continue
+                dirs = summary.get("workspace_dirs", [])
+                files = summary.get("workspace_files", [])
+                if isinstance(dirs, list):
+                    for row in dirs:
+                        path = str(row).strip()
+                        if not path:
+                            continue
+                        key = ("folder", path)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        entries.append({"path": path, "type": "folder"})
+                        workspace_dirs_total += 1
+                if isinstance(files, list):
+                    for row in files:
+                        if not isinstance(row, dict):
+                            continue
+                        path = str(row.get("path", "")).strip()
+                        if not path:
+                            continue
+                        key = ("file", path)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        entries.append({"path": path, "type": "file"})
+                        workspace_files_total += 1
+            entries.sort(key=lambda row: (str(row.get("path", "")).count("/"), str(row.get("path", ""))))
+            return {
+                "workspace_dir": str(self.config.workspace_dir),
+                "entries": entries[:max(1, min(limit, 20_000))],
+                "file_total": workspace_files_total,
+                "dir_total": workspace_dirs_total,
+                "truncated": len(entries) > max(1, min(limit, 20_000)),
+            }
         files, dirs, total_files, total_dirs, truncated = self._list_workspace_files(limit=limit)
         entries: list[dict[str, str]] = []
         entries.extend({"path": row, "type": "folder"} for row in dirs if row)
@@ -6550,8 +6789,8 @@ class DavidControlCenter:
             )
         )
 
-    def _run_dir(self, run_id: str) -> Path:
-        return self.runs_root / run_id
+    def _run_dir(self, run_id: str, runs_root: Path | None = None) -> Path:
+        return (runs_root or self.runs_root) / run_id
 
     def _read_run_meta(self, run_id: str | None) -> dict[str, Any] | None:
         if not run_id:
@@ -6603,7 +6842,1255 @@ class DavidControlCenter:
         self._write_json(self.settings_file, asdict(settings))
         return settings
 
+    @staticmethod
+    def _env_truthy(name: str) -> bool:
+        value = os.getenv(name, "").strip().lower()
+        return value in {"1", "true", "yes", "on"}
+
+    def _demo_mode_env_enabled(self) -> bool:
+        return self._env_truthy("DEMO_MODE")
+
+    def _demo_mode_enabled(self) -> bool:
+        return self._demo_mode_env_enabled() or bool(self.settings.demo_mode)
+
+    def _demo_fixture_root(self) -> Path:
+        candidates = [
+            (self.data_root / "mock").resolve(),
+            self.mock_data_root,
+        ]
+        for path in candidates:
+            if path.exists() and path.is_dir():
+                return path
+        return self.mock_data_root
+
+    def _demo_runs_root(self) -> Path:
+        return (self._demo_fixture_root() / "mock_runs").resolve()
+
+    def _read_demo_json(self, relative_path: str, default: Any) -> Any:
+        path = (self._demo_fixture_root() / relative_path).resolve()
+        try:
+            fixture_root = self._demo_fixture_root()
+        except Exception:
+            fixture_root = self.mock_data_root
+        if path == fixture_root or fixture_root not in path.parents:
+            return default
+        return self._read_json(path, default=default)
+
+    def _read_demo_jsonl(self, relative_path: str, limit: int = 5000) -> list[dict[str, Any]]:
+        path = (self._demo_fixture_root() / relative_path).resolve()
+        try:
+            fixture_root = self._demo_fixture_root()
+        except Exception:
+            fixture_root = self.mock_data_root
+        if path == fixture_root or fixture_root not in path.parents:
+            return []
+        return self._read_jsonl(path, limit=max(1, min(limit, 20_000)))
+
+    @staticmethod
+    def _clone_json(value: Any) -> Any:
+        try:
+            return json.loads(json.dumps(value))
+        except (TypeError, ValueError):
+            return value
+
+    def _ensure_demo_runtime(self) -> None:
+        with self._lock:
+            if bool(self._demo_runtime.get("initialized", False)):
+                return
+            memory_payload = self._read_demo_json(
+                "mock_memory_long_term.json",
+                default={"facts": [], "lessons": [], "preferences": [], "values": [], "projects": [], "legacy_archive": []},
+            )
+            if not isinstance(memory_payload, dict):
+                memory_payload = {"facts": [], "lessons": [], "preferences": [], "values": [], "projects": [], "legacy_archive": []}
+            memory_payload = self._clone_json(memory_payload)
+            memory_payload.setdefault("facts", [])
+            memory_payload.setdefault("lessons", [])
+            memory_payload.setdefault("preferences", [])
+            memory_payload.setdefault("values", [])
+            memory_payload.setdefault("projects", [])
+            memory_payload.setdefault("legacy_archive", [])
+
+            conversations = self._read_demo_jsonl("mock_conversations.jsonl", limit=20_000)
+            approvals = self._read_demo_json("mock_approvals.json", default=[])
+            if not isinstance(approvals, list):
+                approvals = []
+            approvals = [row for row in approvals if isinstance(row, dict)]
+
+            self._demo_runtime = {
+                "initialized": True,
+                "memory_payload": memory_payload,
+                "base_conversations": self._clone_json(conversations),
+                "conversation_appends": [],
+                "pending_overwrites": {},
+                "approvals": self._clone_json(approvals),
+                "approval_audit_appends": {},
+            }
+
+    def _reset_demo_runtime(self) -> None:
+        with self._lock:
+            self._demo_runtime = {
+                "initialized": False,
+                "approvals": [],
+                "pending_overwrites": {},
+                "conversation_appends": [],
+                "pending_parent_teaching": {},
+                "approval_audit_appends": {},
+            }
+        self._ensure_demo_runtime()
+
+    def _demo_memory_payload_runtime(self) -> dict[str, Any]:
+        self._ensure_demo_runtime()
+        with self._lock:
+            payload = self._demo_runtime.get("memory_payload", {})
+            if isinstance(payload, dict):
+                return payload
+        return {"facts": [], "lessons": [], "preferences": [], "values": [], "projects": [], "legacy_archive": []}
+
+    def _demo_conversation_rows_runtime(self) -> list[dict[str, Any]]:
+        self._ensure_demo_runtime()
+        with self._lock:
+            base = self._demo_runtime.get("base_conversations", [])
+            appends = self._demo_runtime.get("conversation_appends", [])
+        rows = []
+        if isinstance(base, list):
+            rows.extend([row for row in base if isinstance(row, dict)])
+        if isinstance(appends, list):
+            rows.extend([row for row in appends if isinstance(row, dict)])
+        rows.sort(key=lambda row: str(row.get("timestamp_utc", "")))
+        return rows
+
+    def _demo_list_approvals_runtime(self) -> list[dict[str, Any]]:
+        self._ensure_demo_runtime()
+        with self._lock:
+            rows = self._demo_runtime.get("approvals", [])
+            if not isinstance(rows, list):
+                rows = []
+            clean = [dict(row) for row in rows if isinstance(row, dict)]
+        clean.sort(key=lambda item: str(item.get("created_at", "")), reverse=True)
+        return clean
+
+    def _demo_self_improvement_rows(self) -> list[dict[str, Any]]:
+        rows = self._read_demo_json("mock_self_improvements.json", default=[])
+        if not isinstance(rows, list):
+            return []
+        return [row for row in rows if isinstance(row, dict)]
+
+    @staticmethod
+    def _demo_typed_confirmation_expected(approval: dict[str, Any]) -> str:
+        run_id = str(approval.get("run_id", "")).strip()
+        return f"approve {run_id}".strip()
+
+    def _demo_append_conversation_turn(
+        self,
+        *,
+        session_id: str,
+        role: str,
+        text: str,
+        intent: str,
+        topics: list[str],
+        confidence: float,
+        actor: str,
+        metadata: dict[str, Any] | None = None,
+        pinned: bool = False,
+    ) -> dict[str, Any]:
+        row = {
+            "message_id": uuid.uuid4().hex,
+            "session_id": session_id,
+            "role": str(role),
+            "text": str(text),
+            "intent": self._normalize_intent(intent) or "chat",
+            "topics": [str(item).strip() for item in topics if str(item).strip()][:12],
+            "confidence": round(max(0.0, min(float(confidence), 1.0)), 3),
+            "actor": actor,
+            "pinned": bool(pinned),
+            "timestamp_utc": self._now_iso(),
+            "metadata": metadata or {},
+        }
+        self._ensure_demo_runtime()
+        with self._lock:
+            appends = self._demo_runtime.setdefault("conversation_appends", [])
+            if isinstance(appends, list):
+                appends.append(row)
+        return row
+
+    def _demo_session_has_assistant_turn(self, session_id: str) -> bool:
+        clean_session = self._sanitize_session_id(session_id)
+        if not clean_session:
+            return False
+        rows = self._demo_conversation_rows_runtime()
+        for row in reversed(rows):
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("session_id", "")) != clean_session:
+                continue
+            if str(row.get("role", "")) == "assistant":
+                return True
+        return False
+
+    def _demo_match_conversations_for_question(
+        self,
+        question_tokens: set[str],
+        *,
+        session_id: str,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        if not question_tokens:
+            return []
+        rows = self._demo_conversation_rows_runtime()
+        scored: list[tuple[int, dict[str, Any]]] = []
+        for row in rows:
+            if not isinstance(row, dict) or str(row.get("role", "")) != "user":
+                continue
+            if session_id and str(row.get("session_id", "")) != session_id:
+                continue
+            text = str(row.get("text", ""))
+            tokens = set(self._tokenize_text(text))
+            score = len(question_tokens & tokens)
+            if score > 0:
+                scored.append((score, row))
+        scored.sort(key=lambda item: (item[0], str(item[1].get("timestamp_utc", ""))), reverse=True)
+        return [row for _, row in scored[: max(1, min(limit, 50))]]
+
+    def _demo_extract_teach_memory(self, message: str) -> dict[str, Any]:
+        rows: list[dict[str, str]] = []
+        rows.extend(self._companion_teach_heuristics(message))
+        lowered = message.casefold()
+        name_match = re.search(r"\bmy name is\s+([a-z][a-z .'-]{1,80})", message, flags=re.IGNORECASE)
+        name_value = name_match.group(1).strip(" .") if name_match else ""
+
+        if "i am your dad" in lowered or "i'm your dad" in lowered or "i am your father" in lowered:
+            rows.append({"subject": "David", "predicate": "father_relation", "object": "dad"})
+            if name_value:
+                rows.append({"subject": "David", "predicate": "father_name", "object": name_value})
+
+        if "i am your mom" in lowered or "i'm your mom" in lowered or "i am your mother" in lowered:
+            rows.append({"subject": "David", "predicate": "mother_relation", "object": "mom"})
+            if name_value:
+                rows.append({"subject": "David", "predicate": "mother_name", "object": name_value})
+
+        if name_value and not any(
+            str(item.get("predicate", "")).casefold() in {"father_name", "mother_name"} for item in rows if isinstance(item, dict)
+        ):
+            rows.append({"subject": "User", "predicate": "name", "object": name_value})
+
+        principle_match = re.search(r"\balways value\s+([^\n.!?]{2,140})", message, flags=re.IGNORECASE)
+        if principle_match:
+            principle = principle_match.group(1).strip(" .")
+            if principle:
+                rows.append({"subject": "User", "predicate": "value_principle", "object": principle})
+
+        triples: list[dict[str, str]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            normalized = self._normalize_fact_row(row.get("subject", ""), row.get("predicate", ""), row.get("object", ""))
+            if not normalized:
+                continue
+            key = (
+                normalized["subject"].casefold(),
+                normalized["predicate"].casefold(),
+                normalized["object"].casefold(),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            triples.append(normalized)
+
+        return {
+            "triples": triples,
+            "notes": "demo_mode_extraction",
+            "aliases": [],
+            "topics": self._extract_topics(message),
+        }
+
+    def _demo_apply_teach_extract(
+        self,
+        *,
+        extracted: dict[str, Any],
+        message: str,
+        actor: str,
+        session_id: str,
+        allow_overwrite: bool,
+        overwrite_id: str,
+        legacy_mode: bool,
+    ) -> dict[str, Any]:
+        triples = extracted.get("triples", []) if isinstance(extracted.get("triples"), list) else []
+        notes = str(extracted.get("notes", "")).strip()
+        aliases = extracted.get("aliases", []) if isinstance(extracted.get("aliases"), list) else []
+        topics = extracted.get("topics", []) if isinstance(extracted.get("topics"), list) else []
+
+        self._ensure_demo_runtime()
+        with self._lock:
+            payload = self._demo_runtime.get("memory_payload", {})
+            if not isinstance(payload, dict):
+                payload = {"facts": [], "lessons": [], "preferences": [], "values": [], "projects": [], "legacy_archive": []}
+                self._demo_runtime["memory_payload"] = payload
+            facts = payload.get("facts", [])
+            if not isinstance(facts, list):
+                facts = []
+                payload["facts"] = facts
+
+            facts_by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
+            for row in facts:
+                if not isinstance(row, dict):
+                    continue
+                subject = str(row.get("subject", "")).strip()
+                predicate = str(row.get("predicate", "")).strip()
+                if not subject or not predicate:
+                    continue
+                facts_by_key.setdefault((subject.casefold(), predicate.casefold()), []).append(row)
+
+            deduped: list[dict[str, str]] = []
+            duplicates: list[dict[str, str]] = []
+            conflicts: list[dict[str, Any]] = []
+            for triple in triples:
+                if not isinstance(triple, dict):
+                    continue
+                normalized = self._normalize_fact_row(triple.get("subject", ""), triple.get("predicate", ""), triple.get("object", ""))
+                if not normalized:
+                    continue
+                key = (normalized["subject"].casefold(), normalized["predicate"].casefold())
+                current_rows = facts_by_key.get(key, [])
+                exact_match = False
+                conflicting_values: list[str] = []
+                for existing in current_rows:
+                    existing_obj = str(existing.get("object", "")).strip()
+                    if not existing_obj:
+                        continue
+                    if existing_obj.casefold() == normalized["object"].casefold():
+                        exact_match = True
+                        break
+                    similarity = difflib.SequenceMatcher(None, existing_obj.casefold(), normalized["object"].casefold()).ratio()
+                    if similarity >= 0.94:
+                        exact_match = True
+                        break
+                    conflicting_values.append(existing_obj)
+                if exact_match:
+                    duplicates.append(normalized)
+                    continue
+                if conflicting_values:
+                    conflicts.append(
+                        {
+                            "subject": normalized["subject"],
+                            "predicate": normalized["predicate"],
+                            "existing_values": sorted(set(conflicting_values)),
+                            "incoming": normalized["object"],
+                        }
+                    )
+                deduped.append(normalized)
+
+            if conflicts and not allow_overwrite:
+                pending_id = overwrite_id or f"ow_demo_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}_{uuid.uuid4().hex[:6]}"
+                pending_map = self._demo_runtime.setdefault("pending_overwrites", {})
+                if not isinstance(pending_map, dict):
+                    pending_map = {}
+                    self._demo_runtime["pending_overwrites"] = pending_map
+                pending_map[pending_id] = {
+                    "id": pending_id,
+                    "status": "pending",
+                    "message": message,
+                    "actor": actor,
+                    "session_id": session_id,
+                    "created_at": self._now_iso(),
+                    "conflicts": conflicts,
+                    "extracted": extracted,
+                }
+                return {
+                    "mode": "teach",
+                    "status": "overwrite_confirmation_required",
+                    "message": message,
+                    "requires_overwrite_confirmation": True,
+                    "overwrite_id": pending_id,
+                    "stored_facts": [],
+                    "stored_count": 0,
+                    "deduplicated_count": len(duplicates),
+                    "skipped_items": [],
+                    "conflicts": conflicts,
+                    "notes": notes or "Conflict detected. Confirm overwrite to continue.",
+                    "aliases": aliases,
+                    "topics": topics,
+                    "session_id": session_id,
+                    "actor": actor,
+                    "timestamp_utc": self._now_iso(),
+                }
+
+            overwrite_keys = {(item["subject"].casefold(), item["predicate"].casefold()) for item in deduped}
+            if conflicts and allow_overwrite and overwrite_keys:
+                facts[:] = [
+                    row
+                    for row in facts
+                    if not (
+                        isinstance(row, dict)
+                        and (str(row.get("subject", "")).casefold(), str(row.get("predicate", "")).casefold()) in overwrite_keys
+                    )
+                ]
+
+            now = self._now_iso()
+            stored_facts: list[dict[str, Any]] = []
+            alias_values = [str(item.get("alias", "")).strip() for item in aliases if isinstance(item, dict)]
+            alias_values = [item for item in alias_values if item]
+            for triple in deduped:
+                stored = {
+                    "id": uuid.uuid4().hex,
+                    "subject": triple["subject"],
+                    "predicate": triple["predicate"],
+                    "object": triple["object"],
+                    "source": "demo_user",
+                    "confidence": 1.0,
+                    "timestamp": now,
+                    "last_updated": now,
+                    "notes": notes,
+                    "aliases": alias_values,
+                    "session_id": session_id,
+                    "provenance": {"source": "demo_user", "actor": actor, "last_updated": now},
+                }
+                facts.append(stored)
+                stored_facts.append(stored)
+
+            payload["facts"] = facts[-2000:]
+
+        return {
+            "mode": "teach",
+            "status": "stored",
+            "message": message,
+            "requires_confirmation": False,
+            "requires_overwrite_confirmation": False,
+            "overwrite_id": overwrite_id,
+            "stored_facts": stored_facts,
+            "stored_count": len(stored_facts),
+            "deduplicated_count": len(duplicates),
+            "skipped_items": [],
+            "conflicts": conflicts,
+            "notes": notes,
+            "aliases": aliases,
+            "topics": topics,
+            "session_id": session_id,
+            "actor": actor,
+            "timestamp_utc": self._now_iso(),
+            "legacy_mode": bool(legacy_mode),
+        }
+
+    def _demo_ask_memory(
+        self,
+        question: str,
+        *,
+        actor: str,
+        session_id: str = "",
+        force_transparency: bool = False,
+    ) -> dict[str, Any]:
+        clean_question = self._sanitize_user_text(question, field_name="question")
+        payload = self._demo_memory_payload_runtime()
+        facts = payload.get("facts", []) if isinstance(payload.get("facts"), list) else []
+        all_lessons = payload.get("lessons", []) if isinstance(payload.get("lessons"), list) else []
+        values = payload.get("values", []) if isinstance(payload.get("values"), list) else []
+        projects = payload.get("projects", []) if isinstance(payload.get("projects"), list) else []
+        lessons = self._non_reflection_lessons(all_lessons)
+        question_tokens = set(self._tokenize_text(clean_question))
+
+        matched_facts = self._match_facts_for_question(question_tokens, facts, limit=8)
+        matched_conversations = self._demo_match_conversations_for_question(
+            question_tokens,
+            session_id=session_id,
+            limit=5,
+        )
+        matched_lessons = self._match_lessons_for_question(question_tokens, lessons, limit=4)
+        matched_values = self._match_values_for_question(question_tokens, values, limit=3)
+        matched_projects = self._match_projects_for_query(
+            question_tokens,
+            projects,
+            query_text=clean_question,
+            limit=2,
+        )
+        conversation_source = [
+            row
+            for row in self._demo_conversation_rows_runtime()
+            if isinstance(row, dict) and str(row.get("role", "")) == "user"
+        ]
+        personality = self._companion_personality(actor)
+
+        if not self.settings.companion_mode:
+            answer = MEMORY_UNKNOWN_ANSWER
+            if matched_projects:
+                answer = self._compose_project_brain_overview_line(matched_projects[0])
+            elif matched_facts:
+                first = matched_facts[0]
+                answer = (
+                    f"You told me earlier: {first.get('subject', 'unknown')} "
+                    f"{str(first.get('predicate', 'fact')).replace('_', ' ')} is {first.get('object', 'unknown')}."
+                )
+            elif matched_conversations:
+                excerpt = str(matched_conversations[0].get("text", "")).strip()
+                answer = f"You told me earlier: {excerpt[:220]}"
+
+            citations = self._build_memory_citations(
+                facts=matched_facts,
+                conversations=matched_conversations,
+                lessons=[],
+                values=matched_values,
+                projects=matched_projects,
+            )
+            memory_insight = self._build_memory_insight(
+                enabled=bool(self.settings.memory_insight_mode and self._is_web_actor(actor)),
+                matched_facts=matched_facts,
+                matched_conversations=matched_conversations,
+                matched_lessons=[],
+                facts_source=facts,
+                conversations_source=conversation_source,
+                lessons_source=[],
+            )
+            return {
+                "mode": "ask",
+                "status": "answered",
+                "question": clean_question,
+                "answer": answer,
+                "matched_facts": matched_facts,
+                "matched_count": len(matched_facts),
+                "matched_conversations": matched_conversations,
+                "conversation_match_count": len(matched_conversations),
+                "matched_lessons": [],
+                "lesson_match_count": 0,
+                "matched_values": matched_values,
+                "values_match_count": len(matched_values),
+                "matched_projects": matched_projects,
+                "project_match_count": len(matched_projects),
+                "citations": citations,
+                "memory_insight": memory_insight,
+                "used_memory": {
+                    "facts": matched_facts[:5],
+                    "conversations": matched_conversations[:3],
+                    "values": matched_values[:3],
+                    "projects": matched_projects[:2],
+                },
+                "session_id": session_id,
+                "actor": actor,
+                "timestamp_utc": self._now_iso(),
+            }
+
+        answer = self._compose_companion_ask_answer(
+            question=clean_question,
+            matched_facts=matched_facts,
+            matched_conversations=matched_conversations,
+            matched_lessons=matched_lessons,
+            matched_values=matched_values,
+            matched_projects=matched_projects,
+            personality_enabled=bool(personality.get("enabled", False)),
+            warmth=int(personality.get("warmth", 55)),
+            verbosity=int(personality.get("verbosity", 55)),
+            curiosity=int(personality.get("curiosity", 50)),
+            force_transparency=force_transparency,
+        )
+        citations = self._build_memory_citations(
+            facts=matched_facts,
+            conversations=matched_conversations,
+            lessons=matched_lessons,
+            values=matched_values,
+            projects=matched_projects,
+        )
+        memory_insight = self._build_memory_insight(
+            enabled=bool(self.settings.memory_insight_mode and self._is_web_actor(actor)),
+            matched_facts=matched_facts,
+            matched_conversations=matched_conversations,
+            matched_lessons=matched_lessons,
+            facts_source=facts,
+            conversations_source=conversation_source,
+            lessons_source=lessons,
+        )
+
+        return {
+            "mode": "ask",
+            "status": "answered",
+            "question": clean_question,
+            "answer": answer,
+            "matched_facts": matched_facts,
+            "matched_count": len(matched_facts),
+            "matched_conversations": matched_conversations,
+            "conversation_match_count": len(matched_conversations),
+            "matched_lessons": matched_lessons,
+            "lesson_match_count": len(matched_lessons),
+            "matched_values": matched_values,
+            "values_match_count": len(matched_values),
+            "matched_projects": matched_projects,
+            "project_match_count": len(matched_projects),
+            "citations": citations,
+            "memory_insight": memory_insight,
+            "used_memory": {
+                "facts": matched_facts[:5],
+                "conversations": matched_conversations[:3],
+                "lessons": matched_lessons[:3],
+                "values": matched_values[:3],
+                "projects": matched_projects[:2],
+            },
+            "session_id": session_id,
+            "actor": actor,
+            "timestamp_utc": self._now_iso(),
+        }
+
+    def _demo_teach_memory(
+        self,
+        message: str,
+        *,
+        actor: str,
+        confirm_conflict: bool,
+    ) -> dict[str, Any]:
+        if self.settings.safe_mode:
+            raise ValueError("Safe mode is enabled. /teach is blocked in read-only mode.")
+        clean_message = self._sanitize_user_text(message, field_name="message")
+        if self._contains_sensitive_memory_text(clean_message):
+            raise ValueError("Sensitive data cannot be stored in memory.")
+        extracted = self._demo_extract_teach_memory(clean_message)
+        payload = self._demo_apply_teach_extract(
+            extracted=extracted,
+            message=clean_message,
+            actor=actor,
+            session_id="",
+            allow_overwrite=bool(confirm_conflict),
+            overwrite_id="",
+            legacy_mode=True,
+        )
+        if payload.get("status") == "overwrite_confirmation_required":
+            payload["status"] = "conflict"
+            payload["requires_confirmation"] = True
+            payload["notes"] = "Conflict detected. Confirm to continue."
+            payload["stored_facts"] = []
+            payload["stored_count"] = 0
+            payload["skipped_items"] = []
+        if payload.get("status") == "stored":
+            payload["confirmed_conflict"] = bool(payload.get("conflicts")) and bool(confirm_conflict)
+            payload["requires_confirmation"] = False
+        return payload
+
+    def _demo_confirm_memory_overwrite(
+        self,
+        overwrite_id: str,
+        *,
+        decision: str,
+        actor: str,
+    ) -> tuple[bool, dict[str, Any]]:
+        clean_id = str(overwrite_id).strip()
+        if not clean_id:
+            return False, {"error": "overwrite_id is required."}
+        choice = str(decision).strip().lower()
+        if choice not in {"approve", "reject"}:
+            return False, {"error": "decision must be approve or reject."}
+
+        self._ensure_demo_runtime()
+        with self._lock:
+            pending_map = self._demo_runtime.get("pending_overwrites", {})
+            if not isinstance(pending_map, dict):
+                pending_map = {}
+                self._demo_runtime["pending_overwrites"] = pending_map
+            pending = pending_map.get(clean_id)
+            if not isinstance(pending, dict):
+                return False, {"error": "Overwrite request not found."}
+            if str(pending.get("status", "pending")) != "pending":
+                return False, {"error": "Overwrite request is already resolved."}
+            pending["status"] = "approved" if choice == "approve" else "rejected"
+            pending["decided_at"] = self._now_iso()
+            pending["decided_by"] = actor.strip() or "web_ui"
+
+        if choice == "reject":
+            payload = {
+                "mode": "teach",
+                "status": "rejected",
+                "overwrite_id": clean_id,
+                "message": str(pending.get("message", "")),
+                "actor": actor.strip() or "web_ui",
+                "timestamp_utc": self._now_iso(),
+            }
+            self.publish_event("status", {"type": "memory_teach_overwrite_rejected", "payload": payload})
+            self.publish_event("logs", {"type": "memory_teach_overwrite_rejected", "payload": payload})
+            return True, payload
+
+        payload = self._demo_apply_teach_extract(
+            extracted=pending.get("extracted", {}),
+            message=str(pending.get("message", "")),
+            actor=actor.strip() or "web_ui",
+            session_id=str(pending.get("session_id", "")),
+            allow_overwrite=True,
+            overwrite_id=clean_id,
+            legacy_mode=False,
+        )
+        self.publish_event("status", {"type": "memory_teach_overwrite_confirmed", "payload": payload})
+        self.publish_event("logs", {"type": "memory_teach_overwrite_confirmed", "payload": payload})
+        return True, payload
+
+    def _demo_parent_teaching_turn(
+        self,
+        *,
+        message: str,
+        actor: str,
+        session_id: str,
+    ) -> dict[str, Any] | None:
+        clean_session = self._sanitize_session_id(session_id)
+        if not clean_session:
+            return None
+        self._ensure_demo_runtime()
+        with self._lock:
+            pending_map = self._demo_runtime.setdefault("pending_parent_teaching", {})
+            if not isinstance(pending_map, dict):
+                pending_map = {}
+                self._demo_runtime["pending_parent_teaching"] = pending_map
+            pending = pending_map.get(clean_session)
+            memory_payload = self._demo_runtime.get("memory_payload", {})
+            if not isinstance(memory_payload, dict):
+                memory_payload = {"facts": [], "lessons": [], "preferences": [], "values": [], "projects": [], "legacy_archive": []}
+                self._demo_runtime["memory_payload"] = memory_payload
+            values = memory_payload.get("values", [])
+            if not isinstance(values, list):
+                values = []
+                memory_payload["values"] = values
+
+            if isinstance(pending, dict):
+                category = str(pending.get("category", "value"))
+                principle = str(pending.get("principle", "this principle")).strip()
+                application = str(message).strip()[:600]
+                now = self._now_iso()
+                entry = {
+                    "id": uuid.uuid4().hex,
+                    "timestamp_utc": now,
+                    "category": self._normalize_teaching_category(category),
+                    "category_label": self._teaching_category_label(category),
+                    "principle": principle,
+                    "application": application,
+                    "source": "parent_teaching_mode",
+                    "actor": actor,
+                    "session_id": clean_session,
+                    "message": str(pending.get("message", "")).strip()[:400],
+                    "tags": ["parent_teaching", self._normalize_teaching_category(category)],
+                }
+                values.append(entry)
+                memory_payload["values"] = values[-2000:]
+                pending_map.pop(clean_session, None)
+                return {
+                    "mode": "teach",
+                    "status": "stored",
+                    "parent_teaching_mode": True,
+                    "parent_teaching_stage": "completed",
+                    "requires_clarification": False,
+                    "category": entry["category"],
+                    "category_label": entry["category_label"],
+                    "principle": principle,
+                    "application": application,
+                    "stored_values": [entry],
+                    "stored_value_count": 1,
+                    "message": str(message),
+                    "session_id": clean_session,
+                    "actor": actor,
+                    "timestamp_utc": now,
+                }
+
+            category = self._classify_parent_teaching_category(message)
+            principle = self._extract_parent_teaching_principle(message)
+            question = self._build_parent_teaching_question(category, principle)
+            pending_map[clean_session] = {
+                "category": category,
+                "principle": principle,
+                "question": question,
+                "message": str(message),
+                "actor": actor,
+                "session_id": clean_session,
+                "created_at": self._now_iso(),
+            }
+            return {
+                "mode": "teach",
+                "status": "parent_teaching_clarify_required",
+                "parent_teaching_mode": True,
+                "parent_teaching_stage": "clarifying",
+                "requires_clarification": True,
+                "category": category,
+                "category_label": self._teaching_category_label(category),
+                "principle": principle,
+                "question": question,
+                "message": str(message),
+                "session_id": clean_session,
+                "actor": actor,
+                "timestamp_utc": self._now_iso(),
+            }
+
+    def _demo_companion_chat_response(
+        self,
+        message: str,
+        *,
+        session_id: str,
+        actor: str,
+        force_transparency: bool,
+    ) -> dict[str, Any]:
+        payload = self._demo_memory_payload_runtime()
+        facts = payload.get("facts", []) if isinstance(payload.get("facts"), list) else []
+        all_lessons = payload.get("lessons", []) if isinstance(payload.get("lessons"), list) else []
+        values = payload.get("values", []) if isinstance(payload.get("values"), list) else []
+        projects = payload.get("projects", []) if isinstance(payload.get("projects"), list) else []
+        lessons = self._non_reflection_lessons(all_lessons)
+        message_tokens = set(self._tokenize_text(message))
+        matched_facts = self._match_facts_for_question(message_tokens, facts, limit=3)
+        matched_conversations = self._demo_match_conversations_for_question(message_tokens, session_id=session_id, limit=2)
+        matched_lessons = self._match_lessons_for_question(message_tokens, lessons, limit=2)
+        matched_values = self._match_values_for_question(message_tokens, values, limit=2)
+        matched_projects = self._match_projects_for_query(
+            message_tokens,
+            projects,
+            query_text=message,
+            limit=2,
+        )
+        conversation_source = [
+            row
+            for row in self._demo_conversation_rows_runtime()
+            if isinstance(row, dict) and str(row.get("role", "")) == "user"
+        ]
+        personality = self._companion_personality(actor)
+        reply = self._compose_companion_ask_answer(
+            question=message,
+            matched_facts=matched_facts,
+            matched_conversations=matched_conversations,
+            matched_lessons=matched_lessons,
+            matched_values=matched_values,
+            matched_projects=matched_projects,
+            personality_enabled=bool(personality.get("enabled", False)),
+            warmth=int(personality.get("warmth", 55)),
+            verbosity=int(personality.get("verbosity", 55)),
+            curiosity=int(personality.get("curiosity", 50)),
+            force_transparency=force_transparency,
+        )
+
+        if not matched_facts and not matched_lessons and not matched_projects and not matched_conversations and not matched_values:
+            if self.settings.companion_mode:
+                reply = "I am here with you in the Dashboard, ready to learn. Would you like to ask or teach one step at a time?"
+            else:
+                reply = "I can chat naturally. If you want me to remember something, switch to Teach and confirm save."
+
+        return {
+            "mode": "chat",
+            "status": "ok",
+            "message": message,
+            "reply": reply,
+            "citations": self._build_memory_citations(
+                facts=matched_facts,
+                conversations=matched_conversations,
+                lessons=matched_lessons,
+                values=matched_values,
+                projects=matched_projects,
+            ),
+            "used_memory": {
+                "facts": matched_facts[:5],
+                "conversations": matched_conversations[:3],
+                "lessons": matched_lessons[:3],
+                "values": matched_values[:3],
+                "projects": matched_projects[:2],
+            },
+            "memory_insight": self._build_memory_insight(
+                enabled=bool(self.settings.memory_insight_mode and self._is_web_actor(actor)),
+                matched_facts=matched_facts,
+                matched_conversations=matched_conversations,
+                matched_lessons=matched_lessons,
+                facts_source=facts,
+                conversations_source=conversation_source,
+                lessons_source=lessons,
+            ),
+            "timestamp_utc": self._now_iso(),
+        }
+
+    def _demo_chat_message(
+        self,
+        message: str,
+        *,
+        intent: str,
+        confirm_save: bool,
+        parent_teaching_mode: bool,
+        session_id: str,
+        actor: str,
+    ) -> dict[str, Any]:
+        clean_message = self._sanitize_user_text(message, field_name="message")
+        actor_value = actor.strip() or "web_ui"
+        detected = self.classify_chat_intent(clean_message)
+        selected_intent = self._normalize_intent(intent) or str(detected.get("intent", "chat"))
+        active_session_id = self._resolve_chat_session_id(session_id=session_id, actor=actor_value)
+        parent_mode_active = bool(parent_teaching_mode or self.settings.parent_teaching_mode)
+        self._ensure_demo_runtime()
+        with self._lock:
+            pending_parent = self._demo_runtime.get("pending_parent_teaching", {})
+            has_pending_parent = isinstance(pending_parent, dict) and active_session_id in pending_parent
+        if parent_mode_active and has_pending_parent and selected_intent in {"chat", "teach"}:
+            selected_intent = "teach"
+        topics = detected.get("topics", [])
+        confidence = float(detected.get("confidence", 0.5))
+
+        user_turn = self._demo_append_conversation_turn(
+            session_id=active_session_id,
+            role="user",
+            text=clean_message,
+            intent=selected_intent,
+            topics=topics if isinstance(topics, list) else [],
+            confidence=confidence,
+            actor=actor_value,
+        )
+        is_first_assistant_turn = not self._demo_session_has_assistant_turn(active_session_id)
+
+        response: dict[str, Any]
+        if selected_intent == "ask":
+            response = self._demo_ask_memory(
+                clean_message,
+                actor=actor_value,
+                session_id=active_session_id,
+                force_transparency=is_first_assistant_turn,
+            )
+            assistant_text = str(response.get("answer", "")).strip() or "No answer generated."
+        elif selected_intent == "teach":
+            if not bool(confirm_save):
+                preview = self._demo_extract_teach_memory(clean_message)
+                response = {
+                    "mode": "teach",
+                    "status": "confirmation_required",
+                    "message": clean_message,
+                    "requires_confirmation": True,
+                    "confirm_save": False,
+                    "actor": actor_value,
+                    "session_id": active_session_id,
+                    "triples": preview.get("triples", []),
+                    "aliases": preview.get("aliases", []),
+                    "notes": preview.get("notes", ""),
+                    "topics": preview.get("topics", []),
+                    "timestamp_utc": self._now_iso(),
+                }
+                assistant_text = "I can save this as memory after you confirm Teach."
+            else:
+                parent_response = (
+                    self._demo_parent_teaching_turn(
+                        message=clean_message,
+                        actor=actor_value,
+                        session_id=active_session_id,
+                    )
+                    if parent_mode_active
+                    else None
+                )
+                if parent_response is not None:
+                    response = parent_response
+                    if str(response.get("status", "")) == "parent_teaching_clarify_required":
+                        assistant_text = str(response.get("question", "")).strip() or "How should I apply this while debugging?"
+                    else:
+                        stored_values = int(response.get("stored_value_count", 0))
+                        category = str(response.get("category_label", "Values")).strip()
+                        assistant_text = f"Stored {stored_values} {category} teaching entry."
+                else:
+                    extracted = self._demo_extract_teach_memory(clean_message)
+                    response = self._demo_apply_teach_extract(
+                        extracted=extracted,
+                        message=clean_message,
+                        actor=actor_value,
+                        session_id=active_session_id,
+                        allow_overwrite=False,
+                        overwrite_id="",
+                        legacy_mode=False,
+                    )
+                    if response.get("status") == "overwrite_confirmation_required":
+                        assistant_text = "I detected conflicting memory. Confirm overwrite to continue."
+                    else:
+                        stored_count = int(response.get("stored_count", 0))
+                        assistant_text = f"Saved {stored_count} memory facts."
+        elif selected_intent == "goal":
+            started, run_result = self.start_run(
+                {
+                    "mode": "goal",
+                    "payload": clean_message,
+                    "preview": False,
+                }
+            )
+            response = {
+                "mode": "goal",
+                "status": "queued" if started else "error",
+                "run": run_result,
+                "message": clean_message,
+                "actor": actor_value,
+                "session_id": active_session_id,
+                "timestamp_utc": self._now_iso(),
+            }
+            assistant_text = (
+                f"Goal queued: {run_result.get('run_id', '')}"
+                if started
+                else f"Goal could not start: {run_result.get('error', 'unknown error')}"
+            )
+        else:
+            response = self._demo_companion_chat_response(
+                clean_message,
+                session_id=active_session_id,
+                actor=actor_value,
+                force_transparency=is_first_assistant_turn,
+            )
+            response["actor"] = actor_value
+            response["session_id"] = active_session_id
+            assistant_text = str(response["reply"])
+
+        if self.settings.companion_mode:
+            requires_transparency = (
+                is_first_assistant_turn
+                or self._is_family_context(clean_message)
+                or self._is_grief_context(clean_message)
+                or self._is_crisis_context(clean_message)
+            )
+            transparency_line = self._compose_ai_transparency_line()
+            if requires_transparency and transparency_line not in assistant_text:
+                assistant_text = f"{assistant_text} {transparency_line}".strip()
+                if str(response.get("mode", "")) == "ask":
+                    response["answer"] = assistant_text
+                elif str(response.get("mode", "")) == "chat":
+                    response["reply"] = assistant_text
+
+        assistant_turn = self._demo_append_conversation_turn(
+            session_id=active_session_id,
+            role="assistant",
+            text=assistant_text,
+            intent=selected_intent,
+            topics=topics if isinstance(topics, list) else [],
+            confidence=confidence,
+            actor=actor_value,
+            metadata={
+                "response_status": str(response.get("status", "")),
+                "citations": response.get("citations", []),
+                "memory_insight": response.get("memory_insight", {}),
+                "used_memory": response.get("used_memory", {}),
+                "takeaways": response.get("stored_facts", []),
+            },
+        )
+
+        return {
+            "mode": "chat",
+            "message": clean_message,
+            "detected_intent": detected.get("intent", "chat"),
+            "detected_confidence": round(confidence, 3),
+            "selected_intent": selected_intent,
+            "confirm_save": bool(confirm_save),
+            "parent_teaching_mode": parent_mode_active,
+            "session_id": active_session_id,
+            "user_turn": user_turn,
+            "assistant_turn": assistant_turn,
+            "response": response,
+            "timestamp_utc": self._now_iso(),
+        }
+
+    def _demo_submit_approval(
+        self,
+        *,
+        approval_id: str,
+        decision: str,
+        note: str,
+        actor: str,
+        confirmation: str,
+    ) -> tuple[bool, dict[str, Any]]:
+        choice = decision.strip().lower()
+        if choice not in {"approve", "reject"}:
+            return False, {"error": "Decision must be approve or reject."}
+
+        self._ensure_demo_runtime()
+        with self._lock:
+            approvals = self._demo_runtime.get("approvals", [])
+            if not isinstance(approvals, list):
+                approvals = []
+                self._demo_runtime["approvals"] = approvals
+            approval = next(
+                (
+                    row
+                    for row in approvals
+                    if isinstance(row, dict) and str(row.get("id", "")).strip() == str(approval_id).strip()
+                ),
+                None,
+            )
+            if not isinstance(approval, dict):
+                return False, {"error": "Approval request not found."}
+            if str(approval.get("status", "")).strip().lower() != "pending":
+                return False, {"error": "Approval is already resolved."}
+            if choice == "approve" and bool(approval.get("requires_typed_confirmation")):
+                expected = self._demo_typed_confirmation_expected(approval)
+                if confirmation.strip().lower() != expected.lower():
+                    return False, {"error": f"Typed confirmation required: `{expected}`"}
+
+            approval["status"] = "approved" if choice == "approve" else "rejected"
+            approval["decision"] = choice
+            approval["decision_note"] = note.strip()
+            approval["decided_at"] = self._now_iso()
+            approval["actor"] = actor.strip() or "local_user"
+            run_id = str(approval.get("run_id", ""))
+
+            audit_entry = {
+                "timestamp_utc": self._now_iso(),
+                "action": "approval_decision",
+                "payload": {
+                    "approval_id": str(approval_id).strip(),
+                    "decision": choice,
+                    "actor": actor.strip() or "local_user",
+                    "note": note.strip(),
+                },
+            }
+            appends = self._demo_runtime.setdefault("approval_audit_appends", {})
+            if not isinstance(appends, dict):
+                appends = {}
+                self._demo_runtime["approval_audit_appends"] = appends
+            run_audit = appends.setdefault(run_id, [])
+            if not isinstance(run_audit, list):
+                run_audit = []
+                appends[run_id] = run_audit
+            run_audit.append(audit_entry)
+
+        self.publish_event(
+            f"run:{run_id}",
+            {"type": "approval_decision", "run_id": run_id, "approval_id": approval_id, "decision": choice},
+        )
+        self.publish_event(
+            "status",
+            {"type": "approval_decision", "run_id": run_id, "approval_id": approval_id, "decision": choice},
+        )
+        return True, {"approval_id": approval_id, "decision": choice}
+
+    def _demo_run_dirs(self) -> list[Path]:
+        runs_root = self._demo_runs_root()
+        if not runs_root.exists() or not runs_root.is_dir():
+            return []
+        rows = [item for item in runs_root.iterdir() if item.is_dir()]
+        rows.sort(key=lambda item: item.name, reverse=True)
+        return rows
+
+    def _live_data_has_content(self) -> bool:
+        has_runs = any(item.is_dir() for item in self.runs_root.iterdir()) if self.runs_root.exists() else False
+        memory_payload = self._read_memory_payload()
+        has_memory = False
+        if isinstance(memory_payload, dict):
+            has_memory = any(
+                isinstance(memory_payload.get(name), list) and len(memory_payload.get(name, [])) > 0
+                for name in ("facts", "lessons", "values", "projects", "legacy_archive")
+            )
+        has_conversations = bool(self._tail_lines(self._conversations_file, limit=1))
+        return has_runs or has_memory or has_conversations
+
+    def _materialize_demo_workspace_files(self) -> int:
+        count = 0
+        workspace_root = self.config.workspace_dir.resolve()
+        for run_dir in self._demo_run_dirs():
+            summary = self._read_json(run_dir / "file_summary.json", default={})
+            if not isinstance(summary, dict):
+                continue
+            rows = summary.get("workspace_files", [])
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    rel = self._normalize_relative_path(str(row.get("path", "")).strip())
+                except ValueError:
+                    continue
+                target = (workspace_root / rel).resolve()
+                if target == workspace_root or workspace_root not in target.parents:
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                preview = str(row.get("after_preview", "")).strip()
+                content = preview if preview else "# demo workspace file\n"
+                try:
+                    target.write_text(content + ("\n" if not content.endswith("\n") else ""), encoding="utf-8")
+                except OSError:
+                    continue
+                count += 1
+        return count
+
+    def _apply_demo_baseline_to_live(self, *, overwrite: bool, actor: str) -> tuple[bool, dict[str, Any]]:
+        fixture_root = self._demo_fixture_root()
+        runs_fixture = (fixture_root / "mock_runs").resolve()
+        if not fixture_root.exists() or not fixture_root.is_dir():
+            return False, {"error": f"Demo fixture root not found: {fixture_root}"}
+        if not runs_fixture.exists() or not runs_fixture.is_dir():
+            return False, {"error": f"Demo runs fixture folder not found: {runs_fixture}"}
+
+        if overwrite:
+            if self.runs_root.exists():
+                for item in self.runs_root.iterdir():
+                    if item.is_dir():
+                        shutil.rmtree(item, ignore_errors=True)
+            self.runs_root.mkdir(parents=True, exist_ok=True)
+
+        copied_runs = 0
+        for run_dir in runs_fixture.iterdir():
+            if not run_dir.is_dir():
+                continue
+            target = (self.runs_root / run_dir.name).resolve()
+            if target.exists():
+                if not overwrite:
+                    continue
+                shutil.rmtree(target, ignore_errors=True)
+            shutil.copytree(run_dir, target)
+            copied_runs += 1
+
+        memory_fixture = (fixture_root / "mock_memory_long_term.json").resolve()
+        if memory_fixture.exists():
+            self.config.memory_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(memory_fixture, self.config.memory_file)
+
+        conversations_fixture = (fixture_root / "mock_conversations.jsonl").resolve()
+        if conversations_fixture.exists():
+            self._conversations_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(conversations_fixture, self._conversations_file)
+
+        telemetry_fixture = (fixture_root / "mock_telemetry.jsonl").resolve()
+        if telemetry_fixture.exists():
+            self.config.logs_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(telemetry_fixture, self.config.logs_dir / "telemetry.jsonl")
+
+        metrics_fixture = (fixture_root / "mock_metrics.json").resolve()
+        if metrics_fixture.exists():
+            self.config.logs_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(metrics_fixture, self.config.logs_dir / "metrics.json")
+
+        logs_fixture = (fixture_root / "mock_logs.txt").resolve()
+        if logs_fixture.exists():
+            self.config.logs_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(logs_fixture, self.config.logs_dir / "web_control_center.log")
+
+        settings_payload = asdict(self.settings)
+        fixture_settings = self._read_demo_json("mock_settings.json", default={})
+        if isinstance(fixture_settings, dict):
+            allowed_keys = set(settings_payload.keys())
+            for key, value in fixture_settings.items():
+                if key in allowed_keys:
+                    settings_payload[key] = value
+        settings_payload["demo_mode"] = True
+        self.settings = ControlSettings.from_dict(settings_payload)
+        self._save_settings()
+
+        materialized_workspace_files = self._materialize_demo_workspace_files()
+        self._reset_demo_runtime()
+
+        payload = {
+            "loaded": True,
+            "copied_runs": copied_runs,
+            "workspace_files_materialized": materialized_workspace_files,
+            "demo_mode": True,
+            "actor": actor.strip() or "web_ui",
+            "timestamp_utc": self._now_iso(),
+            "fixture_root": str(fixture_root),
+        }
+        self.publish_event("status", {"type": "demo_data_loaded", "payload": payload})
+        self.publish_event("logs", {"type": "demo_data_loaded", "payload": payload})
+        return True, payload
+
+    def load_demo_data(self, *, force: bool = False, actor: str = "web_ui") -> tuple[bool, dict[str, Any]]:
+        if self._live_data_has_content() and not force:
+            return False, {
+                "error": "Live data already exists. Pass confirm_overwrite=true to replace it with demo fixtures.",
+                "requires_confirmation": True,
+            }
+        return self._apply_demo_baseline_to_live(overwrite=True, actor=actor)
+
+    def reset_demo_data(self, *, actor: str = "web_ui") -> tuple[bool, dict[str, Any]]:
+        ok, payload = self._apply_demo_baseline_to_live(overwrite=True, actor=actor)
+        if not ok:
+            return ok, payload
+        payload = dict(payload)
+        payload["reset"] = True
+        self.publish_event("status", {"type": "demo_data_reset", "payload": payload})
+        self.publish_event("logs", {"type": "demo_data_reset", "payload": payload})
+        return True, payload
+
     def workspace_edit_file(self, relative_path: str, content: str, actor: str = "web_ui") -> dict[str, Any]:
+        if self._demo_mode_enabled():
+            raise ValueError("Demo mode is active. Workspace edits are disabled to preserve deterministic fixtures.")
         if self.settings.safe_mode:
             raise ValueError("Safe mode is enabled. Manual file edits are blocked in read-only mode.")
         target, normalized = self._resolve_workspace_path(relative_path)
@@ -6626,6 +8113,8 @@ class DavidControlCenter:
         return payload
 
     def workspace_delete_path(self, relative_path: str, actor: str = "web_ui") -> dict[str, Any]:
+        if self._demo_mode_enabled():
+            raise ValueError("Demo mode is active. Workspace deletes are disabled to preserve deterministic fixtures.")
         if self.settings.safe_mode:
             raise ValueError("Safe mode is enabled. Manual deletes are blocked in read-only mode.")
         target, normalized = self._resolve_workspace_path(relative_path)
@@ -6649,6 +8138,8 @@ class DavidControlCenter:
         return payload
 
     def workspace_rename_path(self, relative_path: str, new_relative_path: str, actor: str = "web_ui") -> dict[str, Any]:
+        if self._demo_mode_enabled():
+            raise ValueError("Demo mode is active. Workspace rename is disabled to preserve deterministic fixtures.")
         if self.settings.safe_mode:
             raise ValueError("Safe mode is enabled. Manual rename is blocked in read-only mode.")
         source_path, source_rel = self._resolve_workspace_path(relative_path)

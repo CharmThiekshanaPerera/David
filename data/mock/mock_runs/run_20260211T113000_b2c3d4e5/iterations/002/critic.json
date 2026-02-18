@@ -1,0 +1,8 @@
+{
+  "status": "failed",
+  "analysis": "Regression introduced after malformed token guard.",
+  "next_actions": ["Inspect validator normalization and rollback guard"],
+  "lessons": [
+    {"lesson": "Tests failed after prior pass; isolate newly changed files first.", "tags": ["regression", "testing"]}
+  ]
+}

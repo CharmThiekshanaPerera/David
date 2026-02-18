@@ -336,6 +336,47 @@ Open in browser:
 http://127.0.0.1:8787
 ```
 
+### Demo Walkthrough (Full Feature Tour)
+
+Use this when onboarding a new user so every major feature is populated and testable immediately.
+
+1. Start the server:
+
+```bash
+python -m web.server --host 127.0.0.1 --port 8787
+```
+
+2. Open `http://127.0.0.1:8787`.
+3. Open `Settings`:
+   - enable `Demo mode (fixtures)` and click `Save Settings`, or start with `DEMO_MODE=1` in your environment.
+   - click `Load Demo Data` (if prompted, confirm overwrite to replace live data with fixtures).
+4. Confirm demo activation:
+   - top bar shows `DEMO` badge.
+   - Dashboard status shows `Demo mode = true`.
+5. Click through tabs in this order:
+   - `Dashboard`: Growth Timeline milestones, Legacy Archive, Proposed Improvements.
+   - `Runs`: open seeded runs (success, failure/regression, awaiting approval).
+   - `Approvals`: resolve pending approvals (typed confirmation required for high-risk items).
+   - `Diff Viewer`: inspect per-iteration diffs, replay, and compare.
+   - `Memory`: verify Facts / Values / Conversations / Lessons / Reflections.
+   - `Telemetry`: verify stage/model events and stream states (`connected`, `reconnecting`, `fallback`).
+   - `Logs`: confirm seeded info/warn/error mix.
+   - `Settings`: verify personality calibration, model roles, and demo controls.
+6. In `Memory & Chat`, run this scripted sequence:
+   - `Who is your father?`
+   - `What did you learn about tests and edge cases?`
+   - `Who founded this imaginary company called Zephra Dynamics?` (no memory match path)
+   - `Always value patience.` with `Advanced Chat mode` on, `Teach` selected, `Confirm Teach save` off (preview/confirmation required)
+   - same message again with `Confirm Teach save` on and `Parent Teaching Mode` on (clarification flow)
+   - `Hi David I am your dad. My Name is Bob.` with `Teach` + confirm on (conflict/overwrite-required flow)
+   - confirm overwrite when prompted
+7. In `Approvals`, approve a typed-confirmation item:
+   - submit exactly `approve <run_id>` in confirmation field
+   - verify `Run Audit` includes `approval_decision`.
+8. In `Diff Viewer`, open:
+   - `run_20260211T113000_b2c3d4e5`, compare iteration `2` to confirm “first failing iteration after a passing iteration”.
+9. Use `Reset Demo` anytime to restore baseline seeded state.
+
 ### Web tabs
 
 - Dashboard: current status, progress, quick run/stop actions, pending approvals.
@@ -458,6 +499,8 @@ Use the `Memory & Chat` tab to interact naturally while keeping memory writes ex
 - `GET /api/logs/tail`
 - `GET /api/settings`
 - `POST /api/settings`
+- `POST /api/demo/load`
+- `POST /api/demo/reset`
 - `GET /api/legacy_archive`
 - `POST /api/legacy_archive`
 - `POST /api/legacy_archive/<entry_id>/remove`

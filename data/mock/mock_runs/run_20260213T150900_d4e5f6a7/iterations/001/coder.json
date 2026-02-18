@@ -1,0 +1,10 @@
+{
+  "summary": "Created companion memory helper and tests in isolated project.",
+  "edits": [
+    {"path": "src/memory_helper.py", "reason": "new helper"},
+    {"path": "tests/test_memory_helper.py", "reason": "unit tests"}
+  ],
+  "commands": ["pytest -q"],
+  "done": true,
+  "done_reason": "Tests green in first iteration."
+}

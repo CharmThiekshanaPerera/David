@@ -1,0 +1,9 @@
+{
+  "summary": "Initial validator hardening patch.",
+  "edits": [
+    {"path": "src/validator.py", "reason": "add strict token checks"}
+  ],
+  "commands": ["pytest -q"],
+  "done": false,
+  "done_reason": "Need additional assertions."
+}

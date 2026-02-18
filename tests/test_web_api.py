@@ -29,6 +29,7 @@ class FakeCenter:
             "memory_insight_mode": True,
             "parent_teaching_mode": False,
             "autonomous_self_improvement_mode": True,
+            "demo_mode": False,
             "personality_warmth": 55,
             "personality_verbosity": 55,
             "personality_curiosity": 50,
@@ -65,6 +66,7 @@ class FakeCenter:
             "pending_approvals": 0,
             "pending_self_improvements": 0,
             "autonomous_self_improvement_mode": True,
+            "demo_mode": bool(self._settings.get("demo_mode", False)),
             "legacy_archive_count": len(self._legacy_archive),
             "safe_mode": False,
             "rate_limit_seconds": 3,
@@ -544,6 +546,49 @@ class FakeCenter:
         self._settings.update(payload)
         return self._settings
 
+    def load_demo_data(self, force=False, actor="web_ui"):
+        if not force and self._facts:
+            return False, {"error": "Live data already exists.", "requires_confirmation": True}
+        self._settings["demo_mode"] = True
+        self._facts = [
+            {
+                "subject": "David",
+                "predicate": "father_name",
+                "object": "Charm Thiekshana",
+                "timestamp": "2026-01-01T00:00:00+00:00",
+            }
+        ]
+        return True, {
+            "loaded": True,
+            "demo_mode": True,
+            "copied_runs": 4,
+            "workspace_files_materialized": 8,
+            "actor": actor,
+            "timestamp_utc": "2026-01-01T00:00:00+00:00",
+            "fixture_root": "/tmp/mock",
+        }
+
+    def reset_demo_data(self, actor="web_ui"):
+        self._settings["demo_mode"] = True
+        self._facts = [
+            {
+                "subject": "David",
+                "predicate": "father_name",
+                "object": "Charm Thiekshana",
+                "timestamp": "2026-01-01T00:00:00+00:00",
+            }
+        ]
+        return True, {
+            "loaded": True,
+            "reset": True,
+            "demo_mode": True,
+            "copied_runs": 4,
+            "workspace_files_materialized": 8,
+            "actor": actor,
+            "timestamp_utc": "2026-01-01T00:00:00+00:00",
+            "fixture_root": "/tmp/mock",
+        }
+
     def list_ollama_models(self):
         return ["qwen2.5-coder:1.5b", "llama3.2:3b"]
 
@@ -733,6 +778,20 @@ def test_models_endpoint(client):
     payload = response.get_json()
     assert payload["ok"] is True
     assert "qwen2.5-coder:1.5b" in payload["data"]["models"]
+
+
+def test_demo_load_and_reset_endpoints(client):
+    load = client.post("/api/demo/load", json={"confirm_overwrite": True, "actor": "web_ui"})
+    assert load.status_code == 200
+    load_data = load.get_json()["data"]
+    assert load_data["loaded"] is True
+    assert load_data["demo_mode"] is True
+
+    reset = client.post("/api/demo/reset", json={"actor": "web_ui"})
+    assert reset.status_code == 200
+    reset_data = reset.get_json()["data"]
+    assert reset_data["loaded"] is True
+    assert reset_data["reset"] is True
 
 
 def test_growth_timeline_endpoint(client):

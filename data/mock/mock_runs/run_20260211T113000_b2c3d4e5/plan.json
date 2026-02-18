@@ -1,0 +1,8 @@
+{
+  "goal": "Harden validator module",
+  "steps": [
+    {"id": "S1", "title": "Refine validator", "details": "Add stricter bounds checks.", "success_check": "pytest passes"},
+    {"id": "S2", "title": "Review regression", "details": "Identify first failing iteration after pass.", "success_check": "failure cause identified"}
+  ],
+  "success_criteria": ["No regression after validator updates"]
+}

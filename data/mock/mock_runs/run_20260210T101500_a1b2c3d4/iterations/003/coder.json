@@ -1,0 +1,10 @@
+{
+  "summary": "Fixed invalid index handling and stabilized output formatting.",
+  "edits": [
+    {"path": "src/cli.py", "reason": "edge-case handling"},
+    {"path": "tests/test_cli.py", "reason": "final assertion update"}
+  ],
+  "commands": ["pytest -q"],
+  "done": true,
+  "done_reason": "All tests are green."
+}
