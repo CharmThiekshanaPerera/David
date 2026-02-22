@@ -1195,6 +1195,95 @@ code {
   box-shadow: inset 2px 0 0 color-mix(in oklab, var(--warning) 72%, transparent);
 }
 
+#tab-cli .upload-panel {
+  display: grid;
+  gap: 0.46rem;
+  border: 1px solid color-mix(in oklab, var(--line) 82%, transparent);
+  border-radius: 0.66rem;
+  background: color-mix(in oklab, var(--panel-soft) 93%, transparent);
+  padding: 0.54rem 0.58rem;
+}
+#tab-cli .upload-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 0.38rem;
+  align-items: center;
+}
+#tab-cli .upload-vision-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.48rem;
+  align-items: center;
+}
+#tab-cli .upload-vision-model {
+  min-width: 0;
+}
+#tab-cli .upload-vision-model select {
+  width: 100%;
+}
+#tab-cli .upload-ask-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.38rem;
+  align-items: center;
+}
+#tab-cli .upload-item {
+  width: 100%;
+  text-align: left;
+  border: 1px solid color-mix(in oklab, var(--line) 84%, transparent);
+  border-radius: 0.54rem;
+  background: color-mix(in oklab, var(--panel) 92%, transparent);
+  color: var(--text);
+  padding: 0.44rem 0.5rem;
+  display: grid;
+  gap: 0.18rem;
+}
+#tab-cli .upload-item:hover {
+  border-color: color-mix(in oklab, var(--blue) 50%, var(--line));
+}
+#tab-cli .upload-item.active {
+  border-color: color-mix(in oklab, var(--blue) 66%, var(--line));
+  box-shadow: inset 2px 0 0 color-mix(in oklab, var(--blue) 70%, transparent);
+  background: linear-gradient(
+    122deg,
+    color-mix(in oklab, var(--blue) 12%, var(--panel-soft)),
+    color-mix(in oklab, var(--cyan) 8%, var(--panel))
+  );
+}
+#tab-cli .upload-item-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.42rem;
+}
+#tab-cli .upload-item-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+#tab-cli .upload-item-meta {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+#tab-cli .upload-item-summary {
+  color: var(--text-dim);
+  font-size: 0.79rem;
+  line-height: 1.35;
+}
+#tab-cli .upload-warning-list {
+  display: grid;
+  gap: 0.34rem;
+}
+#tab-cli .upload-profile-list {
+  display: grid;
+  gap: 0.34rem;
+}
+#tab-cli .upload-sample-wrap {
+  overflow-x: auto;
+}
+#tab-cli .upload-sample-table {
+  min-width: 340px;
+}
+
 /* ========== FILE TREE & WORKSPACE BROWSER ========== */
 .file-tree {
   display: grid;
@@ -1594,7 +1683,10 @@ code {
   #tab-cli .segment-btn { flex: 1 1 auto; }
   #tab-cli .row { display: grid; grid-template-columns: 1fr; align-items: stretch; }
   #tab-cli .memory-chat-input-row,
-  #tab-cli .memory-chat-search-row { grid-template-columns: 1fr; }
+  #tab-cli .memory-chat-search-row,
+  #tab-cli .upload-controls,
+  #tab-cli .upload-vision-row,
+  #tab-cli .upload-ask-row { grid-template-columns: 1fr; }
   #tab-cli .chat-sessions .stack {
     display: grid;
     max-height: 240px;

@@ -407,6 +407,11 @@
             <label class="check"><input id="settingParentTeachingMode" type="checkbox" /> Parent Teaching Mode default</label>
             <label class="check"><input id="settingAutonomousSelfImproveMode" type="checkbox" checked /> Autonomous self-improvement mode</label>
             <label class="check"><input id="settingDemoMode" type="checkbox" /> Demo mode (fixtures)</label>
+            <label class="check"><input id="settingUploadVisionMode" type="checkbox" /> Upload OCR/Vision mode default</label>
+            <label class="field">
+              Upload OCR/Vision model (optional)
+              <select id="settingUploadVisionModel"></select>
+            </label>
             <label class="field">
               Warmth (tone only)
               <input id="settingPersonalityWarmth" type="range" min="0" max="100" step="1" />
@@ -506,6 +511,40 @@
               <div id="memoryPanelReflections" class="stack hidden"></div>
               <h3>Explain why David answered this</h3>
               <div id="memoryExplainView" class="stack"></div>
+
+              <h3>Uploads & Analysis</h3>
+              <p class="muted">
+                Upload images, PDFs, Excel sheets, and CSV files for local analysis. Then ask questions about the selected file.
+              </p>
+              <div class="upload-panel">
+                <div class="row upload-controls">
+                  <input
+                    id="uploadAnalyzeFile"
+                    type="file"
+                    accept=".csv,.xlsx,.xls,.pdf,.png,.jpg,.jpeg,.gif,.bmp,.webp,text/csv,application/pdf,image/*,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                  />
+                  <button id="uploadAnalyzeBtn" class="ghost" type="button">Analyze File</button>
+                  <button id="uploadRefreshBtn" class="ghost" type="button">Refresh Uploads</button>
+                </div>
+                <div class="upload-vision-row">
+                  <label class="check"><input id="uploadVisionMode" type="checkbox" /> OCR/Vision enrichment</label>
+                  <label class="field upload-vision-model">
+                    Vision model
+                    <select id="uploadVisionModel"></select>
+                  </label>
+                </div>
+                <p id="uploadVisionHint" class="muted">
+                  Uses local Ollama model understanding for richer image/PDF descriptions. Falls back automatically when unavailable.
+                </p>
+                <div id="uploadSummary" class="muted">No uploaded files analyzed yet.</div>
+                <div id="uploadList" class="stack"></div>
+                <div id="uploadDetailView" class="stack"></div>
+                <div class="row upload-ask-row">
+                  <input id="uploadAskInput" type="text" placeholder="Ask about selected upload..." />
+                  <button id="uploadAskBtn" type="button">Ask Upload</button>
+                </div>
+                <pre id="uploadAnswerView" class="code">Select or analyze a file to view analysis and ask questions.</pre>
+              </div>
 
               <h3>Last Execution Output</h3>
               <div id="cliExecPanel" class="stack"></div>

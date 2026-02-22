@@ -55,6 +55,7 @@ def create_app(
                 "/api/demo/load",
                 "/api/demo/reset",
                 "/api/bundles/import",
+                "/api/uploads/analyze",
             }
             if request.path.startswith("/api/approval/") or request.path.startswith("/api/run/"):
                 protected.add(request.path)
@@ -63,6 +64,8 @@ def create_app(
             if request.path.startswith("/api/self_improvements/"):
                 protected.add(request.path)
             if request.path.startswith("/api/legacy_archive/"):
+                protected.add(request.path)
+            if request.path.startswith("/api/uploads/"):
                 protected.add(request.path)
             if request.path in protected or request.path.startswith("/api/approval/") or request.path.startswith("/api/workspace/"):
                 token = request.headers.get("X-CSRF-Token", "").strip()
@@ -78,6 +81,18 @@ def create_app(
 
     def _json_error(message: str, status: int = 400):
         return jsonify({"ok": False, "error": message}), status
+
+    def _parse_optional_bool(value: Any) -> bool | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        lowered = str(value).strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+        return None
 
     def _sse(event_name: str, payload: dict[str, Any]) -> str:
         return f"event: {event_name}\ndata: {json.dumps(payload)}\n\n"
@@ -392,6 +407,63 @@ def create_app(
         if payload is None:
             return _json_error("Imported bundle not found.", status=404)
         return jsonify({"ok": True, "data": payload})
+
+    @app.post("/api/uploads/analyze")
+    def api_upload_analyze():
+        actor = str(request.form.get("actor", "web_ui")).strip() or "web_ui"
+        use_vision = _parse_optional_bool(request.form.get("use_vision"))
+        vision_model = str(request.form.get("vision_model", "")).strip()
+        upload = request.files.get("file")
+        if upload is None:
+            payload = request.get_json(silent=True) or {}
+            if isinstance(payload, dict):
+                actor = str(payload.get("actor", actor)).strip() or actor
+                use_vision = _parse_optional_bool(payload.get("use_vision")) if "use_vision" in payload else use_vision
+                vision_model = str(payload.get("vision_model", vision_model)).strip()
+            return _json_error("Missing file upload. Use multipart/form-data with field `file`.", status=400)
+        file_name = str(getattr(upload, "filename", "") or "").strip() or "upload.bin"
+        content_type = str(getattr(upload, "mimetype", "") or getattr(upload, "content_type", "") or "").strip()
+        content = upload.read()
+        ok, data = center.upload_and_analyze_file(
+            file_name=file_name,
+            content=content,
+            content_type=content_type,
+            actor=actor,
+            use_vision=use_vision,
+            vision_model=vision_model,
+        )
+        if not ok:
+            return _json_error(str(data.get("error", "Failed to analyze uploaded file.")), status=409)
+        return jsonify({"ok": True, "data": data})
+
+    @app.get("/api/uploads")
+    def api_upload_list():
+        try:
+            limit = int(request.args.get("limit", "120"))
+        except ValueError:
+            limit = 120
+        return jsonify({"ok": True, "data": center.list_uploaded_files(limit=limit)})
+
+    @app.get("/api/uploads/<upload_id>")
+    def api_upload_get(upload_id: str):
+        payload = center.get_uploaded_file(upload_id)
+        if not payload:
+            return _json_error("Uploaded file not found.", status=404)
+        return jsonify({"ok": True, "data": payload})
+
+    @app.post("/api/uploads/<upload_id>/ask")
+    def api_upload_ask(upload_id: str):
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return _json_error("JSON body must be an object.")
+        question = str(payload.get("question", payload.get("message", ""))).strip()
+        actor = str(payload.get("actor", "web_ui")).strip() or "web_ui"
+        ok, data = center.ask_uploaded_file(upload_id, question=question, actor=actor)
+        if not ok:
+            error = str(data.get("error", "Failed to answer upload question."))
+            status = 404 if "not found" in error.lower() else 400
+            return _json_error(error, status=status)
+        return jsonify({"ok": True, "data": data})
 
     @app.get("/api/memory")
     def api_memory():

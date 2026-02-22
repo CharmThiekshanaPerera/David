@@ -123,6 +123,8 @@ python -m web.server --host 127.0.0.1 --port 8787
 
 - In Advanced Chat, intent can be auto-detected or overridden (`Ask`, `Teach`, `Goal`, `Chat`).
 - Teach writes remain explicit and gated by confirmation/overwrite checks.
+- The `Uploads & Analysis` panel in `Memory & Chat` supports local upload, analysis, and Q&A for images, PDFs, Excel sheets, and CSV files.
+- Upload details include `content_brief` summaries and (for tables) record profiles: column type, missing/unique counts, top values, and numeric ranges.
 - With `companion_mode=true`:
   - `/api/ask` and web `chat` responses are memory-first and cite Facts/Conversations/Lessons.
   - Responses use transparent AI wording (David is an AI companion, not a real child).
@@ -139,6 +141,10 @@ python -m web.server --host 127.0.0.1 --port 8787
 - `GET /api/run/<run_id>`
 - `POST /api/run/<run_id>/retry`
 - `GET /api/run/<run_id>/bundle`
+- `POST /api/uploads/analyze`
+- `GET /api/uploads`
+- `GET /api/uploads/<upload_id>`
+- `POST /api/uploads/<upload_id>/ask`
 - `GET /api/memory`
 - `GET /api/telemetry/tail`
 - `GET /api/logs/tail`
@@ -147,6 +153,12 @@ python -m web.server --host 127.0.0.1 --port 8787
 - `GET /api/approvals`
 - `POST /api/approval/<approval_id>`
 - `GET /healthz`
+
+### Upload analysis support
+
+- Supported uploads: images (`png`, `jpg`, `jpeg`, `gif`, `bmp`, `webp`), PDF (`pdf`), spreadsheets (`xlsx`, `xls`), and CSV (`csv`).
+- `POST /api/uploads/analyze` expects `multipart/form-data` with field `file`.
+- `xls` is accepted with limited metadata extraction; convert to `xlsx` for richer structured analysis.
 
 ## 6. Safety Model
 

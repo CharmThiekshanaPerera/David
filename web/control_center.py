@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import difflib
 import hashlib
 import io
@@ -35,10 +36,18 @@ from agent.safety import SafetyError, SafetyGuard, ValidatedEdit
 from agent.telemetry import IterationMetric, TelemetryLogger
 from agent.workspace import WorkspaceInspector
 from agent.executor import RestrictedExecutor
+from web.upload_analysis import (
+    SUPPORTED_UPLOAD_EXTENSIONS,
+    analyze_uploaded_content,
+    answer_question_from_analysis,
+    sanitize_upload_filename,
+)
 
 
 RUN_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{6,80}$")
 IMPORT_ID_PATTERN = re.compile(r"^imp_[a-zA-Z0-9_-]{6,80}$")
+UPLOAD_ID_PATTERN = re.compile(r"^upl_[a-zA-Z0-9_-]{6,80}$")
+MAX_UPLOAD_FILE_BYTES = 10 * 1024 * 1024
 INTENT_CHOICES = {"teach", "ask", "goal", "chat"}
 MEMORY_UNKNOWN_ANSWER = 'I do not know yet. Please teach me using --teach "...".'
 REFLECTION_KIND = "reflection"
@@ -208,12 +217,16 @@ class ControlSettings:
     coder_model: str = ""
     critic_model: str = ""
     tdd_mode: bool = False
+    upload_vision_mode: bool = False
+    upload_vision_model: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ControlSettings":
         planner_model = str(data.get("planner_model", "")).strip()
         coder_model = str(data.get("coder_model", "")).strip()
         critic_model = str(data.get("critic_model", "")).strip()
+        upload_vision_model = str(data.get("upload_vision_model", "")).strip()
+
         def _pct(name: str, default: int) -> int:
             try:
                 value = int(data.get(name, default))
@@ -239,6 +252,8 @@ class ControlSettings:
             coder_model=coder_model,
             critic_model=critic_model,
             tdd_mode=bool(data.get("tdd_mode", False)),
+            upload_vision_mode=bool(data.get("upload_vision_mode", False)),
+            upload_vision_model=upload_vision_model,
         )
 
 
@@ -262,12 +277,16 @@ class DavidControlCenter:
         self.project_root = self.config.project_root
         self.data_root = (data_root or (self.project_root / "data")).resolve()
         self.runs_root = (self.data_root / "runs").resolve()
+        self.uploads_root = (self.data_root / "uploads").resolve()
+        self.uploads_files_root = (self.uploads_root / "files").resolve()
+        self.uploads_index_file = (self.uploads_root / "index.json").resolve()
         self.settings_file = (self.data_root / "control_settings.json").resolve()
         self.self_improvements_file = (self.data_root / "self_improvements.json").resolve()
         self.mock_data_root = (self.project_root / "data" / "mock").resolve()
         self.agent_sandbox_root = (self.config.workspace_dir / "agent_sandbox").resolve()
         self.runs_root.mkdir(parents=True, exist_ok=True)
         self.agent_sandbox_root.mkdir(parents=True, exist_ok=True)
+        self.uploads_files_root.mkdir(parents=True, exist_ok=True)
 
         self._lock = threading.RLock()
         self._active_thread: threading.Thread | None = None
@@ -283,6 +302,7 @@ class DavidControlCenter:
         self._imported_bundle_views: dict[str, dict[str, Any]] = {}
         self._imported_bundle_order: list[str] = []
         self._max_imported_bundles = 25
+        self._max_uploaded_files = 500
         self._conversations_file = self.config.memory_file.parent / "conversations.jsonl"
         self._demo_runtime: dict[str, Any] = {
             "initialized": False,
@@ -293,6 +313,7 @@ class DavidControlCenter:
             "approval_audit_appends": {},
         }
         self._ensure_conversation_store()
+        self._ensure_upload_store()
 
         self._logger = logging.getLogger("david.control_center")
         self._logger.setLevel(logging.INFO)
@@ -369,6 +390,7 @@ class DavidControlCenter:
             "git_commit": self.git_commit,
             "version_stamp": self.version_stamp,
             "imported_bundle_count": len(self.list_imported_bundles(limit=500)),
+            "uploaded_file_count": len(self.list_uploaded_files(limit=5_000)),
             "safe_mode": self.settings.safe_mode,
             "rate_limit_seconds": self.settings.rate_limit_seconds,
             "allowed_commands": list(self.config.allowed_commands),
@@ -520,6 +542,11 @@ class DavidControlCenter:
             self.settings.critic_model or self.config.critic_model or self.config.model,
             "critic_model",
         )
+        if self.settings.upload_vision_model:
+            self.settings.upload_vision_model = sanitize_model_name(
+                self.settings.upload_vision_model,
+                "upload_vision_model",
+            )
 
     def start_run(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         if self._demo_mode_enabled():
@@ -2920,6 +2947,384 @@ class DavidControlCenter:
         clean.sort(key=lambda row: self._coerce_iteration_number(row.get("iteration", 0)))
         return self._compare_iteration_rows(clean, max(1, int(iteration or 1)))
 
+    def upload_and_analyze_file(
+        self,
+        *,
+        file_name: str,
+        content: bytes,
+        content_type: str = "",
+        actor: str = "web_ui",
+        use_vision: bool | None = None,
+        vision_model: str = "",
+    ) -> tuple[bool, dict[str, Any]]:
+        if self._demo_mode_enabled():
+            return False, {
+                "error": "Demo mode is active. File uploads are disabled to keep deterministic fixture behavior.",
+            }
+        clean_name = sanitize_upload_filename(file_name)
+        extension = Path(clean_name).suffix.lower()
+        if extension and extension not in SUPPORTED_UPLOAD_EXTENSIONS:
+            return False, {
+                "error": "Unsupported file extension. Allowed: csv, xlsx, xls, pdf, png, jpg, jpeg, gif, bmp, webp.",
+            }
+        raw = bytes(content or b"")
+        if not raw:
+            return False, {"error": "Upload file is empty."}
+        if len(raw) > MAX_UPLOAD_FILE_BYTES:
+            max_mb = round(MAX_UPLOAD_FILE_BYTES / (1024 * 1024), 1)
+            return False, {"error": f"Upload file exceeds size limit ({max_mb} MB)."}
+        try:
+            analysis = analyze_uploaded_content(clean_name, content_type, raw)
+        except ValueError as exc:
+            return False, {"error": str(exc)}
+        apply_vision = bool(self.settings.upload_vision_mode) if use_vision is None else bool(use_vision)
+        if apply_vision:
+            model_hint = str(vision_model or "").strip() or str(self.settings.upload_vision_model or "").strip() or self.config.model
+            try:
+                chosen_vision_model = sanitize_model_name(model_hint, "upload_vision_model")
+            except ValueError as exc:
+                return False, {"error": str(exc)}
+            analysis = self._enrich_uploaded_analysis_with_vision(
+                analysis=analysis,
+                content=raw,
+                model=chosen_vision_model,
+            )
+
+        upload_id = self._new_upload_id()
+        suffix = Path(clean_name).suffix.lower() or ".bin"
+        stored_name = f"{upload_id}{suffix}"
+        stored_path = (self.uploads_files_root / stored_name).resolve()
+        try:
+            if stored_path == self.uploads_files_root or self.uploads_files_root not in stored_path.parents:
+                return False, {"error": "Upload storage path escaped upload boundary."}
+            stored_path.write_bytes(raw)
+        except OSError as exc:
+            return False, {"error": f"Failed to persist upload bytes: {exc}"}
+
+        uploaded_at = self._now_iso()
+        actor_name = str(actor or "web_ui").strip() or "web_ui"
+        record: dict[str, Any] = {
+            "upload_id": upload_id,
+            "file_name": clean_name,
+            "content_type": str(content_type or "").strip(),
+            "size_bytes": len(raw),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "uploaded_at": uploaded_at,
+            "actor": actor_name,
+            "stored_name": stored_name,
+            "analysis": analysis,
+        }
+
+        with self._lock:
+            rows = self._upload_rows()
+            rows.insert(0, record)
+            while len(rows) > self._max_uploaded_files:
+                stale = rows.pop()
+                if isinstance(stale, dict):
+                    self._delete_uploaded_file_blob(stale)
+            self._save_upload_rows(rows)
+
+        payload = {
+            "upload_id": upload_id,
+            "file_name": clean_name,
+            "content_type": str(content_type or "").strip(),
+            "size_bytes": len(raw),
+            "uploaded_at": uploaded_at,
+            "actor": actor_name,
+            "analysis": analysis,
+        }
+        self.publish_event("status", {"type": "upload_analyzed", "payload": payload})
+        self.publish_event("logs", {"type": "upload_analyzed", "payload": payload})
+        return True, payload
+
+    def _enrich_uploaded_analysis_with_vision(
+        self,
+        *,
+        analysis: dict[str, Any],
+        content: bytes,
+        model: str,
+    ) -> dict[str, Any]:
+        enriched = self._clone_json(analysis) if isinstance(analysis, dict) else {}
+        fmt = str(enriched.get("format", "")).strip().lower()
+        if fmt not in {"png", "jpg", "jpeg", "gif", "bmp", "webp", "pdf"}:
+            enriched["vision"] = {
+                "requested": True,
+                "status": "skipped",
+                "reason": f"format '{fmt or 'unknown'}' not supported for vision enrichment.",
+                "model": model,
+            }
+            return enriched
+
+        if fmt in {"png", "jpg", "jpeg", "gif", "bmp", "webp"}:
+            return self._enrich_uploaded_image_analysis(enriched, content=content, model=model)
+        return self._enrich_uploaded_pdf_analysis(enriched, model=model)
+
+    def _enrich_uploaded_image_analysis(
+        self,
+        analysis: dict[str, Any],
+        *,
+        content: bytes,
+        model: str,
+    ) -> dict[str, Any]:
+        system_prompt = (
+            "You analyze uploaded images. Respond with one concise paragraph that describes what the image likely "
+            "shows, any readable text, and key entities. If uncertain, state uncertainty clearly."
+        )
+        user_prompt = (
+            "Describe this image for a file-analysis panel. Keep it factual, no markdown, max 450 characters."
+        )
+        try:
+            brief = self._chat_ollama_for_upload_enrichment(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                model=model,
+                image_bytes=content,
+            )
+        except Exception as exc:
+            return self._mark_upload_vision_failure(analysis, model=model, reason=str(exc))
+        if not brief:
+            return self._mark_upload_vision_failure(
+                analysis,
+                model=model,
+                reason="Vision model returned an empty summary.",
+            )
+        return self._apply_upload_vision_brief(
+            analysis,
+            brief=brief,
+            model=model,
+            source="image_vision",
+        )
+
+    def _enrich_uploaded_pdf_analysis(
+        self,
+        analysis: dict[str, Any],
+        *,
+        model: str,
+    ) -> dict[str, Any]:
+        excerpt = str(analysis.get("text_excerpt", "")).strip()
+        if not excerpt:
+            return self._mark_upload_vision_failure(
+                analysis,
+                model=model,
+                reason="No extractable PDF text available for model summarization.",
+            )
+        stats = analysis.get("stats", {})
+        if not isinstance(stats, dict):
+            stats = {}
+        pages = int(stats.get("pages", 0) or 0)
+        keywords = stats.get("keywords", [])
+        keyword_line = ", ".join(str(item).strip() for item in keywords[:8] if str(item).strip())
+        system_prompt = (
+            "You summarize uploaded PDF content for a control center. Respond with one concise paragraph "
+            "covering topic, likely purpose, and notable entities."
+        )
+        user_prompt = (
+            f"Pages: {pages}\n"
+            f"Keywords: {keyword_line or '-'}\n\n"
+            "Excerpt:\n"
+            f"{excerpt[:3200]}\n\n"
+            "Write a factual summary in under 450 characters."
+        )
+        try:
+            brief = self._chat_ollama_for_upload_enrichment(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                model=model,
+                image_bytes=None,
+            )
+        except Exception as exc:
+            return self._mark_upload_vision_failure(analysis, model=model, reason=str(exc))
+        if not brief:
+            return self._mark_upload_vision_failure(
+                analysis,
+                model=model,
+                reason="PDF summarization model returned an empty summary.",
+            )
+        return self._apply_upload_vision_brief(
+            analysis,
+            brief=brief,
+            model=model,
+            source="pdf_text_summary",
+        )
+
+    def _chat_ollama_for_upload_enrichment(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        model: str,
+        image_bytes: bytes | None,
+    ) -> str:
+        user_message: dict[str, Any] = {"role": "user", "content": user_prompt}
+        if image_bytes:
+            user_message["images"] = [base64.b64encode(image_bytes).decode("ascii")]
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                user_message,
+            ],
+            "stream": False,
+            "options": {"temperature": 0.1},
+        }
+        response = requests.post(
+            self.config.ollama_url,
+            json=payload,
+            timeout=(10, 120),
+        )
+        if response.status_code != 200:
+            snippet = str(response.text or "").strip()[:220]
+            raise RuntimeError(f"Ollama returned status {response.status_code}: {snippet}")
+        data = response.json()
+        message = data.get("message")
+        if not isinstance(message, dict):
+            raise RuntimeError("Ollama upload enrichment response missing message object.")
+        content = str(message.get("content", "")).strip()
+        collapsed = " ".join(content.split())
+        if len(collapsed) > 450:
+            collapsed = collapsed[:450].rstrip()
+        return collapsed
+
+    def _mark_upload_vision_failure(self, analysis: dict[str, Any], *, model: str, reason: str) -> dict[str, Any]:
+        warnings = analysis.get("warnings", [])
+        if not isinstance(warnings, list):
+            warnings = []
+        warnings.append(f"OCR/Vision enrichment skipped: {str(reason or 'unavailable').strip()}")
+        analysis["warnings"] = warnings[-12:]
+        analysis["vision"] = {
+            "requested": True,
+            "status": "fallback",
+            "model": model,
+            "reason": str(reason or "unavailable").strip()[:280],
+        }
+        stats = analysis.get("stats", {})
+        if not isinstance(stats, dict):
+            stats = {}
+        stats["vision_enriched"] = False
+        stats["vision_model"] = model
+        analysis["stats"] = stats
+        return analysis
+
+    def _apply_upload_vision_brief(
+        self,
+        analysis: dict[str, Any],
+        *,
+        brief: str,
+        model: str,
+        source: str,
+    ) -> dict[str, Any]:
+        clean_brief = " ".join(str(brief or "").split()).strip()
+        if not clean_brief:
+            return self._mark_upload_vision_failure(
+                analysis,
+                model=model,
+                reason="Model response was empty.",
+            )
+        previous = str(analysis.get("content_brief", "")).strip()
+        if previous and previous != clean_brief:
+            analysis["content_brief_fallback"] = previous
+        analysis["content_brief"] = clean_brief[:450]
+
+        summary = str(analysis.get("summary", "")).strip()
+        suffix = "AI OCR/Vision enrichment applied."
+        if summary:
+            lowered = summary.casefold()
+            if "ocr/vision enrichment applied" not in lowered and "ai ocr/vision enrichment applied" not in lowered:
+                analysis["summary"] = f"{summary} {suffix}"
+        else:
+            analysis["summary"] = suffix
+
+        analysis["vision"] = {
+            "requested": True,
+            "status": "applied",
+            "model": model,
+            "source": source,
+        }
+        stats = analysis.get("stats", {})
+        if not isinstance(stats, dict):
+            stats = {}
+        stats["vision_enriched"] = True
+        stats["vision_model"] = model
+        analysis["stats"] = stats
+        return analysis
+
+    def list_uploaded_files(self, limit: int = 120) -> list[dict[str, Any]]:
+        max_limit = max(1, min(int(limit or 120), 5_000))
+        with self._lock:
+            rows = self._upload_rows()
+        output: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            upload_id = str(row.get("upload_id", "")).strip()
+            if not self._is_safe_upload_id(upload_id):
+                continue
+            analysis = row.get("analysis", {})
+            if not isinstance(analysis, dict):
+                analysis = {}
+            output.append(
+                {
+                    "upload_id": upload_id,
+                    "file_name": str(row.get("file_name", "")).strip(),
+                    "content_type": str(row.get("content_type", "")).strip(),
+                    "size_bytes": int(row.get("size_bytes", 0) or 0),
+                    "uploaded_at": str(row.get("uploaded_at", "")).strip(),
+                    "actor": str(row.get("actor", "")).strip(),
+                    "kind": str(analysis.get("kind", "")).strip(),
+                    "format": str(analysis.get("format", "")).strip(),
+                    "summary": str(analysis.get("summary", "")).strip(),
+                }
+            )
+            if len(output) >= max_limit:
+                break
+        return output
+
+    def get_uploaded_file(self, upload_id: str) -> dict[str, Any] | None:
+        if not self._is_safe_upload_id(upload_id):
+            return None
+        with self._lock:
+            rows = self._upload_rows()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("upload_id", "")).strip() != upload_id:
+                continue
+            payload = self._clone_json(row)
+            payload.pop("stored_name", None)
+            payload["read_only"] = False
+            return payload
+        return None
+
+    def ask_uploaded_file(self, upload_id: str, question: str, actor: str = "web_ui") -> tuple[bool, dict[str, Any]]:
+        payload = self.get_uploaded_file(upload_id)
+        if not payload:
+            return False, {"error": "Uploaded file not found."}
+        try:
+            clean_question = self._sanitize_user_text(question, field_name="question", max_chars=2_000)
+        except ValueError as exc:
+            return False, {"error": str(exc)}
+        analysis = payload.get("analysis", {})
+        if not isinstance(analysis, dict) or not analysis:
+            return False, {"error": "Uploaded file has no analysis payload."}
+        try:
+            response = answer_question_from_analysis(analysis, clean_question)
+        except ValueError as exc:
+            return False, {"error": str(exc)}
+        result = {
+            "upload_id": upload_id,
+            "file_name": str(payload.get("file_name", "")).strip(),
+            "question": clean_question,
+            "answer": str(response.get("answer", "")).strip(),
+            "confidence": float(response.get("confidence", 0.0) or 0.0),
+            "evidence": response.get("evidence", []) if isinstance(response.get("evidence"), list) else [],
+            "analysis_summary": str(response.get("analysis_summary", "")).strip(),
+            "actor": str(actor or "web_ui").strip() or "web_ui",
+            "answered_at": self._now_iso(),
+        }
+        self.publish_event("status", {"type": "upload_question_answered", "payload": result})
+        self.publish_event("logs", {"type": "upload_question_answered", "payload": result})
+        return True, result
+
     def memory_snapshot(self) -> dict[str, Any]:
         if self._demo_mode_enabled():
             payload = self._demo_memory_payload_runtime()
@@ -3549,6 +3954,47 @@ class DavidControlCenter:
         self._conversations_file.parent.mkdir(parents=True, exist_ok=True)
         if not self._conversations_file.exists():
             self._conversations_file.write_text("", encoding="utf-8")
+
+    def _ensure_upload_store(self) -> None:
+        self.uploads_root.mkdir(parents=True, exist_ok=True)
+        self.uploads_files_root.mkdir(parents=True, exist_ok=True)
+        if not self.uploads_index_file.exists():
+            self._write_json(self.uploads_index_file, {"uploads": []})
+
+    def _upload_rows(self) -> list[dict[str, Any]]:
+        payload = self._read_json(self.uploads_index_file, default={"uploads": []})
+        if not isinstance(payload, dict):
+            payload = {"uploads": []}
+        rows = payload.get("uploads", [])
+        if not isinstance(rows, list):
+            rows = []
+        clean: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            upload_id = str(row.get("upload_id", "")).strip()
+            if not self._is_safe_upload_id(upload_id):
+                continue
+            clean.append(row)
+        if clean != rows:
+            self._save_upload_rows(clean)
+        return clean
+
+    def _save_upload_rows(self, rows: list[dict[str, Any]]) -> None:
+        self._write_json(self.uploads_index_file, {"uploads": rows})
+
+    def _delete_uploaded_file_blob(self, row: dict[str, Any]) -> None:
+        stored_name = str(row.get("stored_name", "")).strip()
+        if not stored_name:
+            return
+        path = (self.uploads_files_root / stored_name).resolve()
+        if path == self.uploads_files_root or self.uploads_files_root not in path.parents:
+            return
+        try:
+            if path.exists() and path.is_file():
+                path.unlink()
+        except OSError:
+            return
 
     def _read_memory_payload(self) -> dict[str, Any]:
         payload = self._read_json(
@@ -9012,9 +9458,18 @@ class DavidControlCenter:
         return bool(IMPORT_ID_PATTERN.match(import_id))
 
     @staticmethod
+    def _is_safe_upload_id(upload_id: str) -> bool:
+        return bool(UPLOAD_ID_PATTERN.match(upload_id))
+
+    @staticmethod
     def _new_run_id() -> str:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
         return f"run_{stamp}_{uuid.uuid4().hex[:8]}"
+
+    @staticmethod
+    def _new_upload_id() -> str:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        return f"upl_{stamp}_{uuid.uuid4().hex[:8]}"
 
     @staticmethod
     def _now_iso() -> str:

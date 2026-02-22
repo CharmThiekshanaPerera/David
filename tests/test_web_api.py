@@ -19,6 +19,7 @@ class FakeCenter:
         self._pending_overwrites = {}
         self._self_improvements = []
         self._imported_bundles = {}
+        self._uploads = {}
         self._settings = {
             "safe_mode": False,
             "rate_limit_seconds": 3,
@@ -31,6 +32,8 @@ class FakeCenter:
             "parent_teaching_mode": False,
             "autonomous_self_improvement_mode": True,
             "demo_mode": False,
+            "upload_vision_mode": False,
+            "upload_vision_model": "",
             "personality_warmth": 55,
             "personality_verbosity": 55,
             "personality_curiosity": 50,
@@ -78,6 +81,7 @@ class FakeCenter:
             "git_commit": "abc1234",
             "version_stamp": "dev+abc1234",
             "imported_bundle_count": len(self._imported_bundles),
+            "uploaded_file_count": len(self._uploads),
         }
 
     def get_csrf_token(self):
@@ -387,6 +391,95 @@ class FakeCenter:
             "passed_current": True,
             "likely_failure_cause": None,
             "read_only": True,
+        }
+
+    def upload_and_analyze_file(
+        self,
+        *,
+        file_name,
+        content,
+        content_type="",
+        actor="web_ui",
+        use_vision=None,
+        vision_model="",
+    ):
+        raw = bytes(content or b"")
+        if not raw:
+            return False, {"error": "Upload file is empty."}
+        upload_id = f"upl_test_{len(self._uploads) + 1}"
+        lower_name = str(file_name or "").lower()
+        fmt = "csv" if lower_name.endswith(".csv") else "pdf" if lower_name.endswith(".pdf") else "unknown"
+        kind = "table" if fmt == "csv" else "document"
+        analysis = {
+            "kind": kind,
+            "format": fmt,
+            "summary": f"Analyzed {fmt} file.",
+            "headers": ["col_a", "col_b"] if fmt == "csv" else [],
+            "sample_rows": [{"col_a": "East", "col_b": "120"}] if fmt == "csv" else [],
+            "stats": {"rows": 1, "columns": 2} if fmt == "csv" else {"pages": 1},
+            "warnings": [],
+            "text_excerpt": "Budget East region grows" if fmt == "pdf" else "",
+            "vision": {
+                "requested": bool(use_vision),
+                "status": "applied" if bool(use_vision) else "disabled",
+                "model": str(vision_model or ""),
+            },
+        }
+        row = {
+            "upload_id": upload_id,
+            "file_name": str(file_name or "upload.bin"),
+            "content_type": str(content_type or ""),
+            "size_bytes": len(raw),
+            "uploaded_at": "2026-01-01T00:00:00+00:00",
+            "actor": actor,
+            "analysis": analysis,
+        }
+        self._uploads[upload_id] = row
+        return True, row
+
+    def list_uploaded_files(self, limit=120):
+        rows = []
+        for upload_id, row in self._uploads.items():
+            analysis = row.get("analysis", {})
+            rows.append(
+                {
+                    "upload_id": upload_id,
+                    "file_name": row.get("file_name", ""),
+                    "content_type": row.get("content_type", ""),
+                    "size_bytes": row.get("size_bytes", 0),
+                    "uploaded_at": row.get("uploaded_at", ""),
+                    "actor": row.get("actor", "web_ui"),
+                    "kind": analysis.get("kind", ""),
+                    "format": analysis.get("format", ""),
+                    "summary": analysis.get("summary", ""),
+                }
+            )
+        return rows[: int(limit or 120)]
+
+    def get_uploaded_file(self, upload_id):
+        row = self._uploads.get(str(upload_id))
+        if not row:
+            return None
+        return dict(row)
+
+    def ask_uploaded_file(self, upload_id, question, actor="web_ui"):
+        row = self._uploads.get(str(upload_id))
+        if not row:
+            return False, {"error": "Uploaded file not found."}
+        q = str(question or "").strip()
+        if not q:
+            return False, {"error": "Question cannot be empty."}
+        analysis = row.get("analysis", {})
+        return True, {
+            "upload_id": str(upload_id),
+            "file_name": row.get("file_name", ""),
+            "question": q,
+            "answer": analysis.get("summary", "No analysis."),
+            "confidence": 0.8,
+            "evidence": [{"type": "sample_row"}],
+            "analysis_summary": analysis.get("summary", ""),
+            "actor": actor,
+            "answered_at": "2026-01-01T00:00:01+00:00",
         }
 
     def memory_snapshot(self):
@@ -1148,6 +1241,46 @@ def test_bundle_import_and_read_only_view_endpoints(client):
     assert compare.status_code == 200
     compare_data = compare.get_json()["data"]
     assert compare_data["iteration"] == 1
+
+
+def test_upload_analyze_list_get_and_ask_endpoints(client):
+    uploaded = client.post(
+        "/api/uploads/analyze",
+        data={
+            "actor": "web_ui",
+            "use_vision": "true",
+            "vision_model": "llama3.2:3b",
+            "file": (io.BytesIO(b"region,amount\nEast,120\n"), "sales.csv"),
+        },
+        content_type="multipart/form-data",
+    )
+    assert uploaded.status_code == 200
+    upload_data = uploaded.get_json()["data"]
+    upload_id = str(upload_data.get("upload_id", ""))
+    assert upload_id.startswith("upl_")
+    assert str((upload_data.get("analysis") or {}).get("format", "")) == "csv"
+    vision_meta = (upload_data.get("analysis") or {}).get("vision", {})
+    assert bool(vision_meta.get("requested")) is True
+    assert str(vision_meta.get("model", "")) == "llama3.2:3b"
+
+    listed = client.get("/api/uploads")
+    assert listed.status_code == 200
+    rows = listed.get_json()["data"]
+    assert any(str(row.get("upload_id", "")) == upload_id for row in rows)
+
+    details = client.get(f"/api/uploads/{upload_id}")
+    assert details.status_code == 200
+    details_data = details.get_json()["data"]
+    assert str(details_data.get("upload_id", "")) == upload_id
+
+    asked = client.post(
+        f"/api/uploads/{upload_id}/ask",
+        json={"question": "What is in this file?", "actor": "web_ui"},
+    )
+    assert asked.status_code == 200
+    asked_data = asked.get_json()["data"]
+    assert str(asked_data.get("upload_id", "")) == upload_id
+    assert float(asked_data.get("confidence", 0.0)) > 0.0
 
 
 def test_sse_endpoints_available(client):

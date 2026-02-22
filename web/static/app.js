@@ -58,6 +58,10 @@ const state = {
   memoryPanelTab: "facts",
   lastExplainWhy: null,
   memoryEventKeys: [],
+  uploads: [],
+  selectedUploadId: localStorage.getItem("dcc_selected_upload") || "",
+  selectedUploadDetails: null,
+  lastUploadAnswer: null,
   workspaceTargets: [],
   selectedGoalWorkspacePath: "",
   goalRunScope: "new",
@@ -170,6 +174,8 @@ const el = {
   settingParentTeachingMode: document.getElementById("settingParentTeachingMode"),
   settingAutonomousSelfImproveMode: document.getElementById("settingAutonomousSelfImproveMode"),
   settingDemoMode: document.getElementById("settingDemoMode"),
+  settingUploadVisionMode: document.getElementById("settingUploadVisionMode"),
+  settingUploadVisionModel: document.getElementById("settingUploadVisionModel"),
   settingPersonalityWarmth: document.getElementById("settingPersonalityWarmth"),
   settingPersonalityVerbosity: document.getElementById("settingPersonalityVerbosity"),
   settingPersonalityCuriosity: document.getElementById("settingPersonalityCuriosity"),
@@ -223,6 +229,18 @@ const el = {
   memoryPanelLessons: document.getElementById("memoryPanelLessons"),
   memoryPanelReflections: document.getElementById("memoryPanelReflections"),
   memoryExplainView: document.getElementById("memoryExplainView"),
+  uploadAnalyzeFile: document.getElementById("uploadAnalyzeFile"),
+  uploadAnalyzeBtn: document.getElementById("uploadAnalyzeBtn"),
+  uploadRefreshBtn: document.getElementById("uploadRefreshBtn"),
+  uploadVisionMode: document.getElementById("uploadVisionMode"),
+  uploadVisionModel: document.getElementById("uploadVisionModel"),
+  uploadVisionHint: document.getElementById("uploadVisionHint"),
+  uploadSummary: document.getElementById("uploadSummary"),
+  uploadList: document.getElementById("uploadList"),
+  uploadDetailView: document.getElementById("uploadDetailView"),
+  uploadAskInput: document.getElementById("uploadAskInput"),
+  uploadAskBtn: document.getElementById("uploadAskBtn"),
+  uploadAnswerView: document.getElementById("uploadAnswerView"),
   cliOutput: document.getElementById("cliOutput"),
   cliExecPanel: document.getElementById("cliExecPanel"),
   toastContainer: document.getElementById("toastContainer"),
@@ -811,6 +829,20 @@ function fmtBool(value) {
   return "-";
 }
 
+function fmtBytes(value) {
+  const raw = Number(value || 0);
+  if (!Number.isFinite(raw) || raw <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let size = raw;
+  let idx = 0;
+  while (size >= 1024 && idx < units.length - 1) {
+    size /= 1024;
+    idx += 1;
+  }
+  const rounded = idx === 0 ? Math.round(size) : Number(size.toFixed(2));
+  return `${rounded} ${units[idx]}`;
+}
+
 function kvList(target, entries) {
   if (!target) return;
   target.innerHTML = entries
@@ -1260,6 +1292,7 @@ function renderStatus() {
     ["Last command", s.last_command || "-"],
     ["Latest success", fmtBool(s.latest_success)],
     ["Pending approvals", s.pending_approvals || 0],
+    ["Analyzed uploads", s.uploaded_file_count || 0],
     ["Legacy archive entries", s.legacy_archive_count || 0],
     ["Demo mode", fmtBool(s.demo_mode)],
     ["Safe mode", fmtBool(s.safe_mode)],
@@ -2136,6 +2169,331 @@ function setMemoryPanelTab(tabName) {
   renderExplainWhy();
 }
 
+function renderUploadAnswer(answerPayload = null) {
+  if (!el.uploadAnswerView) return;
+  const payload = answerPayload && typeof answerPayload === "object" ? answerPayload : null;
+  if (!payload) {
+    const analysis = state.selectedUploadDetails?.analysis || {};
+    const brief = String(analysis.content_brief || "").trim();
+    if (brief) {
+      el.uploadAnswerView.textContent = `Content brief:\n${brief}`;
+      return;
+    }
+    const excerpt = String(analysis.text_excerpt || "").trim();
+    if (excerpt) {
+      el.uploadAnswerView.textContent = `Analysis excerpt:\n${excerpt}`;
+      return;
+    }
+    const summary = String(analysis.summary || "").trim();
+    if (summary) {
+      el.uploadAnswerView.textContent = summary;
+      return;
+    }
+    el.uploadAnswerView.textContent = "Select or analyze a file to view analysis and ask questions.";
+    return;
+  }
+
+  const evidenceRows = Array.isArray(payload.evidence) ? payload.evidence : [];
+  const evidence = evidenceRows.length
+    ? evidenceRows
+        .map((item, idx) => {
+          if (!item || typeof item !== "object") return `- Evidence ${idx + 1}`;
+          const rowType = String(item.type || "evidence");
+          if (rowType === "sample_row" && item.row && typeof item.row === "object") {
+            const values = Object.entries(item.row)
+              .map(([k, v]) => `${k}=${v}`)
+              .join(", ");
+            return `- sample_row #${item.row_index || "-"}: ${values}`;
+          }
+          if (rowType === "pdf_excerpt") {
+            return `- pdf_excerpt: ${String(item.text || "").trim()}`;
+          }
+          return `- ${rowType}: ${JSON.stringify(item)}`;
+        })
+        .join("\n")
+    : "- none";
+  const confidence = Number(payload.confidence || 0);
+  const confidenceLabel = Number.isFinite(confidence) ? `${Math.round(confidence * 100)}%` : "-";
+  const answer = String(payload.answer || "").trim() || "No answer returned.";
+  const summary = String(payload.analysis_summary || "").trim();
+  el.uploadAnswerView.textContent = [
+    `Answer: ${answer}`,
+    `Confidence: ${confidenceLabel}`,
+    summary ? `Analysis summary: ${summary}` : "",
+    "Evidence:",
+    evidence,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function renderUploadDetails(details) {
+  if (!el.uploadDetailView) return;
+  const payload = details && typeof details === "object" ? details : null;
+  if (!payload) {
+    el.uploadDetailView.innerHTML = '<p class="muted">No upload selected.</p>';
+    renderUploadAnswer(null);
+    return;
+  }
+
+  const analysis = payload.analysis && typeof payload.analysis === "object" ? payload.analysis : {};
+  const stats = analysis.stats && typeof analysis.stats === "object" ? analysis.stats : {};
+  const headers = Array.isArray(analysis.headers) ? analysis.headers.map((item) => String(item || "")) : [];
+  const sampleRowsRaw = Array.isArray(analysis.sample_rows) ? analysis.sample_rows : [];
+  const sampleRows = sampleRowsRaw.filter((row) => row && typeof row === "object").slice(0, 8);
+  const profilesRaw = Array.isArray(analysis.column_profiles) ? analysis.column_profiles : [];
+  const profiles = profilesRaw.filter((row) => row && typeof row === "object").slice(0, 12);
+  const warnings = Array.isArray(analysis.warnings) ? analysis.warnings : [];
+  const contentBrief = String(analysis.content_brief || "").trim();
+  const fallbackBrief = String(analysis.content_brief_fallback || "").trim();
+  const vision = analysis.vision && typeof analysis.vision === "object" ? analysis.vision : {};
+  const visionStatus = String(vision.status || "").trim();
+  const visionModel = String(vision.model || "").trim();
+  const visionSource = String(vision.source || "").trim();
+  const visionReason = String(vision.reason || "").trim();
+  const visionSummary =
+    visionStatus === "applied"
+      ? `applied${visionSource ? ` (${visionSource})` : ""}`
+      : visionStatus
+      ? `${visionStatus}${visionReason ? `: ${visionReason}` : ""}`
+      : "";
+  const chosenHeaders = headers.length
+    ? headers
+    : sampleRows.length
+    ? Object.keys(sampleRows[0]).map((item) => String(item || ""))
+    : [];
+  const sampleTable =
+    chosenHeaders.length && sampleRows.length
+      ? `<div class="upload-sample-wrap"><table class="table upload-sample-table"><thead><tr>${chosenHeaders
+          .map((head) => `<th>${escapeHtml(head)}</th>`)
+          .join("")}</tr></thead><tbody>${sampleRows
+          .map(
+            (row) =>
+              `<tr>${chosenHeaders
+                .map((head) => `<td>${escapeHtml(String(row?.[head] ?? ""))}</td>`)
+                .join("")}</tr>`
+          )
+          .join("")}</tbody></table></div>`
+      : '<p class="muted">No sampled table rows available for this file.</p>';
+
+  const statRows = Object.entries(stats)
+    .slice(0, 12)
+    .map(([key, value]) => `<li><span class="k">${escapeHtml(key)}</span><span>${escapeHtml(String(value))}</span></li>`)
+    .join("");
+  const warningRows = warnings.length
+    ? `<div class="upload-warning-list">${warnings.map((warn) => `<div class="memory-fact-row conflict">${escapeHtml(String(warn || ""))}</div>`).join("")}</div>`
+    : "";
+  const profileHtml = profiles.length
+    ? `<div class="upload-profile-list">${profiles
+        .map((profile) => {
+          const col = String(profile.name || "-");
+          const colType = String(profile.type || "-");
+          const nonEmpty = Number(profile.non_empty || 0);
+          const missing = Number(profile.missing || 0);
+          const unique = Number(profile.unique || 0);
+          const topValues = Array.isArray(profile.top_values) ? profile.top_values.slice(0, 4).join(", ") : "";
+          const numeric = profile.numeric && typeof profile.numeric === "object" ? profile.numeric : null;
+          return `<div class="memory-fact-row">
+            <div><strong>${escapeHtml(col)}</strong> <span class="badge workspace">${escapeHtml(colType)}</span></div>
+            <div><span class="muted">records:</span> ${escapeHtml(String(nonEmpty + missing))} · <span class="muted">missing:</span> ${escapeHtml(
+            String(missing)
+          )} · <span class="muted">unique:</span> ${escapeHtml(String(unique))}</div>
+            ${topValues ? `<div><span class="muted">top values:</span> ${escapeHtml(topValues)}</div>` : ""}
+            ${
+              numeric
+                ? `<div><span class="muted">numeric:</span> min=${escapeHtml(String(numeric.min ?? "-"))}, max=${escapeHtml(
+                    String(numeric.max ?? "-")
+                  )}, avg=${escapeHtml(String(numeric.avg ?? "-"))}, sum=${escapeHtml(String(numeric.sum ?? "-"))}</div>`
+                : ""
+            }
+          </div>`;
+        })
+        .join("")}</div>`
+    : '<p class="muted">No column profile data available for this file.</p>';
+  const summary = String(analysis.summary || "").trim() || "No summary available.";
+  el.uploadDetailView.innerHTML = `
+    <div class="memory-fact-row">
+      <div><strong>${escapeHtml(String(payload.file_name || "-"))}</strong></div>
+      <div><span class="muted">Upload:</span> <code>${escapeHtml(String(payload.upload_id || "-"))}</code></div>
+      <div><span class="muted">Type:</span> ${escapeHtml(String(analysis.kind || "-"))} / ${escapeHtml(
+    String(analysis.format || "-")
+  )}</div>
+      <div><span class="muted">Size:</span> ${escapeHtml(fmtBytes(payload.size_bytes || 0))}</div>
+      <div><span class="muted">Uploaded:</span> ${escapeHtml(fmtDate(payload.uploaded_at || ""))}</div>
+      <div><span class="muted">Summary:</span> ${escapeHtml(summary)}</div>
+      ${contentBrief ? `<div><span class="muted">Content brief:</span> ${escapeHtml(contentBrief)}</div>` : ""}
+      ${fallbackBrief ? `<div><span class="muted">Fallback brief:</span> ${escapeHtml(fallbackBrief)}</div>` : ""}
+      ${visionSummary ? `<div><span class="muted">OCR/Vision:</span> ${escapeHtml(visionSummary)}</div>` : ""}
+      ${visionModel ? `<div><span class="muted">Vision model:</span> ${escapeHtml(visionModel)}</div>` : ""}
+    </div>
+    <details class="memory-fact-row" open>
+      <summary><strong>Stats</strong></summary>
+      <ul class="kv">${statRows || '<li><span class="k">stats</span><span>-</span></li>'}</ul>
+    </details>
+    <details class="memory-fact-row" open>
+      <summary><strong>Sample Data</strong></summary>
+      ${sampleTable}
+    </details>
+    <details class="memory-fact-row" open>
+      <summary><strong>Record Profiles</strong></summary>
+      ${profileHtml}
+    </details>
+    ${warningRows}
+  `;
+  const last = state.lastUploadAnswer;
+  if (last && String(last.upload_id || "") === String(payload.upload_id || "")) {
+    renderUploadAnswer(last);
+  } else {
+    renderUploadAnswer(null);
+  }
+}
+
+function renderUploadsPanel() {
+  if (!el.uploadList || !el.uploadSummary) return;
+  const rows = Array.isArray(state.uploads) ? state.uploads : [];
+  const selected = String(state.selectedUploadId || "");
+  if (!rows.length) {
+    el.uploadSummary.textContent = "No uploaded files analyzed yet.";
+    el.uploadList.innerHTML = '<p class="muted">Upload a file to start analysis.</p>';
+    if (!state.selectedUploadDetails) {
+      renderUploadDetails(null);
+    }
+    return;
+  }
+  const selectedRow = rows.find((row) => String(row?.upload_id || "") === selected) || null;
+  el.uploadSummary.textContent = selectedRow
+    ? `Selected: ${selectedRow.file_name || selectedRow.upload_id}`
+    : `${rows.length} analyzed uploads`;
+  el.uploadList.innerHTML = rows
+    .slice(0, 80)
+    .map((row) => {
+      const uploadId = String(row?.upload_id || "");
+      const active = uploadId && uploadId === selected;
+      const format = String(row?.format || "").trim() || "-";
+      const kind = String(row?.kind || "").trim() || "-";
+      const summary = summarizeText(row?.summary || "", 160) || "No summary available.";
+      return `<button type="button" class="upload-item ${active ? "active" : ""}" data-upload-select="${escapeHtml(uploadId)}">
+        <span class="upload-item-top">
+          <span class="upload-item-name">${escapeHtml(String(row?.file_name || uploadId || "upload"))}</span>
+          <span class="badge workspace">${escapeHtml(format)}</span>
+        </span>
+        <span class="upload-item-meta">${escapeHtml(kind)} · ${escapeHtml(fmtBytes(row?.size_bytes || 0))} · ${escapeHtml(
+        fmtDate(row?.uploaded_at || "")
+      )}</span>
+        <span class="upload-item-summary">${escapeHtml(summary)}</span>
+      </button>`;
+    })
+    .join("");
+
+  el.uploadList.querySelectorAll("button[data-upload-select]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const uploadId = String(button.getAttribute("data-upload-select") || "").trim();
+      if (!uploadId) return;
+      try {
+        await loadUploadDetails(uploadId);
+      } catch (err) {
+        setMessage(err.message);
+      }
+    });
+  });
+}
+
+async function loadUploadDetails(uploadId) {
+  const cleanId = String(uploadId || "").trim();
+  if (!cleanId) return;
+  const details = await api(`/api/uploads/${encodeURIComponent(cleanId)}`);
+  state.selectedUploadId = cleanId;
+  state.selectedUploadDetails = details && typeof details === "object" ? details : null;
+  localStorage.setItem("dcc_selected_upload", cleanId);
+  renderUploadsPanel();
+  renderUploadDetails(state.selectedUploadDetails);
+}
+
+async function refreshUploads({ keepSelection = true } = {}) {
+  const rows = await api("/api/uploads?limit=240");
+  state.uploads = Array.isArray(rows) ? rows : [];
+  if (!keepSelection) {
+    state.selectedUploadId = "";
+    state.selectedUploadDetails = null;
+    state.lastUploadAnswer = null;
+  }
+  const selected = String(state.selectedUploadId || "");
+  const exists = selected && state.uploads.some((row) => String(row?.upload_id || "") === selected);
+  if (!exists) {
+    state.selectedUploadId = "";
+    state.selectedUploadDetails = null;
+    state.lastUploadAnswer = null;
+    localStorage.removeItem("dcc_selected_upload");
+  }
+  renderUploadsPanel();
+  if (state.selectedUploadId) {
+    await loadUploadDetails(state.selectedUploadId);
+    return;
+  }
+  const firstId = String(state.uploads[0]?.upload_id || "").trim();
+  if (firstId) {
+    await loadUploadDetails(firstId);
+    return;
+  }
+  renderUploadDetails(null);
+}
+
+async function analyzeUploadFromPicker() {
+  const file = el.uploadAnalyzeFile?.files?.[0];
+  if (!file) {
+    setMessage("Choose a file first to analyze.");
+    return;
+  }
+  const form = new FormData();
+  form.append("file", file, file.name || "upload.bin");
+  form.append("actor", "web_ui");
+  form.append("use_vision", el.uploadVisionMode?.checked ? "true" : "false");
+  const visionModel = String(el.uploadVisionModel?.value || "").trim();
+  if (visionModel) {
+    form.append("vision_model", visionModel);
+  }
+  const result = await apiMultipart("/api/uploads/analyze", form);
+  if (el.uploadAnalyzeFile) {
+    el.uploadAnalyzeFile.value = "";
+  }
+  const uploadId = String(result?.upload_id || "").trim();
+  if (uploadId) {
+    state.selectedUploadId = uploadId;
+    localStorage.setItem("dcc_selected_upload", uploadId);
+    state.selectedUploadDetails = result;
+    state.lastUploadAnswer = null;
+  }
+  renderUploadsPanel();
+  renderUploadDetails(state.selectedUploadDetails);
+  setCliOutput(JSON.stringify(result, null, 2));
+  showToast(`Upload analyzed: ${result?.file_name || uploadId || "file"}`);
+  await refreshUploads({ keepSelection: true }).catch(() => {});
+}
+
+async function askSelectedUploadQuestion() {
+  const uploadId = String(state.selectedUploadId || "").trim();
+  if (!uploadId) {
+    setMessage("Select an analyzed upload first.");
+    return;
+  }
+  const question = String(el.uploadAskInput?.value || "").trim();
+  if (!question) {
+    setMessage("Enter a question for the selected upload.");
+    return;
+  }
+  const result = await api(`/api/uploads/${encodeURIComponent(uploadId)}/ask`, {
+    method: "POST",
+    body: JSON.stringify({ question, actor: "web_ui" }),
+  });
+  state.lastUploadAnswer = result && typeof result === "object" ? result : null;
+  renderUploadAnswer(state.lastUploadAnswer);
+  setCliOutput(JSON.stringify(result, null, 2));
+  if (el.uploadAskInput) {
+    el.uploadAskInput.value = "";
+  }
+  showToast("Upload answer ready.");
+}
+
 function drawDurationChart(metrics) {
   const ctx = el.durationChart.getContext("2d");
   const canvas = el.durationChart;
@@ -2520,6 +2878,9 @@ function renderSettings(data) {
   if (el.settingDemoMode) {
     el.settingDemoMode.checked = !!safeData.demo_mode || !!state.status?.demo_mode;
   }
+  if (el.settingUploadVisionMode) {
+    el.settingUploadVisionMode.checked = !!safeData.upload_vision_mode;
+  }
   if (el.settingPersonalityWarmth) {
     el.settingPersonalityWarmth.value = clampPercent(safeData.personality_warmth, 55);
   }
@@ -2563,6 +2924,28 @@ function renderSettings(data) {
     uniqueModels,
     safeData.critic_model || safeData.critic_model_default || safeData.model
   );
+  setSelectOptions(
+    el.settingUploadVisionModel,
+    uniqueModels,
+    safeData.upload_vision_model || "",
+    "Default model"
+  );
+  setSelectOptions(
+    el.uploadVisionModel,
+    uniqueModels,
+    safeData.upload_vision_model || "",
+    "Default model"
+  );
+  if (el.uploadVisionMode) {
+    el.uploadVisionMode.checked = !!safeData.upload_vision_mode;
+  }
+  if (el.uploadVisionHint) {
+    const enabled = !!safeData.upload_vision_mode;
+    const modelText = String(safeData.upload_vision_model || "").trim() || String(safeData.model || "").trim() || "default";
+    el.uploadVisionHint.textContent = enabled
+      ? `OCR/Vision enrichment is enabled by default. Current model: ${modelText}.`
+      : "OCR/Vision enrichment is off by default. You can still enable it per upload below.";
+  }
   renderTemplateSelects();
 
   if (el.goalTddMode) {
@@ -2583,6 +2966,8 @@ function renderSettings(data) {
     ["Companion mode", fmtBool(safeData.companion_mode !== false)],
     ["Memory Insight Mode", fmtBool(safeData.memory_insight_mode !== false)],
     ["Parent Teaching Mode", fmtBool(safeData.parent_teaching_mode)],
+    ["Upload OCR/Vision mode", fmtBool(safeData.upload_vision_mode)],
+    ["Upload OCR/Vision model", safeData.upload_vision_model || safeData.model || "-"],
     ["Demo mode", fmtBool(safeData.demo_mode)],
     ["Demo env override", fmtBool(safeData.demo_mode_env_override)],
     ["Warmth", calibrationDescriptor("warmth", safeData.personality_warmth ?? 55)],
@@ -2970,6 +3355,16 @@ function setupSSE() {
         await refreshMemory().catch(() => {});
         await refreshGrowth().catch(() => {});
         await refreshLegacyArchive().catch(() => {});
+      }
+      if (String(payload?.type || "") === "upload_analyzed") {
+        await refreshUploads({ keepSelection: true }).catch(() => {});
+      }
+      if (String(payload?.type || "") === "upload_question_answered") {
+        const uploadPayload = payload.payload && typeof payload.payload === "object" ? payload.payload : {};
+        if (String(uploadPayload.upload_id || "") === String(state.selectedUploadId || "")) {
+          state.lastUploadAnswer = uploadPayload;
+          renderUploadAnswer(uploadPayload);
+        }
       }
       const growthEventTypes = new Set([
         "run_success",
@@ -3685,6 +4080,8 @@ function wireActions() {
           ? !!el.settingAutonomousSelfImproveMode.checked
           : true,
         demo_mode: el.settingDemoMode ? !!el.settingDemoMode.checked : false,
+        upload_vision_mode: el.settingUploadVisionMode ? !!el.settingUploadVisionMode.checked : false,
+        upload_vision_model: String(el.settingUploadVisionModel?.value || "").trim(),
         personality_warmth: clampPercent(el.settingPersonalityWarmth?.value, 55),
         personality_verbosity: clampPercent(el.settingPersonalityVerbosity?.value, 55),
         personality_curiosity: clampPercent(el.settingPersonalityCuriosity?.value, 50),
@@ -3704,6 +4101,15 @@ function wireActions() {
   [el.settingPersonalityWarmth, el.settingPersonalityVerbosity, el.settingPersonalityCuriosity].forEach((node) => {
     node?.addEventListener("input", () => renderPersonalityCalibrationLabels());
     node?.addEventListener("change", () => renderPersonalityCalibrationLabels());
+  });
+  el.settingUploadVisionMode?.addEventListener("change", () => {
+    if (el.uploadVisionMode) {
+      el.uploadVisionMode.checked = !!el.settingUploadVisionMode?.checked;
+    }
+  });
+  el.settingUploadVisionModel?.addEventListener("change", () => {
+    if (!el.uploadVisionModel) return;
+    el.uploadVisionModel.value = String(el.settingUploadVisionModel?.value || "");
   });
 
   el.cliSendBtn.addEventListener("click", async () => {
@@ -3754,6 +4160,41 @@ function wireActions() {
 
   el.memoryChatRefreshBtn?.addEventListener("click", () => {
     refreshMemory().catch((err) => setCliOutput(err.message));
+  });
+
+  el.uploadAnalyzeBtn?.addEventListener("click", async () => {
+    try {
+      await analyzeUploadFromPicker();
+    } catch (err) {
+      setMessage(err.message);
+    }
+  });
+
+  el.uploadRefreshBtn?.addEventListener("click", async () => {
+    try {
+      await refreshUploads({ keepSelection: true });
+      showToast("Uploads refreshed.");
+    } catch (err) {
+      setMessage(err.message);
+    }
+  });
+
+  el.uploadAskBtn?.addEventListener("click", async () => {
+    try {
+      await askSelectedUploadQuestion();
+    } catch (err) {
+      setMessage(err.message);
+    }
+  });
+
+  el.uploadAskInput?.addEventListener("keydown", async (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    try {
+      await askSelectedUploadQuestion();
+    } catch (err) {
+      setMessage(err.message);
+    }
   });
 
   el.memoryChatSearch?.addEventListener("input", () => {
@@ -3961,6 +4402,7 @@ async function bootstrap() {
     safeRefresh("approvals", refreshApprovals),
     safeRefresh("runs", refreshRuns),
     safeRefresh("imported bundles", refreshImportedBundles),
+    safeRefresh("uploads", refreshUploads),
     safeRefresh("memory", refreshMemory),
     safeRefresh("growth", refreshGrowth),
     safeRefresh("legacy archive", refreshLegacyArchive),
@@ -3992,6 +4434,7 @@ async function bootstrap() {
         safeRefresh("status", refreshStatus, { silent: true }),
         safeRefresh("runs", refreshRuns, { silent: true }),
         safeRefresh("imported bundles", refreshImportedBundles, { silent: true }),
+        safeRefresh("uploads", refreshUploads, { silent: true }),
         safeRefresh("approvals", refreshApprovals, { silent: true }),
         safeRefresh("legacy archive", refreshLegacyArchive, { silent: true }),
         safeRefresh("self improvements", refreshSelfImprovements, { silent: true }),
@@ -4002,6 +4445,7 @@ async function bootstrap() {
   }, STREAM_RETRY_MS);
 
   setInterval(() => refreshMemory().catch(() => {}), 6000);
+  setInterval(() => refreshUploads({ keepSelection: true }).catch(() => {}), 6500);
   setInterval(() => refreshGrowth().catch(() => {}), 7000);
   setInterval(() => refreshLegacyArchive().catch(() => {}), 8000);
   setInterval(() => refreshSelfImprovements().catch(() => {}), 9000);

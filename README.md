@@ -464,6 +464,26 @@ Use the `Memory & Chat` tab to interact naturally while keeping memory writes ex
 - Run Health Summary card per run: iterations, time-to-green, approvals, models used, top error category, memory references.
 - Failure explainer with category, top error lines, related files, and copyable VS Code open commands.
 
+### File Upload Intelligence
+
+David now supports local upload + analysis for:
+- images (`png`, `jpg`, `jpeg`, `gif`, `bmp`, `webp`)
+- PDF documents (`pdf`)
+- spreadsheets (`xlsx`, `xls`)
+- CSV files (`csv`)
+
+Workflow:
+1. Upload and analyze a file with `POST /api/uploads/analyze` (`multipart/form-data`, field `file`).
+2. List analyzed uploads with `GET /api/uploads`.
+3. Retrieve a specific analyzed upload with `GET /api/uploads/<upload_id>`.
+4. Ask questions against the analyzed content with `POST /api/uploads/<upload_id>/ask`.
+
+Notes:
+- Upload analysis is local-only and constrained by safety size/type limits.
+- `xls` is accepted with limited metadata extraction; convert to `xlsx` for richer table analysis.
+- Table uploads include record-level profiling (column types, missing/unique counts, top values, numeric min/max/avg/sum).
+- PDF/image uploads include a plain-language `content brief` so David can answer prompts like “what is this file showing?”.
+
 ### AI Cinematic Theme
 
 - The web UI ships with a cinematic dark mode by default (`html[data-theme="dark"]`):
@@ -508,6 +528,10 @@ Use the `Memory & Chat` tab to interact naturally while keeping memory writes ex
 - `GET /api/bundles/import/<import_id>/audit`
 - `GET /api/bundles/import/<import_id>/replay`
 - `GET /api/bundles/import/<import_id>/compare`
+- `POST /api/uploads/analyze`
+- `GET /api/uploads`
+- `GET /api/uploads/<upload_id>`
+- `POST /api/uploads/<upload_id>/ask`
 - `GET /api/memory`
 - `GET /api/memory/facts`
 - `GET /api/memory/conversations`

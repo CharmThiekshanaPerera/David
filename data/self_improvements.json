@@ -5,9 +5,9 @@
       "title": "Autonomous Improvement: Manual Self-Review",
       "summary": "Manual Self-Review. This proposal was drafted autonomously from structured reflections and run evidence.",
       "rationale": "Trigger: manual\nRun context: run_20260215T184551_d3146004 / status=success\nReflection key: -\n\nWhy this change was drafted:\n- Manual Self-Review.\n- Convert lessons into concrete planning and memory-indexing heuristics.\n- Keep core safety constraints immutable and require human approval before merge.",
-      "status": "pending",
+      "status": "merged",
       "created_at": "2026-02-18T10:17:40.561102+00:00",
-      "updated_at": "2026-02-18T10:17:40.561102+00:00",
+      "updated_at": "2026-02-22T16:25:49.505813+00:00",
       "source": "self_improvement_engine",
       "actor": "david_autonomous",
       "sandbox_dir": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260218T101740_9bac28ef",
@@ -53,17 +53,31 @@
         "trigger": "manual",
         "trigger_id": ""
       },
-      "decision": null,
-      "merge": null
+      "decision": {
+        "decision": "approve",
+        "actor": "web_ui",
+        "note": "",
+        "decided_at": "2026-02-22T16:25:49.361659+00:00"
+      },
+      "merge": {
+        "merged_at": "2026-02-22T16:25:49.505813+00:00",
+        "actor": "web_ui",
+        "file_count": 3,
+        "paths": [
+          "agent/self_improvement/autonomous_playbook.py",
+          "agent/self_improvement/autonomous_state.json",
+          "docs/self_improvement_change_history.md"
+        ]
+      }
     },
     {
       "id": "improve_20260222T152004_77f35fc4",
       "title": "Autonomous Improvement: Goal Reflection Loop",
       "summary": "Goal Reflection Loop; Run Reliability Gap. This proposal was drafted autonomously from structured reflections and run evidence.",
       "rationale": "Trigger: goal (run_20260222T151748_a51c7807)\nRun context: run_20260222T151748_a51c7807 / status=failed\nReflection key: run:run_20260222T151748_a51c7807\n\nWhy this change was drafted:\n- Goal Reflection Loop; Run Reliability Gap.\n- Convert lessons into concrete planning and memory-indexing heuristics.\n- Keep core safety constraints immutable and require human approval before merge.",
-      "status": "pending",
+      "status": "merged",
       "created_at": "2026-02-22T15:20:04.811695+00:00",
-      "updated_at": "2026-02-22T15:20:04.811695+00:00",
+      "updated_at": "2026-02-22T16:25:46.496365+00:00",
       "source": "self_improvement_engine",
       "actor": "david_autonomous",
       "sandbox_dir": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260222T152004_77f35fc4",
@@ -110,8 +124,22 @@
         "trigger": "goal",
         "trigger_id": "run_20260222T151748_a51c7807"
       },
-      "decision": null,
-      "merge": null
+      "decision": {
+        "decision": "approve",
+        "actor": "web_ui",
+        "note": "",
+        "decided_at": "2026-02-22T16:25:46.217542+00:00"
+      },
+      "merge": {
+        "merged_at": "2026-02-22T16:25:46.496365+00:00",
+        "actor": "web_ui",
+        "file_count": 3,
+        "paths": [
+          "agent/self_improvement/autonomous_playbook.py",
+          "agent/self_improvement/autonomous_state.json",
+          "docs/self_improvement_change_history.md"
+        ]
+      }
     }
   ]
 }

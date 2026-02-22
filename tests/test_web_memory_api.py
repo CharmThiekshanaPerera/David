@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 import json
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -62,6 +64,80 @@ def memory_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     app = create_app(control_center=center)
     app.config.update(TESTING=True)
     return app.test_client(), config
+
+
+def _build_test_xlsx_bytes() -> bytes:
+    workbook_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+ xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Sales" sheetId="1" r:id="rId1"/>
+  </sheets>
+</workbook>
+"""
+    workbook_rels = """<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+</Relationships>
+"""
+    sheet_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1">
+      <c r="A1" t="inlineStr"><is><t>region</t></is></c>
+      <c r="B1" t="inlineStr"><is><t>amount</t></is></c>
+    </row>
+    <row r="2">
+      <c r="A2" t="inlineStr"><is><t>East</t></is></c>
+      <c r="B2"><v>120</v></c>
+    </row>
+    <row r="3">
+      <c r="A3" t="inlineStr"><is><t>West</t></is></c>
+      <c r="B3"><v>95</v></c>
+    </row>
+  </sheetData>
+</worksheet>
+"""
+    types_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>
+"""
+    rels_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>
+"""
+    buff = io.BytesIO()
+    with zipfile.ZipFile(buff, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", types_xml)
+        archive.writestr("_rels/.rels", rels_xml)
+        archive.writestr("xl/workbook.xml", workbook_xml)
+        archive.writestr("xl/_rels/workbook.xml.rels", workbook_rels)
+        archive.writestr("xl/worksheets/sheet1.xml", sheet_xml)
+    return buff.getvalue()
+
+
+def _build_test_pdf_bytes() -> bytes:
+    return (
+        b"%PDF-1.4\n"
+        b"1 0 obj\n<< /Type /Page >>\nendobj\n"
+        b"2 0 obj\n<< /Length 31 >>\nstream\n(Budget East region grows) Tj\nendstream\nendobj\n"
+        b"%%EOF\n"
+    )
+
+
+def _build_test_png_bytes() -> bytes:
+    # Minimal PNG with IHDR width=2, height=3
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        b"\x00\x00\x00\rIHDR"
+        b"\x00\x00\x00\x02\x00\x00\x00\x03\x08\x02\x00\x00\x00"
+        b"\x00\x00\x00\x00"
+    )
 
 
 def test_api_teach_then_ask_persists(memory_client) -> None:
@@ -348,6 +424,33 @@ def test_api_settings_toggle_autonomous_self_improvement_mode(memory_client) -> 
     refreshed = client.get("/api/settings")
     assert refreshed.status_code == 200
     assert refreshed.get_json()["data"]["autonomous_self_improvement_mode"] is False
+
+
+def test_api_settings_upload_vision_defaults(memory_client) -> None:
+    client, _config = memory_client
+    settings = client.get("/api/settings")
+    assert settings.status_code == 200
+    payload = settings.get_json()["data"]
+    assert payload["upload_vision_mode"] is False
+    assert str(payload["upload_vision_model"]) == ""
+
+
+def test_api_settings_toggle_upload_vision_mode(memory_client) -> None:
+    client, _config = memory_client
+    updated = client.post(
+        "/api/settings",
+        json={"upload_vision_mode": True, "upload_vision_model": "qwen2.5-coder:1.5b"},
+    )
+    assert updated.status_code == 200
+    data = updated.get_json()["data"]
+    assert data["upload_vision_mode"] is True
+    assert str(data["upload_vision_model"]) == "qwen2.5-coder:1.5b"
+
+    refreshed = client.get("/api/settings")
+    assert refreshed.status_code == 200
+    refreshed_data = refreshed.get_json()["data"]
+    assert refreshed_data["upload_vision_mode"] is True
+    assert str(refreshed_data["upload_vision_model"]) == "qwen2.5-coder:1.5b"
 
 
 def test_api_settings_personality_calibration_defaults_present(memory_client) -> None:
@@ -848,6 +951,162 @@ def test_legacy_archive_remove_entry(memory_client) -> None:
     assert listed.status_code == 200
     items = listed.get_json()["data"].get("items", [])
     assert all(str(item.get("id", "")) != entry_id for item in items)
+
+
+def test_api_upload_csv_analyze_list_and_ask(memory_client) -> None:
+    client, _config = memory_client
+    csv_content = b"region,amount\nEast,120\nWest,95\n"
+
+    uploaded = client.post(
+        "/api/uploads/analyze",
+        data={"actor": "web_ui", "file": (io.BytesIO(csv_content), "sales.csv")},
+        content_type="multipart/form-data",
+    )
+    assert uploaded.status_code == 200
+    upload_data = uploaded.get_json()["data"]
+    upload_id = str(upload_data.get("upload_id", ""))
+    assert upload_id.startswith("upl_")
+    analysis = upload_data.get("analysis", {})
+    assert str(analysis.get("format", "")) == "csv"
+    assert int((analysis.get("stats") or {}).get("rows", 0)) == 2
+    assert int((analysis.get("stats") or {}).get("columns", 0)) == 2
+    assert str(analysis.get("content_brief", "")).strip()
+    profiles = analysis.get("column_profiles", [])
+    assert isinstance(profiles, list)
+    assert any(str(item.get("name", "")) == "amount" for item in profiles if isinstance(item, dict))
+
+    listed = client.get("/api/uploads")
+    assert listed.status_code == 200
+    rows = listed.get_json()["data"]
+    assert any(str(row.get("upload_id", "")) == upload_id for row in rows)
+
+    detail = client.get(f"/api/uploads/{upload_id}")
+    assert detail.status_code == 200
+    detail_data = detail.get_json()["data"]
+    assert str((detail_data.get("analysis") or {}).get("kind", "")) == "table"
+
+    asked = client.post(
+        f"/api/uploads/{upload_id}/ask",
+        json={"question": "Which sampled row mentions East?"},
+    )
+    assert asked.status_code == 200
+    asked_data = asked.get_json()["data"]
+    assert "East" in str(asked_data.get("answer", ""))
+    assert float(asked_data.get("confidence", 0.0)) > 0.0
+
+    avg = client.post(
+        f"/api/uploads/{upload_id}/ask",
+        json={"question": "What is the average amount?"},
+    )
+    assert avg.status_code == 200
+    avg_answer = str(avg.get_json()["data"].get("answer", ""))
+    assert "107.5" in avg_answer
+
+
+def test_api_upload_xlsx_analyze(memory_client) -> None:
+    client, _config = memory_client
+    xlsx_content = _build_test_xlsx_bytes()
+
+    uploaded = client.post(
+        "/api/uploads/analyze",
+        data={
+            "file": (
+                io.BytesIO(xlsx_content),
+                "sales.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+        content_type="multipart/form-data",
+    )
+    assert uploaded.status_code == 200
+    analysis = uploaded.get_json()["data"]["analysis"]
+    assert str(analysis.get("format", "")) == "xlsx"
+    stats = analysis.get("stats", {})
+    assert int(stats.get("sheet_count", 0)) >= 1
+    assert int(stats.get("rows", 0)) >= 2
+    assert int(stats.get("columns", 0)) >= 2
+
+
+def test_api_upload_pdf_and_image_analysis(memory_client) -> None:
+    client, _config = memory_client
+
+    pdf_uploaded = client.post(
+        "/api/uploads/analyze",
+        data={"file": (io.BytesIO(_build_test_pdf_bytes()), "brief.pdf", "application/pdf")},
+        content_type="multipart/form-data",
+    )
+    assert pdf_uploaded.status_code == 200
+    pdf_data = pdf_uploaded.get_json()["data"]
+    pdf_analysis = pdf_data.get("analysis", {})
+    assert str(pdf_analysis.get("format", "")) == "pdf"
+    assert int((pdf_analysis.get("stats") or {}).get("pages", 0)) >= 1
+    assert str(pdf_analysis.get("content_brief", "")).strip()
+
+    asked = client.post(
+        f"/api/uploads/{pdf_data['upload_id']}/ask",
+        json={"question": "What text is in the document?"},
+    )
+    assert asked.status_code == 200
+    assert "document" in str(asked.get_json()["data"].get("answer", "")).lower() or "east" in str(
+        asked.get_json()["data"].get("answer", "")
+    ).lower()
+
+    asked_summary = client.post(
+        f"/api/uploads/{pdf_data['upload_id']}/ask",
+        json={"question": "What is this pdf showing?"},
+    )
+    assert asked_summary.status_code == 200
+    assert str(asked_summary.get_json()["data"].get("answer", "")).strip()
+
+    image_uploaded = client.post(
+        "/api/uploads/analyze",
+        data={"file": (io.BytesIO(_build_test_png_bytes()), "tiny.png", "image/png")},
+        content_type="multipart/form-data",
+    )
+    assert image_uploaded.status_code == 200
+    image_analysis = image_uploaded.get_json()["data"]["analysis"]
+    assert str(image_analysis.get("format", "")) == "png"
+    assert int((image_analysis.get("stats") or {}).get("width", 0)) == 2
+    assert int((image_analysis.get("stats") or {}).get("height", 0)) == 3
+    assert str(image_analysis.get("content_brief", "")).strip()
+
+
+def test_api_upload_image_with_vision_enrichment(memory_client, monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _config = memory_client
+
+    class FakeVisionResponse:
+        status_code = 200
+        text = '{"message":{"content":"Vision summary"}}'
+
+        @staticmethod
+        def json() -> dict[str, dict[str, str]]:
+            return {"message": {"content": "The image appears to show a small synthetic graphic used for test fixtures."}}
+
+    def fake_post(_url, json=None, timeout=None):
+        payload = json or {}
+        messages = payload.get("messages", [])
+        assert isinstance(messages, list)
+        assert any(isinstance(msg, dict) and isinstance(msg.get("images"), list) for msg in messages)
+        return FakeVisionResponse()
+
+    monkeypatch.setattr("web.control_center.requests.post", fake_post)
+
+    uploaded = client.post(
+        "/api/uploads/analyze",
+        data={
+            "use_vision": "true",
+            "vision_model": "qwen2.5-coder:1.5b",
+            "file": (io.BytesIO(_build_test_png_bytes()), "tiny.png", "image/png"),
+        },
+        content_type="multipart/form-data",
+    )
+    assert uploaded.status_code == 200
+    analysis = uploaded.get_json()["data"]["analysis"]
+    vision_meta = analysis.get("vision", {})
+    assert str(vision_meta.get("status", "")) == "applied"
+    assert str(vision_meta.get("model", "")) == "qwen2.5-coder:1.5b"
+    assert bool((analysis.get("stats") or {}).get("vision_enriched")) is True
+    assert "small synthetic graphic" in str(analysis.get("content_brief", "")).lower()
 
 
 def test_self_improvement_sandbox_proposal_lifecycle(memory_client) -> None:
