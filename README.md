@@ -632,6 +632,8 @@ pytest -q tests/test_projects_layout.py tests/test_loop_projects.py
 
 To grow David into a stronger autonomous engineer, add these next:
 
+Detailed workflow roadmap: `docs/AGENTIC_WORKFLOW_ROADMAP.md`
+
 1. Git integration:
    Auto-commit successful iterations (`git add` + `git commit`) for rollback safety.
 2. Diff-based editing:

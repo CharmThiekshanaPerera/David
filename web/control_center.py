@@ -2803,8 +2803,8 @@ class DavidControlCenter:
         if not isinstance(summary, dict):
             summary = {}
         payload = self._clone_json(summary)
-        payload.setdefault("workspace_dir", "imported_bundle_read_only")
-        payload.setdefault("artifacts_dir", f"imported_bundle:{import_id}")
+        payload["workspace_dir"] = "imported_bundle_read_only"
+        payload["artifacts_dir"] = f"imported_bundle:{import_id}"
         payload["read_only"] = True
         return payload
 
