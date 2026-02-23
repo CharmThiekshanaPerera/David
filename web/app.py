@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
 import json
+import re
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -9,6 +12,14 @@ from flask import Flask, Response, jsonify, request, send_file, send_from_direct
 
 from agent.config import AgentConfig, load_config
 from web.control_center import DavidControlCenter, create_control_center
+from web.voice_service import (
+    split_response_text,
+    synthesize_text_chunk,
+    transcribe_audio_bytes,
+    voice_config_from_settings,
+)
+
+MAX_VOICE_TEXT_CHARS = 4000
 
 
 def create_app(
@@ -49,6 +60,9 @@ def create_app(
                 "/api/ask",
                 "/api/teach",
                 "/api/chat",
+                "/api/voice/transcribe",
+                "/api/voice/tts",
+                "/api/voice/chat/stream",
                 "/api/memory/confirm_overwrite",
                 "/api/self_improvements/propose",
                 "/api/legacy_archive",
@@ -96,6 +110,25 @@ def create_app(
 
     def _sse(event_name: str, payload: dict[str, Any]) -> str:
         return f"event: {event_name}\ndata: {json.dumps(payload)}\n\n"
+
+    def _assistant_text_from_chat_payload(chat_payload: dict[str, Any]) -> str:
+        if not isinstance(chat_payload, dict):
+            return ""
+        response = chat_payload.get("response")
+        response_data = response if isinstance(response, dict) else {}
+        text = str(chat_payload.get("assistant_turn", {}).get("text", "")).strip() if isinstance(chat_payload.get("assistant_turn"), dict) else ""
+        if text:
+            return text
+        for key in ("answer", "reply", "message"):
+            value = str(response_data.get(key, "")).strip()
+            if value:
+                return value
+        if str(response_data.get("status", "")).strip() == "confirmation_required":
+            return "Teach is pending confirmation. Enable Confirm Teach save and send again."
+        return "Completed."
+
+    def _voice_mode_enabled(settings: dict[str, Any]) -> bool:
+        return bool(settings.get("voice_mode_enabled", False))
 
     @app.get("/")
     def index():
@@ -154,6 +187,347 @@ def create_app(
         except ValueError as exc:
             return _json_error(str(exc), status=400)
         return jsonify({"ok": True, "data": data})
+
+    @app.post("/api/voice/transcribe")
+    def api_voice_transcribe():
+        actor = str(request.form.get("actor", "web_voice")).strip() or "web_voice"
+        session_id = str(request.form.get("session_id", "")).strip()
+        mime_type = ""
+        audio_bytes = b""
+
+        upload = request.files.get("audio")
+        if upload is not None:
+            mime_type = str(getattr(upload, "mimetype", "") or getattr(upload, "content_type", "") or "").strip()
+            audio_bytes = upload.read()
+        else:
+            payload = request.get_json(silent=True) or {}
+            if not isinstance(payload, dict):
+                return _json_error("Voice transcription requires multipart audio upload or JSON body.")
+            actor = str(payload.get("actor", actor)).strip() or actor
+            session_id = str(payload.get("session_id", session_id)).strip()
+            mime_type = str(payload.get("mime_type", "audio/webm")).strip()
+            audio_b64 = str(payload.get("audio_base64", "")).strip()
+            if audio_b64.startswith("data:") and "," in audio_b64:
+                _, _, raw_part = audio_b64.partition(",")
+                audio_b64 = raw_part.strip()
+            try:
+                audio_bytes = base64.b64decode(audio_b64, validate=True) if audio_b64 else b""
+            except ValueError:
+                return _json_error("Invalid base64 audio payload.", status=400)
+
+        if not audio_bytes:
+            return _json_error("Audio payload is empty.", status=400)
+
+        settings = center.get_settings()
+        safe_settings = settings if isinstance(settings, dict) else {}
+        if not _voice_mode_enabled(safe_settings):
+            return _json_error("Voice mode is disabled. Enable Voice Mode in Settings.", status=409)
+        voice_config = voice_config_from_settings(safe_settings)
+        try:
+            result = transcribe_audio_bytes(
+                audio_bytes,
+                mime_type=mime_type,
+                config=voice_config,
+            )
+        except ValueError as exc:
+            return _json_error(str(exc), status=400)
+
+        result["actor"] = actor
+        result["session_id"] = session_id
+        result["timestamp_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        return jsonify({"ok": True, "data": result})
+
+    @app.post("/api/voice/tts")
+    def api_voice_tts():
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return _json_error("JSON body must be an object.")
+        text = str(payload.get("text", "")).strip()
+        if not text:
+            return _json_error("text cannot be empty.", status=400)
+        if len(text) > MAX_VOICE_TEXT_CHARS:
+            return _json_error(f"text exceeds max length ({MAX_VOICE_TEXT_CHARS} characters).", status=400)
+
+        settings = center.get_settings()
+        safe_settings = settings if isinstance(settings, dict) else {}
+        if not _voice_mode_enabled(safe_settings):
+            return _json_error("Voice mode is disabled. Enable Voice Mode in Settings.", status=409)
+        voice_config = voice_config_from_settings(safe_settings)
+        style = str(payload.get("voice_style", safe_settings.get("voice_style", voice_config.voice_style))).strip().lower() or voice_config.voice_style
+        try:
+            speech_rate = int(payload.get("voice_rate", safe_settings.get("voice_rate", voice_config.voice_rate)))
+        except (TypeError, ValueError):
+            speech_rate = voice_config.voice_rate
+        speech_rate = max(60, min(180, speech_rate))
+        try:
+            result = synthesize_text_chunk(
+                text,
+                config=voice_config,
+                voice_style=style,
+                speech_rate=speech_rate,
+            )
+        except ValueError as exc:
+            return _json_error(str(exc), status=400)
+
+        result["text"] = text
+        result["timestamp_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        return jsonify({"ok": True, "data": result})
+
+    @app.post("/api/voice/chat/stream")
+    def api_voice_chat_stream():
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return _json_error("JSON body must be an object.")
+        message = str(payload.get("message", payload.get("text", ""))).strip()
+        intent = str(payload.get("intent", "")).strip().lower()
+        actor = str(payload.get("actor", "web_voice")).strip() or "web_voice"
+        session_id = str(payload.get("session_id", "")).strip()
+        confirm_save = bool(payload.get("confirm_save", False))
+        parent_teaching_mode = bool(payload.get("parent_teaching_mode", False))
+        confirm_sensitive = bool(payload.get("confirm_sensitive", False))
+        mute = bool(payload.get("mute", False))
+        turn_id = str(payload.get("turn_id", "")).strip()
+        if not message:
+            return _json_error("message cannot be empty.", status=400)
+        if len(message) > MAX_VOICE_TEXT_CHARS:
+            return _json_error(f"message exceeds max length ({MAX_VOICE_TEXT_CHARS} characters).", status=400)
+
+        settings = center.get_settings()
+        safe_settings = settings if isinstance(settings, dict) else {}
+        if not _voice_mode_enabled(safe_settings):
+            return _json_error("Voice mode is disabled. Enable Voice Mode in Settings.", status=409)
+        voice_config = voice_config_from_settings(safe_settings)
+        text_only_mode = bool(payload.get("text_only_mode", safe_settings.get("voice_text_only_mode", False)))
+        style = str(payload.get("voice_style", safe_settings.get("voice_style", voice_config.voice_style))).strip().lower() or voice_config.voice_style
+        try:
+            speech_rate = int(payload.get("voice_rate", safe_settings.get("voice_rate", voice_config.voice_rate)))
+        except (TypeError, ValueError):
+            speech_rate = voice_config.voice_rate
+        speech_rate = max(60, min(180, speech_rate))
+        try:
+            chunk_chars = int(payload.get("chunk_chars", safe_settings.get("voice_chunk_chars", voice_config.chunk_chars)))
+        except (TypeError, ValueError):
+            chunk_chars = voice_config.chunk_chars
+        chunk_chars = max(80, min(400, chunk_chars))
+
+        def _selected_intent() -> str:
+            normalized = intent if intent in {"ask", "teach", "goal", "chat"} else ""
+            if normalized:
+                return normalized
+            classify = getattr(center, "classify_chat_intent", None)
+            if callable(classify):
+                try:
+                    detected = classify(message)
+                    selected = str((detected or {}).get("intent", "")).strip().lower()
+                    if selected in {"ask", "teach", "goal", "chat"}:
+                        return selected
+                except Exception:
+                    return "chat"
+            return "chat"
+
+        def _call_chat_message() -> dict[str, Any]:
+            try:
+                return center.chat_message(
+                    message,
+                    intent=selected_intent,
+                    confirm_save=confirm_save,
+                    parent_teaching_mode=parent_teaching_mode,
+                    session_id=session_id,
+                    actor=actor,
+                    publish_events=False,
+                )
+            except TypeError:
+                return center.chat_message(
+                    message,
+                    intent=selected_intent,
+                    confirm_save=confirm_save,
+                    parent_teaching_mode=parent_teaching_mode,
+                    session_id=session_id,
+                    actor=actor,
+                )
+
+        selected_intent = _selected_intent()
+
+        def generate():
+            yield _sse(
+                "connected",
+                {
+                    "stream": "voice_chat",
+                    "selected_intent": selected_intent,
+                    "session_id": session_id,
+                    "turn_id": turn_id,
+                },
+            )
+            if selected_intent == "goal" and not confirm_sensitive:
+                yield _sse(
+                    "confirmation_required",
+                    {
+                        "message": "Voice goal execution requires explicit confirmation.",
+                        "selected_intent": selected_intent,
+                        "turn_id": turn_id,
+                    },
+                )
+                return
+            try:
+                result = _call_chat_message()
+                assistant_text = _assistant_text_from_chat_payload(result)
+                chunks = split_response_text(assistant_text, max_chars=chunk_chars)
+                assembled = ""
+                for idx, chunk in enumerate(chunks):
+                    assembled = f"{assembled} {chunk}".strip()
+                    audio_payload = {
+                        "engine": voice_config.tts_engine,
+                        "mime_type": "",
+                        "audio_base64": "",
+                        "style": style,
+                        "rate": speech_rate,
+                    }
+                    if not text_only_mode and not mute:
+                        try:
+                            audio_payload = synthesize_text_chunk(
+                                chunk,
+                                config=voice_config,
+                                voice_style=style,
+                                speech_rate=speech_rate,
+                            )
+                        except ValueError as exc:
+                            audio_payload = {
+                                "engine": voice_config.tts_engine,
+                                "mime_type": "",
+                                "audio_base64": "",
+                                "style": style,
+                                "rate": speech_rate,
+                                "error": str(exc),
+                            }
+                    yield _sse(
+                        "assistant_partial",
+                        {
+                            "index": idx,
+                            "chunk": chunk,
+                            "assembled": assembled,
+                            "selected_intent": selected_intent,
+                            "turn_id": turn_id,
+                            **audio_payload,
+                        },
+                    )
+
+                crisis_support = bool(result.get("crisis_support")) or bool(
+                    re.search(r"\b(988|immediate danger|hurt yourself|self-harm)\b", assistant_text, flags=re.IGNORECASE)
+                )
+                yield _sse(
+                    "assistant_final",
+                    {
+                        "assistant_text": assistant_text,
+                        "selected_intent": selected_intent,
+                        "crisis_support": crisis_support,
+                        "chunk_count": len(chunks),
+                        "turn_id": turn_id,
+                        "result": result,
+                    },
+                )
+            except ValueError as exc:
+                yield _sse("error", {"error": str(exc), "turn_id": turn_id})
+            except Exception as exc:  # pragma: no cover - defensive stream fallback
+                yield _sse("error", {"error": f"Voice stream failed: {exc}", "turn_id": turn_id})
+
+        return Response(
+            stream_with_context(generate()),
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.get("/api/voice/diagnostics")
+    def api_voice_diagnostics():
+        settings = center.get_settings()
+        safe_settings = settings if isinstance(settings, dict) else {}
+        voice_config = voice_config_from_settings(safe_settings)
+        voice_enabled = _voice_mode_enabled(safe_settings)
+
+        def _command_available(name: str) -> bool:
+            return bool(name and shutil.which(name))
+
+        stt_ready = True
+        stt_error = ""
+        if voice_config.stt_engine == "none":
+            stt_ready = False
+            stt_error = "Voice STT engine is disabled."
+        elif voice_config.stt_engine == "whisper_cpp":
+            if not voice_config.whisper_cpp_model_path:
+                stt_ready = False
+                stt_error = "whisper.cpp model path is missing."
+            elif not Path(voice_config.whisper_cpp_model_path).expanduser().exists():
+                stt_ready = False
+                stt_error = "whisper.cpp model path not found."
+            elif not _command_available(voice_config.whisper_cpp_command):
+                stt_ready = False
+                stt_error = f"whisper.cpp command not found: {voice_config.whisper_cpp_command}"
+        else:
+            if not _command_available(voice_config.stt_command):
+                stt_ready = False
+                stt_error = f"Whisper CLI command not found: {voice_config.stt_command}"
+
+        tts_ready = True
+        tts_error = ""
+        if voice_config.tts_engine == "none":
+            tts_ready = False
+            tts_error = "Voice TTS engine is disabled."
+        elif voice_config.tts_engine == "piper":
+            if not voice_config.tts_model_path:
+                tts_ready = False
+                tts_error = "Piper model path is missing."
+            elif not Path(voice_config.tts_model_path).expanduser().exists():
+                tts_ready = False
+                tts_error = "Piper model path not found."
+            elif not _command_available(voice_config.tts_command):
+                tts_ready = False
+                tts_error = f"Piper command not found: {voice_config.tts_command}"
+
+        if not voice_enabled:
+            stt_ready = False
+            tts_ready = False
+            stt_error = stt_error or "Voice mode is disabled."
+            tts_error = tts_error or "Voice mode is disabled."
+
+        payload = {
+            "voice_mode_enabled": voice_enabled,
+            "stt": {
+                "engine": voice_config.stt_engine,
+                "ready": stt_ready,
+                "error": stt_error,
+                "command": voice_config.stt_command,
+                "model": voice_config.stt_model,
+                "language": voice_config.stt_language,
+                "whisper_cpp_command": voice_config.whisper_cpp_command,
+                "whisper_cpp_model_path": voice_config.whisper_cpp_model_path,
+            },
+            "tts": {
+                "engine": voice_config.tts_engine,
+                "ready": tts_ready,
+                "error": tts_error,
+                "command": voice_config.tts_command,
+                "model_path": voice_config.tts_model_path,
+            },
+            "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        return jsonify({"ok": True, "data": payload})
+
+    @app.get("/api/voice/stream/ping")
+    def api_voice_stream_ping():
+        def generate():
+            yield _sse("connected", {"stream": "voice_diag", "ts": time.time()})
+            yield _sse("done", {"ok": True})
+
+        return Response(
+            stream_with_context(generate()),
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     @app.post("/api/teach")
     def api_teach():

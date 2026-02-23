@@ -395,6 +395,7 @@ python -m web.server --host 127.0.0.1 --port 8787
 - Logs: tail view of web + telemetry logs.
 - Settings: safe mode, rate limit, iteration override, risk thresholds, planner/coder/critic model config, default TDD mode, Companion mode, and autonomous self-improvement mode.
 - Memory & Chat: Advanced Chat mode with natural intent detection (`Teach` / `Ask` / `Goal` / `Chat`), confirm-gated memory writes, session history, memory citations, and searchable Facts/Conversations/Lessons/Reflections tabs.
+- Memory & Chat now includes local real-time Voice Mode with microphone capture, local STT transcription, streaming assistant response playback, and Text-Only fallback controls.
 - Memory Insight Mode: every ask/chat answer can expand into a deterministic influence trace showing exactly which Facts, Conversations, and Lessons were used (for example `Fact #12`, `Lesson #7`, `Conversation #3`).
 - Companion mode (enabled by default) adds warm memory-first responses for `/ask` and web chat, with transparent AI identity and lesson-aware recall.
 - Goal runs are log-aware: David automatically reads recent tail logs and uses them as extra context when planning/coding fixes.
@@ -439,8 +440,93 @@ Use the `Memory & Chat` tab to interact naturally while keeping memory writes ex
    - Family and attachment language is handled with warm + transparent wording.
    - Grief-sensitive language adds calm support and encourages reaching trusted real-world people.
    - Crisis-risk language includes urgent U.S. `988` guidance plus emergency-service direction.
+10. Voice safeguards:
+   - Voice uses the same Advanced Chat safety and memory-confirmation gates as typed chat.
+   - Voice `Goal` execution requires explicit confirmation before run start.
+   - Voice mode cannot bypass command allow-lists or core safety modules.
 
 `/ask` and `/teach` CLI mirror behavior remains backward-compatible.
+
+### Real-Time Voice Mode (Local Only)
+
+Voice mode runs entirely on your local machine:
+- microphone capture in browser (`Web Audio API` + `MediaRecorder`)
+- speech recognition in backend via local STT engine
+- text-to-speech via platform-native browser speech (default) or local Piper
+- no cloud audio services are used
+- backend voice endpoints are gated by `Voice Mode Enabled` in Settings
+
+#### Microphone permission requirements
+
+1. Open the Dashboard from `http://127.0.0.1:8787` (localhost).
+2. Allow microphone access when the browser prompts.
+3. If blocked, manually enable mic access for localhost in browser site settings.
+4. Keep HTTPS/localhost policy in mind: mic APIs are restricted on non-secure origins.
+
+#### Local STT setup options
+
+Option A: Whisper CLI (`voice_stt_engine = whisper_cli`)
+
+```bash
+pip install openai-whisper
+```
+
+Set in `Settings -> Voice Mode`:
+- `STT engine`: `Whisper CLI`
+- `STT command`: `whisper`
+- `STT model`: e.g. `base`, `small`, `medium`
+- `STT language`: e.g. `en`
+
+Option B: whisper.cpp (`voice_stt_engine = whisper_cpp`)
+
+Install/build `whisper-cli`, download a GGML model, then set:
+- `STT engine`: `whisper.cpp CLI`
+- `whisper.cpp command`: e.g. `whisper-cli`
+- `whisper.cpp model path`: full path to `.bin` model
+
+If input is non-wav for `whisper.cpp`, install `ffmpeg` locally for conversion.
+
+#### Local TTS setup options
+
+Default: browser platform speech (`voice_tts_engine = browser`)
+- uses OS-native voices through `speechSynthesis`
+- zero extra installation
+
+Optional: Piper (`voice_tts_engine = piper`)
+- install Piper locally
+- set `TTS command` (usually `piper`)
+- set `TTS model path` to local `.onnx` voice model
+
+#### Voice controls in Memory & Chat
+
+- `Push-to-Talk`: hold the button (or spacebar) to record
+- `Auto VAD`: auto-starts when mic level crosses the threshold, stops after silence
+- `Mute`
+- `Text-Only Mode`
+
+The panel also shows:
+- live waveform while listening
+- typing/generating indicator while response is streaming
+- playback indicator while speaking
+- crisis-support overlay when risk language is detected
+- transcript cleanup removes common non-speech markers (for example `[Music]`) before intent handling
+- barge-in support (start speaking to stop playback + cancel the current stream)
+
+Voice request limits:
+- `/api/voice/tts` text max: `4000` characters
+- `/api/voice/chat/stream` message max: `4000` characters
+
+Recommended VAD defaults:
+- `voice_vad_threshold`: `0.035` (RMS amplitude)
+- `voice_vad_silence_ms`: `900`
+Configure these in `Settings -> Voice Mode` or via `POST /api/settings`.
+
+#### Voice diagnostics
+
+Settings includes a `Voice Diagnostics` panel that runs local checks for:
+- microphone permissions
+- STT/TTS readiness
+- SSE streaming connectivity
 
 ### UX highlights (new)
 
@@ -510,6 +596,11 @@ Notes:
 - `POST /api/ask`
 - `POST /api/teach`
 - `POST /api/chat`
+- `POST /api/voice/transcribe`
+- `POST /api/voice/tts`
+- `POST /api/voice/chat/stream`
+- `GET /api/voice/diagnostics`
+- `GET /api/voice/stream/ping`
 - `POST /api/stop`
 - `GET /api/runs`
 - `GET /api/run/<run_id>`

@@ -453,6 +453,60 @@ def test_api_settings_toggle_upload_vision_mode(memory_client) -> None:
     assert str(refreshed_data["upload_vision_model"]) == "qwen2.5-coder:1.5b"
 
 
+def test_api_settings_voice_defaults(memory_client) -> None:
+    client, _config = memory_client
+    settings = client.get("/api/settings")
+    assert settings.status_code == 200
+    payload = settings.get_json()["data"]
+    assert payload["voice_mode_enabled"] is False
+    assert payload["voice_text_only_mode"] is False
+    assert payload["voice_input_mode"] == "ptt"
+    assert float(payload["voice_vad_threshold"]) == 0.035
+    assert int(payload["voice_vad_silence_ms"]) == 900
+    assert str(payload["voice_style"]) == "warm"
+    assert int(payload["voice_rate"]) == 100
+    assert str(payload["voice_stt_engine"]) == "none"
+    assert str(payload["voice_tts_engine"]) == "browser"
+
+
+def test_api_settings_toggle_voice_mode(memory_client) -> None:
+    client, _config = memory_client
+    updated = client.post(
+        "/api/settings",
+        json={
+            "voice_mode_enabled": True,
+            "voice_text_only_mode": True,
+            "voice_input_mode": "vad",
+            "voice_vad_threshold": 0.045,
+            "voice_vad_silence_ms": 1100,
+            "voice_style": "clear",
+            "voice_rate": 130,
+            "voice_stt_engine": "whisper_cli",
+            "voice_stt_model": "base.en",
+            "voice_stt_language": "en",
+            "voice_stt_command": "whisper",
+            "voice_whisper_cpp_command": "whisper-cli",
+            "voice_whisper_cpp_model_path": "/tmp/models/ggml-base.en.bin",
+            "voice_tts_engine": "piper",
+            "voice_tts_command": "piper",
+            "voice_tts_model_path": "/tmp/models/en_US-amy-medium.onnx",
+            "voice_chunk_chars": 210,
+        },
+    )
+    assert updated.status_code == 200
+    data = updated.get_json()["data"]
+    assert data["voice_mode_enabled"] is True
+    assert data["voice_text_only_mode"] is True
+    assert data["voice_input_mode"] == "vad"
+    assert float(data["voice_vad_threshold"]) == 0.045
+    assert int(data["voice_vad_silence_ms"]) == 1100
+    assert str(data["voice_style"]) == "clear"
+    assert int(data["voice_rate"]) == 130
+    assert str(data["voice_stt_engine"]) == "whisper_cli"
+    assert str(data["voice_tts_engine"]) == "piper"
+    assert int(data["voice_chunk_chars"]) == 210
+
+
 def test_api_settings_personality_calibration_defaults_present(memory_client) -> None:
     client, _config = memory_client
     settings = client.get("/api/settings")

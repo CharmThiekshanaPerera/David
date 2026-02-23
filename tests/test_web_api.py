@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import io
 import queue
 
@@ -1304,6 +1305,119 @@ def test_sse_endpoints_available(client):
         assert run_stream.mimetype == "text/event-stream"
     finally:
         run_stream.close()
+
+
+def _enable_voice_mode(client):
+    response = client.post("/api/settings", json={"voice_mode_enabled": True})
+    assert response.status_code == 200
+    return response
+
+
+def test_voice_transcribe_endpoint_requires_local_stt_setup(client):
+    _enable_voice_mode(client)
+    raw_audio = b"RIFF\x00\x00\x00\x00WAVEfmt "
+    response = client.post(
+        "/api/voice/transcribe",
+        json={
+            "audio_base64": base64.b64encode(raw_audio).decode("ascii"),
+            "mime_type": "audio/wav",
+        },
+    )
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert payload["ok"] is False
+    assert "Voice STT is disabled" in payload["error"]
+
+
+def test_voice_endpoints_require_voice_mode_enabled(client):
+    response = client.post("/api/voice/tts", json={"text": "hello"})
+    assert response.status_code == 409
+    payload = response.get_json()
+    assert payload["ok"] is False
+    assert "Voice mode is disabled" in payload["error"]
+
+
+def test_voice_tts_endpoint_returns_browser_engine_payload(client):
+    _enable_voice_mode(client)
+    response = client.post("/api/voice/tts", json={"text": "Hello from local voice mode."})
+    assert response.status_code == 200
+    payload = response.get_json()["data"]
+    assert payload["engine"] == "browser"
+    assert payload["audio_base64"] == ""
+
+
+def test_voice_tts_endpoint_rejects_text_too_long(client):
+    _enable_voice_mode(client)
+    response = client.post("/api/voice/tts", json={"text": "a" * 4001})
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert payload["ok"] is False
+    assert "text exceeds max length" in payload["error"]
+
+
+def test_voice_chat_stream_requires_confirmation_for_goal(client):
+    _enable_voice_mode(client)
+    stream = client.post(
+        "/api/voice/chat/stream",
+        json={"message": "Build a TODO app with tests.", "intent": "goal", "confirm_sensitive": False},
+        buffered=True,
+    )
+    assert stream.status_code == 200
+    body = stream.get_data(as_text=True)
+    assert "event: confirmation_required" in body
+    assert "Voice goal execution requires explicit confirmation." in body
+
+
+def test_voice_chat_stream_rejects_message_too_long(client):
+    _enable_voice_mode(client)
+    response = client.post(
+        "/api/voice/chat/stream",
+        json={"message": "x" * 4001, "intent": "ask", "confirm_sensitive": True},
+    )
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert payload["ok"] is False
+    assert "message exceeds max length" in payload["error"]
+
+
+def test_voice_chat_stream_returns_final_event(client):
+    _enable_voice_mode(client)
+    stream = client.post(
+        "/api/voice/chat/stream",
+        json={
+            "message": "Who is your father?",
+            "intent": "ask",
+            "confirm_sensitive": True,
+            "text_only_mode": True,
+            "turn_id": "turn_test_1",
+        },
+        buffered=True,
+    )
+    assert stream.status_code == 200
+    assert stream.headers.get("Cache-Control") == "no-cache, no-transform"
+    assert stream.headers.get("X-Accel-Buffering") == "no"
+    body = stream.get_data(as_text=True)
+    assert "event: assistant_final" in body
+    assert "\"selected_intent\": \"ask\"" in body
+    assert "\"turn_id\": \"turn_test_1\"" in body
+
+
+def test_voice_diagnostics_endpoint_reports_readiness(client):
+    response = client.get("/api/voice/diagnostics")
+    assert response.status_code == 200
+    payload = response.get_json()["data"]
+    assert "stt" in payload
+    assert "tts" in payload
+    assert isinstance(payload["stt"].get("ready"), bool)
+    assert isinstance(payload["tts"].get("ready"), bool)
+
+
+def test_voice_stream_ping_returns_sse(client):
+    response = client.get("/api/voice/stream/ping", buffered=True)
+    assert response.status_code == 200
+    assert response.mimetype == "text/event-stream"
+    body = response.get_data(as_text=True)
+    assert "event: connected" in body
 
 
 def test_approval_endpoint(client):

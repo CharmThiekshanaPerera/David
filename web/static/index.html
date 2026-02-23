@@ -377,6 +377,111 @@
               <button id="refreshModelsBtn" type="button" class="ghost">Refresh local models</button>
             </div>
           </section>
+          <section class="appearance-panel">
+            <h3>Voice Mode</h3>
+            <p class="muted">
+              Voice mode is local-only. Microphone audio, transcription, and synthesis stay on this machine.
+            </p>
+            <div class="grid two">
+              <label class="check"><input id="settingVoiceModeEnabled" type="checkbox" /> Enable Voice Mode</label>
+              <label class="check"><input id="settingVoiceTextOnlyMode" type="checkbox" /> Default Text-Only Mode</label>
+              <label class="field">
+                Voice input mode
+                <select id="settingVoiceInputMode">
+                  <option value="ptt">Push-to-Talk</option>
+                  <option value="vad">Auto VAD</option>
+                </select>
+              </label>
+              <label class="field">
+                VAD threshold
+                <input id="settingVoiceVadThreshold" type="range" min="0.005" max="0.2" step="0.005" />
+                <span id="settingVoiceVadThresholdValue" class="muted">0.035</span>
+              </label>
+              <label class="field">
+                VAD silence (ms)
+                <input id="settingVoiceVadSilenceMs" type="number" min="250" max="2500" step="50" />
+              </label>
+              <label class="field">
+                Voice style
+                <select id="settingVoiceStyle">
+                  <option value="warm">Warm</option>
+                  <option value="balanced">Balanced</option>
+                  <option value="clear">Clear</option>
+                </select>
+              </label>
+              <label class="field">
+                Speech rate
+                <input id="settingVoiceRate" type="range" min="60" max="180" step="1" />
+                <span id="settingVoiceRateValue" class="muted">100%</span>
+              </label>
+              <label class="field">
+                STT engine
+                <select id="settingVoiceSttEngine">
+                  <option value="none">Disabled</option>
+                  <option value="whisper_cli">Whisper CLI</option>
+                  <option value="whisper_cpp">whisper.cpp CLI</option>
+                </select>
+              </label>
+              <label class="field">
+                STT model
+                <input id="settingVoiceSttModel" type="text" placeholder="base" />
+              </label>
+              <label class="field">
+                STT language
+                <input id="settingVoiceSttLanguage" type="text" placeholder="en" />
+              </label>
+              <label class="field">
+                STT command
+                <input id="settingVoiceSttCommand" type="text" placeholder="whisper" />
+              </label>
+              <label class="field">
+                whisper.cpp command
+                <input id="settingVoiceWhisperCppCommand" type="text" placeholder="whisper-cli" />
+              </label>
+              <label class="field">
+                whisper.cpp model path
+                <input id="settingVoiceWhisperCppModelPath" type="text" placeholder="/models/ggml-base.en.bin" />
+              </label>
+              <label class="field">
+                TTS engine
+                <select id="settingVoiceTtsEngine">
+                  <option value="browser">Platform Speech (browser)</option>
+                  <option value="piper">Piper CLI</option>
+                  <option value="none">Disabled</option>
+                </select>
+              </label>
+              <label class="field">
+                TTS command
+                <input id="settingVoiceTtsCommand" type="text" placeholder="piper" />
+              </label>
+              <label class="field">
+                TTS model path
+                <input id="settingVoiceTtsModelPath" type="text" placeholder="/models/en_US-amy-medium.onnx" />
+              </label>
+              <label class="field">
+                Stream chunk chars
+                <input id="settingVoiceChunkChars" type="number" min="80" max="400" step="5" />
+              </label>
+            </div>
+          </section>
+          <section class="appearance-panel">
+            <h3>Voice Diagnostics</h3>
+            <p class="muted">
+              Run local health checks for microphone permissions, STT/TTS readiness, and streaming connectivity.
+            </p>
+            <div class="row voice-diag-actions">
+              <button id="voiceDiagnosticsRunBtn" type="button" class="ghost">Run Diagnostics</button>
+              <div id="voiceDiagnosticsStatus" class="muted">Not run yet.</div>
+            </div>
+            <div id="voiceDiagnosticsList" class="stack"></div>
+            <div class="voice-diag-steps">
+              <label class="field">
+                Troubleshooting steps (copyable)
+                <textarea id="voiceDiagnosticsSteps" rows="6" readonly></textarea>
+              </label>
+              <button id="voiceDiagnosticsCopyBtn" type="button" class="ghost">Copy Steps</button>
+            </div>
+          </section>
           <div class="grid two">
             <label class="field">
               Safe mode (read-only)
@@ -462,6 +567,40 @@
               <button id="chatIntentChatBtn" type="button" class="segment-btn active">Chat</button>
             </div>
           </div>
+
+          <section class="voice-panel" aria-label="Local voice interaction">
+            <p class="muted">Voice mode is local and transparent: David speaks as an AI companion, never as a human.</p>
+            <div class="row voice-mode-row">
+              <div class="segmented" role="group" aria-label="Voice input mode">
+                <button id="voiceModePttBtn" type="button" class="segment-btn active" aria-pressed="true">
+                  Push-to-Talk
+                </button>
+                <button id="voiceModeVadBtn" type="button" class="segment-btn" aria-pressed="false">
+                  Auto VAD
+                </button>
+              </div>
+              <div id="voiceModeHint" class="muted">Hold the button or spacebar to record.</div>
+            </div>
+            <div class="row voice-control-row">
+              <button id="voiceStartBtn" type="button" class="ptt-btn">Hold to Talk</button>
+              <button id="voiceStopBtn" type="button" class="ghost" disabled>Start Auto Listen</button>
+              <button id="voiceMuteBtn" type="button" class="ghost" aria-pressed="false">Mute</button>
+              <label class="check"><input id="voiceTextOnlyMode" type="checkbox" /> Text-Only Mode</label>
+            </div>
+            <div class="voice-status-row">
+              <canvas id="voiceWaveform" width="960" height="120" role="img" aria-label="Live microphone waveform"></canvas>
+              <div class="voice-indicator-stack">
+                <div id="voiceStatusText" class="muted">Voice idle. Enable Voice Mode in Settings to begin.</div>
+                <div id="voiceTypingIndicator" class="voice-indicator hidden">David is generating...</div>
+                <div id="voicePlaybackIndicator" class="voice-indicator hidden">David is speaking...</div>
+              </div>
+            </div>
+            <div id="voiceTranscriptPreview" class="muted">Transcript preview appears here after speech recognition.</div>
+            <div id="voiceAssistantPreview" class="voice-assistant-preview hidden"></div>
+            <div id="voiceCrisisOverlay" class="voice-crisis-overlay hidden">
+              Crisis support: contact trusted local support now. In the U.S., call or text 988 immediately.
+            </div>
+          </section>
 
           <div class="memory-chat-layout">
             <section class="memory-chat-primary">

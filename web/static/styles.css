@@ -101,6 +101,9 @@
   --stream-connected: var(--blue);
   --stream-reconnecting: var(--warning);
   --stream-fallback: #7a818d;
+  --voice-listening: var(--cyan);
+  --voice-speaking: var(--success);
+  --voice-generating: var(--blue);
 
   /* Effects */
   --shadow-soft: 0 18px 50px rgba(0, 0, 0, 0.32);
@@ -167,6 +170,9 @@ html[data-theme="light"] {
   --diff-rem-border: rgba(225, 29, 72, 0.35);
 
   --stream-fallback: #9ca3af;
+  --voice-listening: #0284c7;
+  --voice-speaking: #059669;
+  --voice-generating: #2563eb;
   --shadow-soft: 0 12px 36px rgba(15, 23, 42, 0.08);
   --shadow-glow: 0 0 18px rgba(77, 163, 255, 0.2);
   --hero-overlay-start: rgba(247, 249, 252, 0.72);
@@ -1157,6 +1163,139 @@ code {
   gap: 0.32rem;
   margin-top: 0.35rem;
 }
+.voice-panel {
+  border: 1px solid color-mix(in oklab, var(--line) 84%, transparent);
+  border-radius: 0.72rem;
+  background: linear-gradient(
+    120deg,
+    color-mix(in oklab, var(--panel-soft) 94%, transparent),
+    color-mix(in oklab, var(--panel) 90%, transparent)
+  );
+  padding: 0.54rem 0.6rem;
+  display: grid;
+  gap: 0.45rem;
+}
+.voice-mode-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.5rem;
+  align-items: center;
+}
+.voice-mode-row .segmented {
+  justify-self: start;
+}
+.ptt-btn.active {
+  border-color: color-mix(in oklab, var(--voice-listening) 65%, var(--line));
+  color: color-mix(in oklab, var(--voice-listening) 90%, var(--text));
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--voice-listening) 30%, transparent);
+}
+.voice-control-row {
+  display: grid;
+  grid-template-columns: repeat(2, auto) minmax(120px, 1fr) minmax(170px, 1fr);
+  gap: 0.38rem;
+  align-items: center;
+}
+.voice-control-row .check {
+  justify-self: end;
+}
+.voice-status-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(250px, 0.46fr);
+  gap: 0.48rem;
+  align-items: stretch;
+}
+#voiceWaveform {
+  width: 100%;
+  height: 76px;
+  border: 1px solid color-mix(in oklab, var(--line) 82%, transparent);
+  border-radius: 0.56rem;
+  background: linear-gradient(
+    150deg,
+    color-mix(in oklab, var(--panel) 92%, transparent),
+    color-mix(in oklab, var(--panel-soft) 88%, transparent)
+  );
+  display: block;
+}
+.voice-indicator-stack {
+  display: grid;
+  gap: 0.3rem;
+}
+.voice-indicator {
+  border: 1px solid color-mix(in oklab, var(--line) 78%, transparent);
+  border-radius: 999px;
+  padding: 0.18rem 0.52rem;
+  font-size: 0.76rem;
+  font-family: var(--font-mono);
+  width: fit-content;
+  background: color-mix(in oklab, var(--panel-soft) 92%, transparent);
+}
+.voice-indicator.active {
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--line) 24%, transparent);
+}
+#voiceTypingIndicator.active {
+  border-color: color-mix(in oklab, var(--voice-generating) 56%, var(--line));
+  color: color-mix(in oklab, var(--voice-generating) 78%, var(--text));
+}
+#voicePlaybackIndicator.active {
+  border-color: color-mix(in oklab, var(--voice-speaking) 56%, var(--line));
+  color: color-mix(in oklab, var(--voice-speaking) 80%, var(--text));
+}
+.voice-assistant-preview {
+  border: 1px solid color-mix(in oklab, var(--voice-generating) 48%, var(--line));
+  border-radius: 0.54rem;
+  background: color-mix(in oklab, var(--voice-generating) 10%, var(--panel));
+  padding: 0.4rem 0.48rem;
+  font-size: 0.84rem;
+  line-height: 1.35;
+  white-space: pre-wrap;
+}
+.voice-crisis-overlay {
+  border: 1px solid color-mix(in oklab, var(--warning) 70%, var(--line));
+  border-radius: 0.56rem;
+  background: color-mix(in oklab, var(--warning) 16%, var(--panel));
+  color: color-mix(in oklab, var(--warning) 86%, var(--text));
+  padding: 0.4rem 0.5rem;
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+.voice-diag-actions {
+  justify-content: space-between;
+}
+.voice-diag-steps {
+  display: grid;
+  gap: 0.45rem;
+}
+.voice-diag-row {
+  border: 1px solid color-mix(in oklab, var(--line) 82%, transparent);
+  border-radius: 0.6rem;
+  padding: 0.45rem 0.55rem;
+  display: grid;
+  gap: 0.25rem;
+  background: color-mix(in oklab, var(--panel-soft) 92%, transparent);
+}
+.voice-diag-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+}
+.voice-diag-pill {
+  border-radius: 999px;
+  padding: 0.12rem 0.5rem;
+  font-size: 0.74rem;
+  font-family: var(--font-mono);
+  border: 1px solid transparent;
+}
+.voice-diag-pass {
+  border-color: color-mix(in oklab, var(--success) 60%, var(--line));
+  color: color-mix(in oklab, var(--success) 85%, var(--text));
+  background: color-mix(in oklab, var(--success) 12%, var(--panel));
+}
+.voice-diag-fail {
+  border-color: color-mix(in oklab, var(--warning) 60%, var(--line));
+  color: color-mix(in oklab, var(--warning) 88%, var(--text));
+  background: color-mix(in oklab, var(--warning) 12%, var(--panel));
+}
 .chip {
   display: inline-flex;
   align-items: center;
@@ -1612,6 +1751,17 @@ code {
   #tab-dashboard .quick-target-control button { width: 100%; min-width: 0; }
   #tab-cli .memory-chat-secondary { order: 2; }
   #tab-cli .memory-chat-primary { order: 1; }
+  #tab-cli .voice-status-row { grid-template-columns: 1fr; }
+  #tab-cli .voice-mode-row { grid-template-columns: 1fr; justify-items: start; }
+  #tab-cli .voice-mode-row .segmented { width: 100%; justify-content: center; }
+  #tab-cli #voiceModeHint { text-align: center; }
+  #tab-cli .voice-control-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  #tab-cli .voice-control-row .check {
+    justify-self: start;
+    grid-column: 1 / -1;
+  }
   #tab-cli .row { align-items: stretch; }
   #tab-cli .field { min-width: 100%; }
   #tab-cli .cli-controls .segmented { width: 100%; justify-content: center; }
@@ -1684,6 +1834,7 @@ code {
   #tab-cli .row { display: grid; grid-template-columns: 1fr; align-items: stretch; }
   #tab-cli .memory-chat-input-row,
   #tab-cli .memory-chat-search-row,
+  #tab-cli .voice-control-row,
   #tab-cli .upload-controls,
   #tab-cli .upload-vision-row,
   #tab-cli .upload-ask-row { grid-template-columns: 1fr; }

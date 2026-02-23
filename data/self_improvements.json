@@ -140,6 +140,146 @@
           "docs/self_improvement_change_history.md"
         ]
       }
+    },
+    {
+      "id": "improve_20260222T180158_e4e24454",
+      "title": "Autonomous Improvement: Run Reliability Gap",
+      "summary": "Run Reliability Gap. This proposal was drafted autonomously from structured reflections and run evidence.",
+      "rationale": "Trigger: conversation (conversation:82bc5e5f2552443ca8d6018865bc2891)\nRun context: run_20260222T151748_a51c7807 / status=failed\nReflection key: conversation:82bc5e5f2552443ca8d6018865bc2891\n\nWhy this change was drafted:\n- Run Reliability Gap.\n- Convert lessons into concrete planning and memory-indexing heuristics.\n- Keep core safety constraints immutable and require human approval before merge.",
+      "status": "merged",
+      "created_at": "2026-02-22T18:01:58.504868+00:00",
+      "updated_at": "2026-02-23T12:46:07.173285+00:00",
+      "source": "self_improvement_engine",
+      "actor": "david_autonomous",
+      "sandbox_dir": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260222T180158_e4e24454",
+      "proposal_doc": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260222T180158_e4e24454/PROPOSAL.md",
+      "changes": [
+        {
+          "path": "agent/self_improvement/autonomous_playbook.py",
+          "change_type": "edited",
+          "sandbox_file": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260222T180158_e4e24454/prototype/agent/self_improvement/autonomous_playbook.py",
+          "added": 9,
+          "removed": 9,
+          "patch": "--- a/agent/self_improvement/autonomous_playbook.py\n+++ b/agent/self_improvement/autonomous_playbook.py\n@@ -6,22 +6,22 @@\n \n from __future__ import annotations\n \n-GENERATED_AT_UTC = \"2026-02-18T10:17:40.559320+00:00\"\n-TRIGGER = \"manual\"\n-TRIGGER_ID = \"\"\n-SIGNAL_CODES = [\"manual_review\"]\n+GENERATED_AT_UTC = \"2026-02-22T18:01:58.499459+00:00\"\n+TRIGGER = \"conversation\"\n+TRIGGER_ID = \"conversation:82bc5e5f2552443ca8d6018865bc2891\"\n+SIGNAL_CODES = [\"run_reliability\"]\n \n SIGNALS = [\n   {\n-    \"code\": \"manual_review\",\n-    \"title\": \"Manual Self-Review\",\n-    \"evidence\": \"Manual autonomous cycle requested with no strong regression signal.\",\n-    \"upgrade\": \"Persist current strengths and identify one constrained optimization target for next runs.\"\n+    \"code\": \"run_reliability\",\n+    \"title\": \"Run Reliability Gap\",\n+    \"evidence\": \"Latest goal run ended with status 'failed'.\",\n+    \"upgrade\": \"Add stricter preflight checks and staged rollback planning before execution.\"\n   }\n ]\n \n RECOMMENDED_ACTIONS = [\n-    \"Persist current strengths and identify one constrained optimization target for next runs.\",\n+    \"Add stricter preflight checks and staged rollback planning before execution.\",\n ]\n \n def recommended_actions() -> list[str]:",
+          "size_bytes": 962
+        },
+        {
+          "path": "agent/self_improvement/autonomous_state.json",
+          "change_type": "edited",
+          "sandbox_file": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260222T180158_e4e24454/prototype/agent/self_improvement/autonomous_state.json",
+          "added": 12,
+          "removed": 12,
+          "patch": "--- a/agent/self_improvement/autonomous_state.json\n+++ b/agent/self_improvement/autonomous_state.json\n@@ -1,21 +1,21 @@\n {\n-  \"generated_at_utc\": \"2026-02-18T10:17:40.559320+00:00\",\n-  \"trigger\": \"manual\",\n-  \"trigger_id\": \"\",\n-  \"run_id\": \"run_20260215T184551_d3146004\",\n-  \"run_status\": \"success\",\n-  \"reflection_key\": \"\",\n-  \"analysis_summary\": \"Manual Self-Review.\",\n+  \"generated_at_utc\": \"2026-02-22T18:01:58.499459+00:00\",\n+  \"trigger\": \"conversation\",\n+  \"trigger_id\": \"conversation:82bc5e5f2552443ca8d6018865bc2891\",\n+  \"run_id\": \"run_20260222T151748_a51c7807\",\n+  \"run_status\": \"failed\",\n+  \"reflection_key\": \"conversation:82bc5e5f2552443ca8d6018865bc2891\",\n+  \"analysis_summary\": \"Run Reliability Gap.\",\n   \"signals\": [\n     {\n-      \"code\": \"manual_review\",\n-      \"title\": \"Manual Self-Review\",\n-      \"evidence\": \"Manual autonomous cycle requested with no strong regression signal.\",\n-      \"upgrade\": \"Persist current strengths and identify one constrained optimization target for next runs.\"\n+      \"code\": \"run_reliability\",\n+      \"title\": \"Run Reliability Gap\",\n+      \"evidence\": \"Latest goal run ended with status 'failed'.\",\n+      \"upgrade\": \"Add stricter preflight checks and staged rollback planning before execution.\"\n     }\n   ],\n   \"recommended_actions\": [\n-    \"Persist current strengths and identify one constrained optimization target for next runs.\"\n+    \"Add stricter preflight checks and staged rollback planning before execution.\"\n   ],\n   \"safety_boundary\": \"Core safety modules remain immutable: agent/safety.py and web/safety.py are blocked.\"\n }",
+          "size_bytes": 828
+        },
+        {
+          "path": "docs/self_improvement_change_history.md",
+          "change_type": "edited",
+          "sandbox_file": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260222T180158_e4e24454/prototype/docs/self_improvement_change_history.md",
+          "added": 13,
+          "removed": 0,
+          "patch": "--- a/docs/self_improvement_change_history.md\n+++ b/docs/self_improvement_change_history.md\n@@ -14,3 +14,16 @@\n   - Persist current strengths and identify one constrained optimization target for next runs.\n \n ---\n+\n+## 2026-02-22T18:01:58.499459+00:00\n+\n+- Trigger: `conversation` (`conversation:82bc5e5f2552443ca8d6018865bc2891`)\n+- Run: `run_20260222T151748_a51c7807` / status: `failed`\n+- Reflection: `conversation:82bc5e5f2552443ca8d6018865bc2891`\n+- Summary: Run Reliability Gap.\n+- Signals:\n+  - `run_reliability`: Run Reliability Gap | Latest goal run ended with status 'failed'.\n+- Proposed actions:\n+  - Add stricter preflight checks and staged rollback planning before execution.\n+\n+---",
+          "size_bytes": 1004
+        }
+      ],
+      "metadata": {
+        "analysis_summary": "Run Reliability Gap.",
+        "autonomous": true,
+        "reflection_key": "conversation:82bc5e5f2552443ca8d6018865bc2891",
+        "run_id": "run_20260222T151748_a51c7807",
+        "signal_codes": [
+          "run_reliability"
+        ],
+        "signature": "614ad46334029a1e28",
+        "trigger": "conversation",
+        "trigger_id": "conversation:82bc5e5f2552443ca8d6018865bc2891"
+      },
+      "decision": {
+        "decision": "approve",
+        "actor": "web_ui",
+        "note": "",
+        "decided_at": "2026-02-23T12:46:07.034693+00:00"
+      },
+      "merge": {
+        "merged_at": "2026-02-23T12:46:07.173285+00:00",
+        "actor": "web_ui",
+        "file_count": 3,
+        "paths": [
+          "agent/self_improvement/autonomous_playbook.py",
+          "agent/self_improvement/autonomous_state.json",
+          "docs/self_improvement_change_history.md"
+        ]
+      }
+    },
+    {
+      "id": "improve_20260222T180215_1b0aa4b8",
+      "title": "Autonomous Improvement: Run Reliability Gap",
+      "summary": "Run Reliability Gap. This proposal was drafted autonomously from structured reflections and run evidence.",
+      "rationale": "Trigger: conversation (conversation:b4a44207c94f40d2acb368d9a9290826)\nRun context: run_20260222T151748_a51c7807 / status=failed\nReflection key: conversation:b4a44207c94f40d2acb368d9a9290826\n\nWhy this change was drafted:\n- Run Reliability Gap.\n- Convert lessons into concrete planning and memory-indexing heuristics.\n- Keep core safety constraints immutable and require human approval before merge.",
+      "status": "merged",
+      "created_at": "2026-02-22T18:02:15.190303+00:00",
+      "updated_at": "2026-02-23T12:46:05.401579+00:00",
+      "source": "self_improvement_engine",
+      "actor": "david_autonomous",
+      "sandbox_dir": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260222T180215_1b0aa4b8",
+      "proposal_doc": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260222T180215_1b0aa4b8/PROPOSAL.md",
+      "changes": [
+        {
+          "path": "agent/self_improvement/autonomous_playbook.py",
+          "change_type": "edited",
+          "sandbox_file": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260222T180215_1b0aa4b8/prototype/agent/self_improvement/autonomous_playbook.py",
+          "added": 9,
+          "removed": 9,
+          "patch": "--- a/agent/self_improvement/autonomous_playbook.py\n+++ b/agent/self_improvement/autonomous_playbook.py\n@@ -6,22 +6,22 @@\n \n from __future__ import annotations\n \n-GENERATED_AT_UTC = \"2026-02-18T10:17:40.559320+00:00\"\n-TRIGGER = \"manual\"\n-TRIGGER_ID = \"\"\n-SIGNAL_CODES = [\"manual_review\"]\n+GENERATED_AT_UTC = \"2026-02-22T18:02:15.185959+00:00\"\n+TRIGGER = \"conversation\"\n+TRIGGER_ID = \"conversation:b4a44207c94f40d2acb368d9a9290826\"\n+SIGNAL_CODES = [\"run_reliability\"]\n \n SIGNALS = [\n   {\n-    \"code\": \"manual_review\",\n-    \"title\": \"Manual Self-Review\",\n-    \"evidence\": \"Manual autonomous cycle requested with no strong regression signal.\",\n-    \"upgrade\": \"Persist current strengths and identify one constrained optimization target for next runs.\"\n+    \"code\": \"run_reliability\",\n+    \"title\": \"Run Reliability Gap\",\n+    \"evidence\": \"Latest goal run ended with status 'failed'.\",\n+    \"upgrade\": \"Add stricter preflight checks and staged rollback planning before execution.\"\n   }\n ]\n \n RECOMMENDED_ACTIONS = [\n-    \"Persist current strengths and identify one constrained optimization target for next runs.\",\n+    \"Add stricter preflight checks and staged rollback planning before execution.\",\n ]\n \n def recommended_actions() -> list[str]:",
+          "size_bytes": 962
+        },
+        {
+          "path": "agent/self_improvement/autonomous_state.json",
+          "change_type": "edited",
+          "sandbox_file": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260222T180215_1b0aa4b8/prototype/agent/self_improvement/autonomous_state.json",
+          "added": 12,
+          "removed": 12,
+          "patch": "--- a/agent/self_improvement/autonomous_state.json\n+++ b/agent/self_improvement/autonomous_state.json\n@@ -1,21 +1,21 @@\n {\n-  \"generated_at_utc\": \"2026-02-18T10:17:40.559320+00:00\",\n-  \"trigger\": \"manual\",\n-  \"trigger_id\": \"\",\n-  \"run_id\": \"run_20260215T184551_d3146004\",\n-  \"run_status\": \"success\",\n-  \"reflection_key\": \"\",\n-  \"analysis_summary\": \"Manual Self-Review.\",\n+  \"generated_at_utc\": \"2026-02-22T18:02:15.185959+00:00\",\n+  \"trigger\": \"conversation\",\n+  \"trigger_id\": \"conversation:b4a44207c94f40d2acb368d9a9290826\",\n+  \"run_id\": \"run_20260222T151748_a51c7807\",\n+  \"run_status\": \"failed\",\n+  \"reflection_key\": \"conversation:b4a44207c94f40d2acb368d9a9290826\",\n+  \"analysis_summary\": \"Run Reliability Gap.\",\n   \"signals\": [\n     {\n-      \"code\": \"manual_review\",\n-      \"title\": \"Manual Self-Review\",\n-      \"evidence\": \"Manual autonomous cycle requested with no strong regression signal.\",\n-      \"upgrade\": \"Persist current strengths and identify one constrained optimization target for next runs.\"\n+      \"code\": \"run_reliability\",\n+      \"title\": \"Run Reliability Gap\",\n+      \"evidence\": \"Latest goal run ended with status 'failed'.\",\n+      \"upgrade\": \"Add stricter preflight checks and staged rollback planning before execution.\"\n     }\n   ],\n   \"recommended_actions\": [\n-    \"Persist current strengths and identify one constrained optimization target for next runs.\"\n+    \"Add stricter preflight checks and staged rollback planning before execution.\"\n   ],\n   \"safety_boundary\": \"Core safety modules remain immutable: agent/safety.py and web/safety.py are blocked.\"\n }",
+          "size_bytes": 828
+        },
+        {
+          "path": "docs/self_improvement_change_history.md",
+          "change_type": "edited",
+          "sandbox_file": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260222T180215_1b0aa4b8/prototype/docs/self_improvement_change_history.md",
+          "added": 13,
+          "removed": 0,
+          "patch": "--- a/docs/self_improvement_change_history.md\n+++ b/docs/self_improvement_change_history.md\n@@ -14,3 +14,16 @@\n   - Persist current strengths and identify one constrained optimization target for next runs.\n \n ---\n+\n+## 2026-02-22T18:02:15.185959+00:00\n+\n+- Trigger: `conversation` (`conversation:b4a44207c94f40d2acb368d9a9290826`)\n+- Run: `run_20260222T151748_a51c7807` / status: `failed`\n+- Reflection: `conversation:b4a44207c94f40d2acb368d9a9290826`\n+- Summary: Run Reliability Gap.\n+- Signals:\n+  - `run_reliability`: Run Reliability Gap | Latest goal run ended with status 'failed'.\n+- Proposed actions:\n+  - Add stricter preflight checks and staged rollback planning before execution.\n+\n+---",
+          "size_bytes": 1004
+        }
+      ],
+      "metadata": {
+        "analysis_summary": "Run Reliability Gap.",
+        "autonomous": true,
+        "reflection_key": "conversation:b4a44207c94f40d2acb368d9a9290826",
+        "run_id": "run_20260222T151748_a51c7807",
+        "signal_codes": [
+          "run_reliability"
+        ],
+        "signature": "f083b84e283a52874a",
+        "trigger": "conversation",
+        "trigger_id": "conversation:b4a44207c94f40d2acb368d9a9290826"
+      },
+      "decision": {
+        "decision": "approve",
+        "actor": "web_ui",
+        "note": "",
+        "decided_at": "2026-02-23T12:46:05.215707+00:00"
+      },
+      "merge": {
+        "merged_at": "2026-02-23T12:46:05.401579+00:00",
+        "actor": "web_ui",
+        "file_count": 3,
+        "paths": [
+          "agent/self_improvement/autonomous_playbook.py",
+          "agent/self_improvement/autonomous_state.json",
+          "docs/self_improvement_change_history.md"
+        ]
+      }
     }
   ]
 }

@@ -6,22 +6,22 @@ Core safety modules remain immutable and out of scope for autonomous edits.
 
 from __future__ import annotations
 
-GENERATED_AT_UTC = "2026-02-18T10:17:40.559320+00:00"
-TRIGGER = "manual"
-TRIGGER_ID = ""
-SIGNAL_CODES = ["manual_review"]
+GENERATED_AT_UTC = "2026-02-22T18:01:58.499459+00:00"
+TRIGGER = "conversation"
+TRIGGER_ID = "conversation:82bc5e5f2552443ca8d6018865bc2891"
+SIGNAL_CODES = ["run_reliability"]
 
 SIGNALS = [
   {
-    "code": "manual_review",
-    "title": "Manual Self-Review",
-    "evidence": "Manual autonomous cycle requested with no strong regression signal.",
-    "upgrade": "Persist current strengths and identify one constrained optimization target for next runs."
+    "code": "run_reliability",
+    "title": "Run Reliability Gap",
+    "evidence": "Latest goal run ended with status 'failed'.",
+    "upgrade": "Add stricter preflight checks and staged rollback planning before execution."
   }
 ]
 
 RECOMMENDED_ACTIONS = [
-    "Persist current strengths and identify one constrained optimization target for next runs.",
+    "Add stricter preflight checks and staged rollback planning before execution.",
 ]
 
 def recommended_actions() -> list[str]:

@@ -219,6 +219,23 @@ class ControlSettings:
     tdd_mode: bool = False
     upload_vision_mode: bool = False
     upload_vision_model: str = ""
+    voice_mode_enabled: bool = False
+    voice_text_only_mode: bool = False
+    voice_input_mode: str = "ptt"
+    voice_vad_threshold: float = 0.035
+    voice_vad_silence_ms: int = 900
+    voice_style: str = "warm"
+    voice_rate: int = 100
+    voice_stt_engine: str = "none"
+    voice_stt_model: str = "base"
+    voice_stt_language: str = "en"
+    voice_stt_command: str = "whisper"
+    voice_whisper_cpp_command: str = "whisper-cli"
+    voice_whisper_cpp_model_path: str = ""
+    voice_tts_engine: str = "browser"
+    voice_tts_command: str = "piper"
+    voice_tts_model_path: str = ""
+    voice_chunk_chars: int = 180
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ControlSettings":
@@ -226,6 +243,44 @@ class ControlSettings:
         coder_model = str(data.get("coder_model", "")).strip()
         critic_model = str(data.get("critic_model", "")).strip()
         upload_vision_model = str(data.get("upload_vision_model", "")).strip()
+        voice_style = str(data.get("voice_style", "warm")).strip().lower()
+        if voice_style not in {"warm", "balanced", "clear"}:
+            voice_style = "warm"
+        voice_stt_engine = str(data.get("voice_stt_engine", "none")).strip().lower()
+        if voice_stt_engine not in {"none", "whisper_cli", "whisper_cpp"}:
+            voice_stt_engine = "none"
+        voice_tts_engine = str(data.get("voice_tts_engine", "browser")).strip().lower()
+        if voice_tts_engine not in {"browser", "piper", "none"}:
+            voice_tts_engine = "browser"
+        voice_input_mode = str(data.get("voice_input_mode", "ptt")).strip().lower()
+        if voice_input_mode not in {"ptt", "vad"}:
+            voice_input_mode = "ptt"
+
+        def _safe_command(name: str, default: str) -> str:
+            clean = str(data.get(name, default)).strip() or default
+            if re.match(r"^[A-Za-z0-9_./:-]+$", clean):
+                return clean
+            return default
+
+        def _safe_language(value: Any) -> str:
+            clean = re.sub(r"[^a-zA-Z-]", "", str(value or "").strip())
+            if not clean:
+                return ""
+            return clean[:12].lower()
+
+        def _bounded(name: str, default: int, low: int, high: int) -> int:
+            try:
+                value = int(data.get(name, default))
+            except (TypeError, ValueError):
+                value = default
+            return max(low, min(high, value))
+
+        def _bounded_float(name: str, default: float, low: float, high: float) -> float:
+            try:
+                value = float(data.get(name, default))
+            except (TypeError, ValueError):
+                value = float(default)
+            return max(low, min(high, value))
 
         def _pct(name: str, default: int) -> int:
             try:
@@ -254,6 +309,23 @@ class ControlSettings:
             tdd_mode=bool(data.get("tdd_mode", False)),
             upload_vision_mode=bool(data.get("upload_vision_mode", False)),
             upload_vision_model=upload_vision_model,
+            voice_mode_enabled=bool(data.get("voice_mode_enabled", False)),
+            voice_text_only_mode=bool(data.get("voice_text_only_mode", False)),
+            voice_input_mode=voice_input_mode,
+            voice_vad_threshold=_bounded_float("voice_vad_threshold", 0.035, 0.005, 0.2),
+            voice_vad_silence_ms=_bounded("voice_vad_silence_ms", 900, 250, 2500),
+            voice_style=voice_style,
+            voice_rate=_bounded("voice_rate", 100, 60, 180),
+            voice_stt_engine=voice_stt_engine,
+            voice_stt_model=str(data.get("voice_stt_model", "base")).strip() or "base",
+            voice_stt_language=_safe_language(data.get("voice_stt_language", "en")) or "en",
+            voice_stt_command=_safe_command("voice_stt_command", "whisper"),
+            voice_whisper_cpp_command=_safe_command("voice_whisper_cpp_command", "whisper-cli"),
+            voice_whisper_cpp_model_path=str(data.get("voice_whisper_cpp_model_path", "")).strip(),
+            voice_tts_engine=voice_tts_engine,
+            voice_tts_command=_safe_command("voice_tts_command", "piper"),
+            voice_tts_model_path=str(data.get("voice_tts_model_path", "")).strip(),
+            voice_chunk_chars=_bounded("voice_chunk_chars", 180, 80, 400),
         )
 
 
@@ -856,6 +928,7 @@ class DavidControlCenter:
         parent_teaching_mode: bool = False,
         session_id: str = "",
         actor: str = "web_ui",
+        publish_events: bool = True,
     ) -> dict[str, Any]:
         if self._demo_mode_enabled():
             payload = self._demo_chat_message(
@@ -866,8 +939,9 @@ class DavidControlCenter:
                 session_id=session_id,
                 actor=actor,
             )
-            self.publish_event("status", {"type": "memory_chat_response", "payload": payload})
-            self.publish_event("logs", {"type": "memory_chat_response", "payload": payload})
+            if publish_events:
+                self.publish_event("status", {"type": "memory_chat_response", "payload": payload})
+                self.publish_event("logs", {"type": "memory_chat_response", "payload": payload})
             return payload
         clean_message = self._sanitize_user_text(message, field_name="message")
         actor_value = actor.strip() or "web_ui"
@@ -1054,6 +1128,9 @@ class DavidControlCenter:
             "selected_intent": selected_intent,
             "confirm_save": bool(confirm_save),
             "parent_teaching_mode": parent_mode_active,
+            "crisis_support": bool(
+                self._is_crisis_context(clean_message) or self._compose_crisis_support_line() in assistant_text
+            ),
             "session_id": active_session_id,
             "user_turn": user_turn,
             "assistant_turn": assistant_turn,
@@ -1078,8 +1155,9 @@ class DavidControlCenter:
                 payload["autonomous_self_improvement"] = autonomous
             except Exception:  # pragma: no cover - defensive boundary
                 self._logger.exception("autonomous self-improvement cycle failed for conversation")
-        self.publish_event("status", {"type": "memory_chat_response", "payload": payload})
-        self.publish_event("logs", {"type": "memory_chat_response", "payload": payload})
+        if publish_events:
+            self.publish_event("status", {"type": "memory_chat_response", "payload": payload})
+            self.publish_event("logs", {"type": "memory_chat_response", "payload": payload})
         return payload
 
     def memory_facts(self, query: str = "", limit: int = 500) -> dict[str, Any]:
