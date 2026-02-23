@@ -263,6 +263,40 @@ def test_api_chat_sessions_and_conversations(memory_client) -> None:
     assert any(str(item.get("session_id", "")) == session_id for item in session_rows)
 
 
+def test_api_clear_conversations_by_session_and_all(memory_client) -> None:
+    client, _config = memory_client
+    session_a = "session_clear_a"
+    session_b = "session_clear_b"
+
+    first = client.post("/api/chat", json={"message": "Who is your father?", "intent": "ask", "session_id": session_a})
+    assert first.status_code == 200
+    second = client.post("/api/chat", json={"message": "What is your name?", "intent": "ask", "session_id": session_b})
+    assert second.status_code == 200
+
+    clear_a = client.post("/api/memory/conversations/clear", json={"session_id": session_a})
+    assert clear_a.status_code == 200
+    clear_a_data = clear_a.get_json()["data"]
+    assert clear_a_data["scope"] == "session"
+    assert clear_a_data["session_id"] == session_a
+    assert int(clear_a_data["removed_count"]) >= 2
+
+    conv_a = client.get(f"/api/memory/conversations?session_id={session_a}")
+    conv_b = client.get(f"/api/memory/conversations?session_id={session_b}")
+    assert conv_a.status_code == 200
+    assert conv_b.status_code == 200
+    assert int(conv_a.get_json()["data"]["total"]) == 0
+    assert int(conv_b.get_json()["data"]["total"]) >= 2
+
+    clear_all = client.post("/api/memory/conversations/clear", json={})
+    assert clear_all.status_code == 200
+    clear_all_data = clear_all.get_json()["data"]
+    assert clear_all_data["scope"] == "all"
+
+    all_rows = client.get("/api/memory/conversations")
+    assert all_rows.status_code == 200
+    assert int(all_rows.get_json()["data"]["total"]) == 0
+
+
 def test_api_chat_ask_memory_first_with_citations(memory_client) -> None:
     client, _config = memory_client
     teach = client.post(
@@ -460,9 +494,13 @@ def test_api_settings_voice_defaults(memory_client) -> None:
     payload = settings.get_json()["data"]
     assert payload["voice_mode_enabled"] is False
     assert payload["voice_text_only_mode"] is False
-    assert payload["voice_input_mode"] == "ptt"
+    assert payload["voice_input_mode"] == "manual"
     assert float(payload["voice_vad_threshold"]) == 0.035
     assert int(payload["voice_vad_silence_ms"]) == 900
+    assert int(payload["voice_vad_min_speech_ms"]) == 300
+    assert float(payload["vad_threshold"]) == 0.035
+    assert int(payload["vad_silence_ms"]) == 900
+    assert int(payload["vad_min_speech_ms"]) == 300
     assert str(payload["voice_style"]) == "warm"
     assert int(payload["voice_rate"]) == 100
     assert str(payload["voice_stt_engine"]) == "none"
@@ -479,6 +517,7 @@ def test_api_settings_toggle_voice_mode(memory_client) -> None:
             "voice_input_mode": "vad",
             "voice_vad_threshold": 0.045,
             "voice_vad_silence_ms": 1100,
+            "voice_vad_min_speech_ms": 420,
             "voice_style": "clear",
             "voice_rate": 130,
             "voice_stt_engine": "whisper_cli",
@@ -500,11 +539,34 @@ def test_api_settings_toggle_voice_mode(memory_client) -> None:
     assert data["voice_input_mode"] == "vad"
     assert float(data["voice_vad_threshold"]) == 0.045
     assert int(data["voice_vad_silence_ms"]) == 1100
+    assert int(data["voice_vad_min_speech_ms"]) == 420
+    assert float(data["vad_threshold"]) == 0.045
+    assert int(data["vad_silence_ms"]) == 1100
+    assert int(data["vad_min_speech_ms"]) == 420
     assert str(data["voice_style"]) == "clear"
     assert int(data["voice_rate"]) == 130
     assert str(data["voice_stt_engine"]) == "whisper_cli"
     assert str(data["voice_tts_engine"]) == "piper"
     assert int(data["voice_chunk_chars"]) == 210
+
+
+def test_api_settings_voice_vad_aliases_and_ptt_back_compat(memory_client) -> None:
+    client, _config = memory_client
+    updated = client.post(
+        "/api/settings",
+        json={
+            "voice_input_mode": "ptt",
+            "vad_threshold": 0.055,
+            "vad_silence_ms": 1250,
+            "vad_min_speech_ms": 520,
+        },
+    )
+    assert updated.status_code == 200
+    data = updated.get_json()["data"]
+    assert data["voice_input_mode"] == "manual"
+    assert float(data["voice_vad_threshold"]) == 0.055
+    assert int(data["voice_vad_silence_ms"]) == 1250
+    assert int(data["voice_vad_min_speech_ms"]) == 520
 
 
 def test_api_settings_personality_calibration_defaults_present(memory_client) -> None:

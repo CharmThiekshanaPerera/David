@@ -1191,12 +1191,16 @@ code {
 }
 .voice-control-row {
   display: grid;
-  grid-template-columns: repeat(2, auto) minmax(120px, 1fr) minmax(170px, 1fr);
+  grid-template-columns: repeat(3, auto) minmax(170px, 1fr);
   gap: 0.38rem;
   align-items: center;
 }
 .voice-control-row .check {
   justify-self: end;
+}
+.voice-wave-wrap {
+  display: grid;
+  gap: 0.35rem;
 }
 .voice-status-row {
   display: grid;
@@ -1215,6 +1219,36 @@ code {
     color-mix(in oklab, var(--panel-soft) 88%, transparent)
   );
   display: block;
+}
+.voice-meter {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.5rem;
+  align-items: center;
+}
+.voice-meter-label {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+}
+.voice-meter-track {
+  position: relative;
+  height: 0.42rem;
+  border-radius: 999px;
+  border: 1px solid color-mix(in oklab, var(--line) 80%, transparent);
+  background: color-mix(in oklab, var(--panel-soft) 88%, transparent);
+  overflow: hidden;
+}
+.voice-meter-fill {
+  width: 0%;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    color-mix(in oklab, var(--voice-listening) 82%, #ffffff),
+    color-mix(in oklab, var(--voice-speaking) 78%, #ffffff)
+  );
+  transition: width 80ms linear;
 }
 .voice-indicator-stack {
   display: grid;
@@ -1239,6 +1273,10 @@ code {
 #voicePlaybackIndicator.active {
   border-color: color-mix(in oklab, var(--voice-speaking) 56%, var(--line));
   color: color-mix(in oklab, var(--voice-speaking) 80%, var(--text));
+}
+#voiceAutoIndicator.active {
+  border-color: color-mix(in oklab, var(--voice-listening) 60%, var(--line));
+  color: color-mix(in oklab, var(--voice-listening) 85%, var(--text));
 }
 .voice-assistant-preview {
   border: 1px solid color-mix(in oklab, var(--voice-generating) 48%, var(--line));

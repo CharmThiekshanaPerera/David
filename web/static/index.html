@@ -388,8 +388,8 @@
               <label class="field">
                 Voice input mode
                 <select id="settingVoiceInputMode">
-                  <option value="ptt">Push-to-Talk</option>
-                  <option value="vad">Auto VAD</option>
+                  <option value="manual">Manual</option>
+                  <option value="vad">Auto (VAD)</option>
                 </select>
               </label>
               <label class="field">
@@ -400,6 +400,10 @@
               <label class="field">
                 VAD silence (ms)
                 <input id="settingVoiceVadSilenceMs" type="number" min="250" max="2500" step="50" />
+              </label>
+              <label class="field">
+                VAD min speech (ms)
+                <input id="settingVoiceVadMinSpeechMs" type="number" min="120" max="4000" step="20" />
               </label>
               <label class="field">
                 Voice style
@@ -573,24 +577,33 @@
             <div class="row voice-mode-row">
               <div class="segmented" role="group" aria-label="Voice input mode">
                 <button id="voiceModePttBtn" type="button" class="segment-btn active" aria-pressed="true">
-                  Push-to-Talk
+                  Manual
                 </button>
                 <button id="voiceModeVadBtn" type="button" class="segment-btn" aria-pressed="false">
-                  Auto VAD
+                  Auto (VAD)
                 </button>
               </div>
-              <div id="voiceModeHint" class="muted">Hold the button or spacebar to record.</div>
+              <div id="voiceModeHint" class="muted">Manual mode: click Start Listening, then Send to submit.</div>
             </div>
             <div class="row voice-control-row">
-              <button id="voiceStartBtn" type="button" class="ptt-btn">Hold to Talk</button>
-              <button id="voiceStopBtn" type="button" class="ghost" disabled>Start Auto Listen</button>
+              <button id="voiceStartBtn" type="button" class="ptt-btn">Start Listening</button>
+              <button id="voiceStopBtn" type="button" class="ghost" disabled>Stop</button>
               <button id="voiceMuteBtn" type="button" class="ghost" aria-pressed="false">Mute</button>
               <label class="check"><input id="voiceTextOnlyMode" type="checkbox" /> Text-Only Mode</label>
             </div>
             <div class="voice-status-row">
-              <canvas id="voiceWaveform" width="960" height="120" role="img" aria-label="Live microphone waveform"></canvas>
+              <div class="voice-wave-wrap">
+                <canvas id="voiceWaveform" width="960" height="120" role="img" aria-label="Live microphone waveform"></canvas>
+                <div class="voice-meter" aria-label="Microphone level meter">
+                  <span class="voice-meter-label">Mic level</span>
+                  <div class="voice-meter-track">
+                    <div id="voiceMicMeter" class="voice-meter-fill"></div>
+                  </div>
+                </div>
+              </div>
               <div class="voice-indicator-stack">
                 <div id="voiceStatusText" class="muted">Voice idle. Enable Voice Mode in Settings to begin.</div>
+                <div id="voiceAutoIndicator" class="voice-indicator hidden">Listening (Auto)</div>
                 <div id="voiceTypingIndicator" class="voice-indicator hidden">David is generating...</div>
                 <div id="voicePlaybackIndicator" class="voice-indicator hidden">David is speaking...</div>
               </div>
@@ -611,7 +624,7 @@
               <div class="row memory-chat-action-row">
                 <button id="memoryConfirmTeachBtn" class="ghost hidden" type="button">Confirm Overwrite</button>
                 <button id="chatNewSessionBtn" class="ghost" type="button">New Session</button>
-                <button id="memoryClearHistoryBtn" class="ghost" type="button">Clear Chat</button>
+                <button id="memoryClearHistoryBtn" class="ghost" type="button">Clear Conversation</button>
               </div>
 
               <div class="chat-main-grid">

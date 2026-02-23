@@ -221,9 +221,10 @@ class ControlSettings:
     upload_vision_model: str = ""
     voice_mode_enabled: bool = False
     voice_text_only_mode: bool = False
-    voice_input_mode: str = "ptt"
+    voice_input_mode: str = "manual"
     voice_vad_threshold: float = 0.035
     voice_vad_silence_ms: int = 900
+    voice_vad_min_speech_ms: int = 300
     voice_style: str = "warm"
     voice_rate: int = 100
     voice_stt_engine: str = "none"
@@ -252,9 +253,11 @@ class ControlSettings:
         voice_tts_engine = str(data.get("voice_tts_engine", "browser")).strip().lower()
         if voice_tts_engine not in {"browser", "piper", "none"}:
             voice_tts_engine = "browser"
-        voice_input_mode = str(data.get("voice_input_mode", "ptt")).strip().lower()
-        if voice_input_mode not in {"ptt", "vad"}:
-            voice_input_mode = "ptt"
+        voice_input_mode = str(data.get("voice_input_mode", "manual")).strip().lower()
+        if voice_input_mode == "ptt":
+            voice_input_mode = "manual"
+        if voice_input_mode not in {"manual", "vad"}:
+            voice_input_mode = "manual"
 
         def _safe_command(name: str, default: str) -> str:
             clean = str(data.get(name, default)).strip() or default
@@ -312,8 +315,24 @@ class ControlSettings:
             voice_mode_enabled=bool(data.get("voice_mode_enabled", False)),
             voice_text_only_mode=bool(data.get("voice_text_only_mode", False)),
             voice_input_mode=voice_input_mode,
-            voice_vad_threshold=_bounded_float("voice_vad_threshold", 0.035, 0.005, 0.2),
-            voice_vad_silence_ms=_bounded("voice_vad_silence_ms", 900, 250, 2500),
+            voice_vad_threshold=_bounded_float(
+                "voice_vad_threshold" if "voice_vad_threshold" in data else "vad_threshold",
+                0.035,
+                0.005,
+                0.2,
+            ),
+            voice_vad_silence_ms=_bounded(
+                "voice_vad_silence_ms" if "voice_vad_silence_ms" in data else "vad_silence_ms",
+                900,
+                250,
+                2500,
+            ),
+            voice_vad_min_speech_ms=_bounded(
+                "voice_vad_min_speech_ms" if "voice_vad_min_speech_ms" in data else "vad_min_speech_ms",
+                300,
+                120,
+                4000,
+            ),
             voice_style=voice_style,
             voice_rate=_bounded("voice_rate", 100, 60, 180),
             voice_stt_engine=voice_stt_engine,
@@ -504,6 +523,9 @@ class DavidControlCenter:
     def get_settings(self) -> dict[str, Any]:
         payload = {
             **asdict(self.settings),
+            "vad_threshold": self.settings.voice_vad_threshold,
+            "vad_silence_ms": self.settings.voice_vad_silence_ms,
+            "vad_min_speech_ms": self.settings.voice_vad_min_speech_ms,
             "demo_mode_env_override": self._demo_mode_env_enabled(),
             "model": self.config.model,
             "planner_model_default": self.config.planner_model,
@@ -529,6 +551,14 @@ class DavidControlCenter:
         return payload
 
     def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
+        alias_map = {
+            "vad_threshold": "voice_vad_threshold",
+            "vad_silence_ms": "voice_vad_silence_ms",
+            "vad_min_speech_ms": "voice_vad_min_speech_ms",
+        }
+        for alias, canonical in alias_map.items():
+            if alias in payload and canonical not in payload:
+                payload[canonical] = payload[alias]
         current = asdict(self.settings)
         for key in list(current.keys()):
             if key in payload:
@@ -1222,6 +1252,94 @@ class DavidControlCenter:
             "session_id": clean_session,
             "total": len(rows),
         }
+
+    def clear_conversations(self, session_id: str = "", actor: str = "web_ui") -> tuple[bool, dict[str, Any]]:
+        if self.settings.safe_mode:
+            return False, {"error": "Safe mode is enabled. Conversation clearing is blocked in read-only mode."}
+        clean_session = self._sanitize_session_id(session_id)
+        actor_value = actor.strip() or "web_ui"
+        removed_count = 0
+        remaining_count = 0
+
+        if self._demo_mode_enabled():
+            self._ensure_demo_runtime()
+            with self._lock:
+                base_raw = self._demo_runtime.get("base_conversations", [])
+                append_raw = self._demo_runtime.get("conversation_appends", [])
+                base_rows = [row for row in base_raw if isinstance(row, dict)] if isinstance(base_raw, list) else []
+                append_rows = [row for row in append_raw if isinstance(row, dict)] if isinstance(append_raw, list) else []
+                if clean_session:
+                    kept_base = [row for row in base_rows if str(row.get("session_id", "")) != clean_session]
+                    kept_appends = [row for row in append_rows if str(row.get("session_id", "")) != clean_session]
+                else:
+                    kept_base = []
+                    kept_appends = []
+                removed_count = (len(base_rows) + len(append_rows)) - (len(kept_base) + len(kept_appends))
+                remaining_count = len(kept_base) + len(kept_appends)
+                self._demo_runtime["base_conversations"] = kept_base
+                self._demo_runtime["conversation_appends"] = kept_appends
+                if clean_session:
+                    self._chat_session_by_actor = {
+                        key: value for key, value in self._chat_session_by_actor.items() if str(value) != clean_session
+                    }
+                else:
+                    self._chat_session_by_actor = {}
+        else:
+            with self._lock:
+                try:
+                    lines = self._conversations_file.read_text(encoding="utf-8").splitlines()
+                except OSError as exc:
+                    return False, {"error": f"Failed to read conversation store: {exc}"}
+                kept_lines: list[str] = []
+                total_rows = 0
+                for line in lines:
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        if clean_session:
+                            kept_lines.append(line)
+                        continue
+                    if not isinstance(row, dict):
+                        if clean_session:
+                            kept_lines.append(line)
+                        continue
+                    total_rows += 1
+                    if clean_session and str(row.get("session_id", "")) == clean_session:
+                        removed_count += 1
+                        continue
+                    if clean_session:
+                        kept_lines.append(line)
+                if not clean_session:
+                    removed_count = total_rows
+                remaining_count = max(total_rows - removed_count, 0)
+                try:
+                    if clean_session:
+                        content = "\n".join(kept_lines)
+                        self._conversations_file.write_text(content + ("\n" if content else ""), encoding="utf-8")
+                    else:
+                        self._conversations_file.write_text("", encoding="utf-8")
+                except OSError as exc:
+                    return False, {"error": f"Failed to write conversation store: {exc}"}
+
+                if clean_session:
+                    self._chat_session_by_actor = {
+                        key: value for key, value in self._chat_session_by_actor.items() if str(value) != clean_session
+                    }
+                else:
+                    self._chat_session_by_actor = {}
+
+        payload = {
+            "status": "cleared",
+            "scope": "session" if clean_session else "all",
+            "session_id": clean_session,
+            "removed_count": int(removed_count),
+            "remaining_count": int(remaining_count),
+            "actor": actor_value,
+            "timestamp_utc": self._now_iso(),
+        }
+        self.publish_event("status", {"type": "memory_conversations_cleared", "payload": payload})
+        self.publish_event("logs", {"type": "memory_conversations_cleared", "payload": payload})
+        return True, payload
 
     def chat_sessions(self, limit: int = 120) -> list[dict[str, Any]]:
         if self._demo_mode_enabled():

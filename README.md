@@ -499,15 +499,18 @@ Optional: Piper (`voice_tts_engine = piper`)
 
 #### Voice controls in Memory & Chat
 
-- `Push-to-Talk`: hold the button (or spacebar) to record
-- `Auto VAD`: auto-starts when mic level crosses the threshold, stops after silence
+- `Manual`: click `Start Listening`, then click `Send` to submit the captured turn
+- `Auto (VAD)`: click `Start Listening` to arm the mic, speech starts recording automatically
+- `Stop`: cancels active recording/transcription/streaming turn and clears queued playback
 - `Mute`
 - `Text-Only Mode`
 
 The panel also shows:
-- live waveform while listening
+- live waveform and mic-level meter while listening/armed
 - typing/generating indicator while response is streaming
 - playback indicator while speaking
+- `Listening (Auto)` indicator while VAD is armed
+- silence countdown while auto-recording is waiting to stop
 - crisis-support overlay when risk language is detected
 - transcript cleanup removes common non-speech markers (for example `[Music]`) before intent handling
 - barge-in support (start speaking to stop playback + cancel the current stream)
@@ -519,7 +522,17 @@ Voice request limits:
 Recommended VAD defaults:
 - `voice_vad_threshold`: `0.035` (RMS amplitude)
 - `voice_vad_silence_ms`: `900`
+- `voice_vad_min_speech_ms`: `300`
 Configure these in `Settings -> Voice Mode` or via `POST /api/settings`.
+
+Recommended mode default:
+- `voice_input_mode`: `manual` (use `vad` when room noise is stable and microphone gain is predictable)
+
+Noisy-environment troubleshooting:
+- raise `voice_vad_threshold` gradually (`0.045` -> `0.060`) if auto mode starts too easily
+- increase `voice_vad_min_speech_ms` (`400` -> `700`) to ignore short bumps/clicks
+- increase `voice_vad_silence_ms` (`1100` -> `1500`) if turns are cut off too early
+- keep OS mic gain moderate and disable aggressive audio enhancements that pump noise floor
 
 #### Voice diagnostics
 

@@ -1,10 +1,10 @@
 {
-  "generated_at_utc": "2026-02-22T18:01:58.499459+00:00",
+  "generated_at_utc": "2026-02-23T16:01:52.105345+00:00",
   "trigger": "conversation",
-  "trigger_id": "conversation:82bc5e5f2552443ca8d6018865bc2891",
+  "trigger_id": "conversation:8791307afcbd41e8b7504f8f35953e5a",
   "run_id": "run_20260222T151748_a51c7807",
   "run_status": "failed",
-  "reflection_key": "conversation:82bc5e5f2552443ca8d6018865bc2891",
+  "reflection_key": "conversation:8791307afcbd41e8b7504f8f35953e5a",
   "analysis_summary": "Run Reliability Gap.",
   "signals": [
     {

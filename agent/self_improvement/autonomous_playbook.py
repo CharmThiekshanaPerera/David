@@ -6,9 +6,9 @@ Core safety modules remain immutable and out of scope for autonomous edits.
 
 from __future__ import annotations
 
-GENERATED_AT_UTC = "2026-02-22T18:01:58.499459+00:00"
+GENERATED_AT_UTC = "2026-02-23T16:01:52.105345+00:00"
 TRIGGER = "conversation"
-TRIGGER_ID = "conversation:82bc5e5f2552443ca8d6018865bc2891"
+TRIGGER_ID = "conversation:8791307afcbd41e8b7504f8f35953e5a"
 SIGNAL_CODES = ["run_reliability"]
 
 SIGNALS = [

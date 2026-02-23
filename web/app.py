@@ -64,6 +64,7 @@ def create_app(
                 "/api/voice/tts",
                 "/api/voice/chat/stream",
                 "/api/memory/confirm_overwrite",
+                "/api/memory/conversations/clear",
                 "/api/self_improvements/propose",
                 "/api/legacy_archive",
                 "/api/demo/load",
@@ -860,6 +861,18 @@ def create_app(
         except ValueError:
             limit = 500
         return jsonify({"ok": True, "data": center.memory_conversations(session_id=session_id, limit=limit)})
+
+    @app.post("/api/memory/conversations/clear")
+    def api_memory_conversations_clear():
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return _json_error("JSON body must be an object.")
+        session_id = str(payload.get("session_id", ""))
+        actor = str(payload.get("actor", "web_ui")).strip() or "web_ui"
+        ok, data = center.clear_conversations(session_id=session_id, actor=actor)
+        if not ok:
+            return _json_error(str(data.get("error", "Failed to clear conversations.")), status=409)
+        return jsonify({"ok": True, "data": data})
 
     @app.get("/api/chat/sessions")
     def api_chat_sessions():

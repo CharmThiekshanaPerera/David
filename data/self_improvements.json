@@ -280,6 +280,384 @@
           "docs/self_improvement_change_history.md"
         ]
       }
+    },
+    {
+      "id": "improve_20260223T152516_f82a197c",
+      "title": "Autonomous Improvement: Run Reliability Gap",
+      "summary": "Run Reliability Gap. This proposal was drafted autonomously from structured reflections and run evidence.",
+      "rationale": "Trigger: conversation (conversation:f70655002260492686ddfd92a9199d40)\nRun context: run_20260222T151748_a51c7807 / status=failed\nReflection key: conversation:f70655002260492686ddfd92a9199d40\n\nWhy this change was drafted:\n- Run Reliability Gap.\n- Convert lessons into concrete planning and memory-indexing heuristics.\n- Keep core safety constraints immutable and require human approval before merge.",
+      "status": "merged",
+      "created_at": "2026-02-23T15:25:16.071828+00:00",
+      "updated_at": "2026-02-23T16:17:36.895718+00:00",
+      "source": "self_improvement_engine",
+      "actor": "david_autonomous",
+      "sandbox_dir": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260223T152516_f82a197c",
+      "proposal_doc": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260223T152516_f82a197c/PROPOSAL.md",
+      "changes": [
+        {
+          "path": "agent/self_improvement/autonomous_playbook.py",
+          "change_type": "edited",
+          "sandbox_file": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260223T152516_f82a197c/prototype/agent/self_improvement/autonomous_playbook.py",
+          "added": 2,
+          "removed": 2,
+          "patch": "--- a/agent/self_improvement/autonomous_playbook.py\n+++ b/agent/self_improvement/autonomous_playbook.py\n@@ -6,9 +6,9 @@\n \n from __future__ import annotations\n \n-GENERATED_AT_UTC = \"2026-02-22T18:01:58.499459+00:00\"\n+GENERATED_AT_UTC = \"2026-02-23T15:25:16.022458+00:00\"\n TRIGGER = \"conversation\"\n-TRIGGER_ID = \"conversation:82bc5e5f2552443ca8d6018865bc2891\"\n+TRIGGER_ID = \"conversation:f70655002260492686ddfd92a9199d40\"\n SIGNAL_CODES = [\"run_reliability\"]\n \n SIGNALS = [",
+          "size_bytes": 962
+        },
+        {
+          "path": "agent/self_improvement/autonomous_state.json",
+          "change_type": "edited",
+          "sandbox_file": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260223T152516_f82a197c/prototype/agent/self_improvement/autonomous_state.json",
+          "added": 3,
+          "removed": 3,
+          "patch": "--- a/agent/self_improvement/autonomous_state.json\n+++ b/agent/self_improvement/autonomous_state.json\n@@ -1,10 +1,10 @@\n {\n-  \"generated_at_utc\": \"2026-02-22T18:01:58.499459+00:00\",\n+  \"generated_at_utc\": \"2026-02-23T15:25:16.022458+00:00\",\n   \"trigger\": \"conversation\",\n-  \"trigger_id\": \"conversation:82bc5e5f2552443ca8d6018865bc2891\",\n+  \"trigger_id\": \"conversation:f70655002260492686ddfd92a9199d40\",\n   \"run_id\": \"run_20260222T151748_a51c7807\",\n   \"run_status\": \"failed\",\n-  \"reflection_key\": \"conversation:82bc5e5f2552443ca8d6018865bc2891\",\n+  \"reflection_key\": \"conversation:f70655002260492686ddfd92a9199d40\",\n   \"analysis_summary\": \"Run Reliability Gap.\",\n   \"signals\": [\n     {",
+          "size_bytes": 828
+        },
+        {
+          "path": "docs/self_improvement_change_history.md",
+          "change_type": "edited",
+          "sandbox_file": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260223T152516_f82a197c/prototype/docs/self_improvement_change_history.md",
+          "added": 13,
+          "removed": 0,
+          "patch": "--- a/docs/self_improvement_change_history.md\n+++ b/docs/self_improvement_change_history.md\n@@ -27,3 +27,16 @@\n   - Add stricter preflight checks and staged rollback planning before execution.\n \n ---\n+\n+## 2026-02-23T15:25:16.022458+00:00\n+\n+- Trigger: `conversation` (`conversation:f70655002260492686ddfd92a9199d40`)\n+- Run: `run_20260222T151748_a51c7807` / status: `failed`\n+- Reflection: `conversation:f70655002260492686ddfd92a9199d40`\n+- Summary: Run Reliability Gap.\n+- Signals:\n+  - `run_reliability`: Run Reliability Gap | Latest goal run ended with status 'failed'.\n+- Proposed actions:\n+  - Add stricter preflight checks and staged rollback planning before execution.\n+\n+---",
+          "size_bytes": 1475
+        }
+      ],
+      "metadata": {
+        "analysis_summary": "Run Reliability Gap.",
+        "autonomous": true,
+        "reflection_key": "conversation:f70655002260492686ddfd92a9199d40",
+        "run_id": "run_20260222T151748_a51c7807",
+        "signal_codes": [
+          "run_reliability"
+        ],
+        "signature": "d6f22e9547306eb958",
+        "trigger": "conversation",
+        "trigger_id": "conversation:f70655002260492686ddfd92a9199d40"
+      },
+      "decision": {
+        "decision": "approve",
+        "actor": "web_ui",
+        "note": "",
+        "decided_at": "2026-02-23T16:17:36.358344+00:00"
+      },
+      "merge": {
+        "merged_at": "2026-02-23T16:17:36.895718+00:00",
+        "actor": "web_ui",
+        "file_count": 3,
+        "paths": [
+          "agent/self_improvement/autonomous_playbook.py",
+          "agent/self_improvement/autonomous_state.json",
+          "docs/self_improvement_change_history.md"
+        ]
+      }
+    },
+    {
+      "id": "improve_20260223T160141_ff1983b7",
+      "title": "Autonomous Improvement: Run Reliability Gap",
+      "summary": "Run Reliability Gap. This proposal was drafted autonomously from structured reflections and run evidence.",
+      "rationale": "Trigger: conversation (conversation:4f0f97102f1d4c4e80fc08a9b7732ba1)\nRun context: run_20260222T151748_a51c7807 / status=failed\nReflection key: conversation:4f0f97102f1d4c4e80fc08a9b7732ba1\n\nWhy this change was drafted:\n- Run Reliability Gap.\n- Convert lessons into concrete planning and memory-indexing heuristics.\n- Keep core safety constraints immutable and require human approval before merge.",
+      "status": "merged",
+      "created_at": "2026-02-23T16:01:41.518772+00:00",
+      "updated_at": "2026-02-23T16:17:34.933545+00:00",
+      "source": "self_improvement_engine",
+      "actor": "david_autonomous",
+      "sandbox_dir": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260223T160141_ff1983b7",
+      "proposal_doc": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260223T160141_ff1983b7/PROPOSAL.md",
+      "changes": [
+        {
+          "path": "agent/self_improvement/autonomous_playbook.py",
+          "change_type": "edited",
+          "sandbox_file": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260223T160141_ff1983b7/prototype/agent/self_improvement/autonomous_playbook.py",
+          "added": 2,
+          "removed": 2,
+          "patch": "--- a/agent/self_improvement/autonomous_playbook.py\n+++ b/agent/self_improvement/autonomous_playbook.py\n@@ -6,9 +6,9 @@\n \n from __future__ import annotations\n \n-GENERATED_AT_UTC = \"2026-02-22T18:01:58.499459+00:00\"\n+GENERATED_AT_UTC = \"2026-02-23T16:01:41.499258+00:00\"\n TRIGGER = \"conversation\"\n-TRIGGER_ID = \"conversation:82bc5e5f2552443ca8d6018865bc2891\"\n+TRIGGER_ID = \"conversation:4f0f97102f1d4c4e80fc08a9b7732ba1\"\n SIGNAL_CODES = [\"run_reliability\"]\n \n SIGNALS = [",
+          "size_bytes": 962
+        },
+        {
+          "path": "agent/self_improvement/autonomous_state.json",
+          "change_type": "edited",
+          "sandbox_file": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260223T160141_ff1983b7/prototype/agent/self_improvement/autonomous_state.json",
+          "added": 3,
+          "removed": 3,
+          "patch": "--- a/agent/self_improvement/autonomous_state.json\n+++ b/agent/self_improvement/autonomous_state.json\n@@ -1,10 +1,10 @@\n {\n-  \"generated_at_utc\": \"2026-02-22T18:01:58.499459+00:00\",\n+  \"generated_at_utc\": \"2026-02-23T16:01:41.499258+00:00\",\n   \"trigger\": \"conversation\",\n-  \"trigger_id\": \"conversation:82bc5e5f2552443ca8d6018865bc2891\",\n+  \"trigger_id\": \"conversation:4f0f97102f1d4c4e80fc08a9b7732ba1\",\n   \"run_id\": \"run_20260222T151748_a51c7807\",\n   \"run_status\": \"failed\",\n-  \"reflection_key\": \"conversation:82bc5e5f2552443ca8d6018865bc2891\",\n+  \"reflection_key\": \"conversation:4f0f97102f1d4c4e80fc08a9b7732ba1\",\n   \"analysis_summary\": \"Run Reliability Gap.\",\n   \"signals\": [\n     {",
+          "size_bytes": 828
+        },
+        {
+          "path": "docs/self_improvement_change_history.md",
+          "change_type": "edited",
+          "sandbox_file": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260223T160141_ff1983b7/prototype/docs/self_improvement_change_history.md",
+          "added": 13,
+          "removed": 0,
+          "patch": "--- a/docs/self_improvement_change_history.md\n+++ b/docs/self_improvement_change_history.md\n@@ -27,3 +27,16 @@\n   - Add stricter preflight checks and staged rollback planning before execution.\n \n ---\n+\n+## 2026-02-23T16:01:41.499258+00:00\n+\n+- Trigger: `conversation` (`conversation:4f0f97102f1d4c4e80fc08a9b7732ba1`)\n+- Run: `run_20260222T151748_a51c7807` / status: `failed`\n+- Reflection: `conversation:4f0f97102f1d4c4e80fc08a9b7732ba1`\n+- Summary: Run Reliability Gap.\n+- Signals:\n+  - `run_reliability`: Run Reliability Gap | Latest goal run ended with status 'failed'.\n+- Proposed actions:\n+  - Add stricter preflight checks and staged rollback planning before execution.\n+\n+---",
+          "size_bytes": 1475
+        }
+      ],
+      "metadata": {
+        "analysis_summary": "Run Reliability Gap.",
+        "autonomous": true,
+        "reflection_key": "conversation:4f0f97102f1d4c4e80fc08a9b7732ba1",
+        "run_id": "run_20260222T151748_a51c7807",
+        "signal_codes": [
+          "run_reliability"
+        ],
+        "signature": "d99b69cf875f1a61ad",
+        "trigger": "conversation",
+        "trigger_id": "conversation:4f0f97102f1d4c4e80fc08a9b7732ba1"
+      },
+      "decision": {
+        "decision": "approve",
+        "actor": "web_ui",
+        "note": "",
+        "decided_at": "2026-02-23T16:17:34.516736+00:00"
+      },
+      "merge": {
+        "merged_at": "2026-02-23T16:17:34.933545+00:00",
+        "actor": "web_ui",
+        "file_count": 3,
+        "paths": [
+          "agent/self_improvement/autonomous_playbook.py",
+          "agent/self_improvement/autonomous_state.json",
+          "docs/self_improvement_change_history.md"
+        ]
+      }
+    },
+    {
+      "id": "improve_20260223T160152_95b56cc4",
+      "title": "Autonomous Improvement: Run Reliability Gap",
+      "summary": "Run Reliability Gap. This proposal was drafted autonomously from structured reflections and run evidence.",
+      "rationale": "Trigger: conversation (conversation:8791307afcbd41e8b7504f8f35953e5a)\nRun context: run_20260222T151748_a51c7807 / status=failed\nReflection key: conversation:8791307afcbd41e8b7504f8f35953e5a\n\nWhy this change was drafted:\n- Run Reliability Gap.\n- Convert lessons into concrete planning and memory-indexing heuristics.\n- Keep core safety constraints immutable and require human approval before merge.",
+      "status": "merged",
+      "created_at": "2026-02-23T16:01:52.126512+00:00",
+      "updated_at": "2026-02-23T16:17:39.710197+00:00",
+      "source": "self_improvement_engine",
+      "actor": "david_autonomous",
+      "sandbox_dir": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260223T160152_95b56cc4",
+      "proposal_doc": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260223T160152_95b56cc4/PROPOSAL.md",
+      "changes": [
+        {
+          "path": "agent/self_improvement/autonomous_playbook.py",
+          "change_type": "edited",
+          "sandbox_file": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260223T160152_95b56cc4/prototype/agent/self_improvement/autonomous_playbook.py",
+          "added": 2,
+          "removed": 2,
+          "patch": "--- a/agent/self_improvement/autonomous_playbook.py\n+++ b/agent/self_improvement/autonomous_playbook.py\n@@ -6,9 +6,9 @@\n \n from __future__ import annotations\n \n-GENERATED_AT_UTC = \"2026-02-22T18:01:58.499459+00:00\"\n+GENERATED_AT_UTC = \"2026-02-23T16:01:52.105345+00:00\"\n TRIGGER = \"conversation\"\n-TRIGGER_ID = \"conversation:82bc5e5f2552443ca8d6018865bc2891\"\n+TRIGGER_ID = \"conversation:8791307afcbd41e8b7504f8f35953e5a\"\n SIGNAL_CODES = [\"run_reliability\"]\n \n SIGNALS = [",
+          "size_bytes": 962
+        },
+        {
+          "path": "agent/self_improvement/autonomous_state.json",
+          "change_type": "edited",
+          "sandbox_file": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260223T160152_95b56cc4/prototype/agent/self_improvement/autonomous_state.json",
+          "added": 3,
+          "removed": 3,
+          "patch": "--- a/agent/self_improvement/autonomous_state.json\n+++ b/agent/self_improvement/autonomous_state.json\n@@ -1,10 +1,10 @@\n {\n-  \"generated_at_utc\": \"2026-02-22T18:01:58.499459+00:00\",\n+  \"generated_at_utc\": \"2026-02-23T16:01:52.105345+00:00\",\n   \"trigger\": \"conversation\",\n-  \"trigger_id\": \"conversation:82bc5e5f2552443ca8d6018865bc2891\",\n+  \"trigger_id\": \"conversation:8791307afcbd41e8b7504f8f35953e5a\",\n   \"run_id\": \"run_20260222T151748_a51c7807\",\n   \"run_status\": \"failed\",\n-  \"reflection_key\": \"conversation:82bc5e5f2552443ca8d6018865bc2891\",\n+  \"reflection_key\": \"conversation:8791307afcbd41e8b7504f8f35953e5a\",\n   \"analysis_summary\": \"Run Reliability Gap.\",\n   \"signals\": [\n     {",
+          "size_bytes": 828
+        },
+        {
+          "path": "docs/self_improvement_change_history.md",
+          "change_type": "edited",
+          "sandbox_file": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260223T160152_95b56cc4/prototype/docs/self_improvement_change_history.md",
+          "added": 13,
+          "removed": 0,
+          "patch": "--- a/docs/self_improvement_change_history.md\n+++ b/docs/self_improvement_change_history.md\n@@ -27,3 +27,16 @@\n   - Add stricter preflight checks and staged rollback planning before execution.\n \n ---\n+\n+## 2026-02-23T16:01:52.105345+00:00\n+\n+- Trigger: `conversation` (`conversation:8791307afcbd41e8b7504f8f35953e5a`)\n+- Run: `run_20260222T151748_a51c7807` / status: `failed`\n+- Reflection: `conversation:8791307afcbd41e8b7504f8f35953e5a`\n+- Summary: Run Reliability Gap.\n+- Signals:\n+  - `run_reliability`: Run Reliability Gap | Latest goal run ended with status 'failed'.\n+- Proposed actions:\n+  - Add stricter preflight checks and staged rollback planning before execution.\n+\n+---",
+          "size_bytes": 1475
+        }
+      ],
+      "metadata": {
+        "analysis_summary": "Run Reliability Gap.",
+        "autonomous": true,
+        "reflection_key": "conversation:8791307afcbd41e8b7504f8f35953e5a",
+        "run_id": "run_20260222T151748_a51c7807",
+        "signal_codes": [
+          "run_reliability"
+        ],
+        "signature": "f51cfaac314815f43f",
+        "trigger": "conversation",
+        "trigger_id": "conversation:8791307afcbd41e8b7504f8f35953e5a"
+      },
+      "decision": {
+        "decision": "approve",
+        "actor": "web_ui",
+        "note": "",
+        "decided_at": "2026-02-23T16:17:39.083069+00:00"
+      },
+      "merge": {
+        "merged_at": "2026-02-23T16:17:39.710197+00:00",
+        "actor": "web_ui",
+        "file_count": 3,
+        "paths": [
+          "agent/self_improvement/autonomous_playbook.py",
+          "agent/self_improvement/autonomous_state.json",
+          "docs/self_improvement_change_history.md"
+        ]
+      }
+    },
+    {
+      "id": "improve_20260223T162044_c0e34b6f",
+      "title": "Autonomous Improvement: Run Reliability Gap",
+      "summary": "Run Reliability Gap. This proposal was drafted autonomously from structured reflections and run evidence.",
+      "rationale": "Trigger: conversation (conversation:e86e94869cff4ad8b75427556d3f315a)\nRun context: run_20260223T160333_3e46d899 / status=failed\nReflection key: conversation:e86e94869cff4ad8b75427556d3f315a\n\nWhy this change was drafted:\n- Run Reliability Gap.\n- Convert lessons into concrete planning and memory-indexing heuristics.\n- Keep core safety constraints immutable and require human approval before merge.",
+      "status": "pending",
+      "created_at": "2026-02-23T16:20:44.484710+00:00",
+      "updated_at": "2026-02-23T16:20:44.484710+00:00",
+      "source": "self_improvement_engine",
+      "actor": "david_autonomous",
+      "sandbox_dir": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260223T162044_c0e34b6f",
+      "proposal_doc": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260223T162044_c0e34b6f/PROPOSAL.md",
+      "changes": [
+        {
+          "path": "agent/self_improvement/autonomous_playbook.py",
+          "change_type": "edited",
+          "sandbox_file": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260223T162044_c0e34b6f/prototype/agent/self_improvement/autonomous_playbook.py",
+          "added": 2,
+          "removed": 2,
+          "patch": "--- a/agent/self_improvement/autonomous_playbook.py\n+++ b/agent/self_improvement/autonomous_playbook.py\n@@ -6,9 +6,9 @@\n \n from __future__ import annotations\n \n-GENERATED_AT_UTC = \"2026-02-23T16:01:52.105345+00:00\"\n+GENERATED_AT_UTC = \"2026-02-23T16:20:44.468626+00:00\"\n TRIGGER = \"conversation\"\n-TRIGGER_ID = \"conversation:8791307afcbd41e8b7504f8f35953e5a\"\n+TRIGGER_ID = \"conversation:e86e94869cff4ad8b75427556d3f315a\"\n SIGNAL_CODES = [\"run_reliability\"]\n \n SIGNALS = [",
+          "size_bytes": 962
+        },
+        {
+          "path": "agent/self_improvement/autonomous_state.json",
+          "change_type": "edited",
+          "sandbox_file": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260223T162044_c0e34b6f/prototype/agent/self_improvement/autonomous_state.json",
+          "added": 4,
+          "removed": 4,
+          "patch": "--- a/agent/self_improvement/autonomous_state.json\n+++ b/agent/self_improvement/autonomous_state.json\n@@ -1,10 +1,10 @@\n {\n-  \"generated_at_utc\": \"2026-02-23T16:01:52.105345+00:00\",\n+  \"generated_at_utc\": \"2026-02-23T16:20:44.468626+00:00\",\n   \"trigger\": \"conversation\",\n-  \"trigger_id\": \"conversation:8791307afcbd41e8b7504f8f35953e5a\",\n-  \"run_id\": \"run_20260222T151748_a51c7807\",\n+  \"trigger_id\": \"conversation:e86e94869cff4ad8b75427556d3f315a\",\n+  \"run_id\": \"run_20260223T160333_3e46d899\",\n   \"run_status\": \"failed\",\n-  \"reflection_key\": \"conversation:8791307afcbd41e8b7504f8f35953e5a\",\n+  \"reflection_key\": \"conversation:e86e94869cff4ad8b75427556d3f315a\",\n   \"analysis_summary\": \"Run Reliability Gap.\",\n   \"signals\": [\n     {",
+          "size_bytes": 828
+        },
+        {
+          "path": "docs/self_improvement_change_history.md",
+          "change_type": "edited",
+          "sandbox_file": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260223T162044_c0e34b6f/prototype/docs/self_improvement_change_history.md",
+          "added": 13,
+          "removed": 0,
+          "patch": "--- a/docs/self_improvement_change_history.md\n+++ b/docs/self_improvement_change_history.md\n@@ -40,3 +40,16 @@\n   - Add stricter preflight checks and staged rollback planning before execution.\n \n ---\n+\n+## 2026-02-23T16:20:44.468626+00:00\n+\n+- Trigger: `conversation` (`conversation:e86e94869cff4ad8b75427556d3f315a`)\n+- Run: `run_20260223T160333_3e46d899` / status: `failed`\n+- Reflection: `conversation:e86e94869cff4ad8b75427556d3f315a`\n+- Summary: Run Reliability Gap.\n+- Signals:\n+  - `run_reliability`: Run Reliability Gap | Latest goal run ended with status 'failed'.\n+- Proposed actions:\n+  - Add stricter preflight checks and staged rollback planning before execution.\n+\n+---",
+          "size_bytes": 1946
+        }
+      ],
+      "metadata": {
+        "analysis_summary": "Run Reliability Gap.",
+        "autonomous": true,
+        "reflection_key": "conversation:e86e94869cff4ad8b75427556d3f315a",
+        "run_id": "run_20260223T160333_3e46d899",
+        "signal_codes": [
+          "run_reliability"
+        ],
+        "signature": "68e28f2837f7c7a0ff",
+        "trigger": "conversation",
+        "trigger_id": "conversation:e86e94869cff4ad8b75427556d3f315a"
+      },
+      "decision": null,
+      "merge": null
+    },
+    {
+      "id": "improve_20260223T162154_3c47f7eb",
+      "title": "Autonomous Improvement: Run Reliability Gap",
+      "summary": "Run Reliability Gap. This proposal was drafted autonomously from structured reflections and run evidence.",
+      "rationale": "Trigger: conversation (conversation:68d7fb3cad3248bcbb8f84c33f3a94a8)\nRun context: run_20260223T160333_3e46d899 / status=failed\nReflection key: conversation:68d7fb3cad3248bcbb8f84c33f3a94a8\n\nWhy this change was drafted:\n- Run Reliability Gap.\n- Convert lessons into concrete planning and memory-indexing heuristics.\n- Keep core safety constraints immutable and require human approval before merge.",
+      "status": "pending",
+      "created_at": "2026-02-23T16:21:54.364671+00:00",
+      "updated_at": "2026-02-23T16:21:54.364671+00:00",
+      "source": "self_improvement_engine",
+      "actor": "david_autonomous",
+      "sandbox_dir": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260223T162154_3c47f7eb",
+      "proposal_doc": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260223T162154_3c47f7eb/PROPOSAL.md",
+      "changes": [
+        {
+          "path": "agent/self_improvement/autonomous_playbook.py",
+          "change_type": "edited",
+          "sandbox_file": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260223T162154_3c47f7eb/prototype/agent/self_improvement/autonomous_playbook.py",
+          "added": 2,
+          "removed": 2,
+          "patch": "--- a/agent/self_improvement/autonomous_playbook.py\n+++ b/agent/self_improvement/autonomous_playbook.py\n@@ -6,9 +6,9 @@\n \n from __future__ import annotations\n \n-GENERATED_AT_UTC = \"2026-02-23T16:01:52.105345+00:00\"\n+GENERATED_AT_UTC = \"2026-02-23T16:21:54.353295+00:00\"\n TRIGGER = \"conversation\"\n-TRIGGER_ID = \"conversation:8791307afcbd41e8b7504f8f35953e5a\"\n+TRIGGER_ID = \"conversation:68d7fb3cad3248bcbb8f84c33f3a94a8\"\n SIGNAL_CODES = [\"run_reliability\"]\n \n SIGNALS = [",
+          "size_bytes": 962
+        },
+        {
+          "path": "agent/self_improvement/autonomous_state.json",
+          "change_type": "edited",
+          "sandbox_file": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260223T162154_3c47f7eb/prototype/agent/self_improvement/autonomous_state.json",
+          "added": 4,
+          "removed": 4,
+          "patch": "--- a/agent/self_improvement/autonomous_state.json\n+++ b/agent/self_improvement/autonomous_state.json\n@@ -1,10 +1,10 @@\n {\n-  \"generated_at_utc\": \"2026-02-23T16:01:52.105345+00:00\",\n+  \"generated_at_utc\": \"2026-02-23T16:21:54.353295+00:00\",\n   \"trigger\": \"conversation\",\n-  \"trigger_id\": \"conversation:8791307afcbd41e8b7504f8f35953e5a\",\n-  \"run_id\": \"run_20260222T151748_a51c7807\",\n+  \"trigger_id\": \"conversation:68d7fb3cad3248bcbb8f84c33f3a94a8\",\n+  \"run_id\": \"run_20260223T160333_3e46d899\",\n   \"run_status\": \"failed\",\n-  \"reflection_key\": \"conversation:8791307afcbd41e8b7504f8f35953e5a\",\n+  \"reflection_key\": \"conversation:68d7fb3cad3248bcbb8f84c33f3a94a8\",\n   \"analysis_summary\": \"Run Reliability Gap.\",\n   \"signals\": [\n     {",
+          "size_bytes": 828
+        },
+        {
+          "path": "docs/self_improvement_change_history.md",
+          "change_type": "edited",
+          "sandbox_file": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260223T162154_3c47f7eb/prototype/docs/self_improvement_change_history.md",
+          "added": 13,
+          "removed": 0,
+          "patch": "--- a/docs/self_improvement_change_history.md\n+++ b/docs/self_improvement_change_history.md\n@@ -40,3 +40,16 @@\n   - Add stricter preflight checks and staged rollback planning before execution.\n \n ---\n+\n+## 2026-02-23T16:21:54.353295+00:00\n+\n+- Trigger: `conversation` (`conversation:68d7fb3cad3248bcbb8f84c33f3a94a8`)\n+- Run: `run_20260223T160333_3e46d899` / status: `failed`\n+- Reflection: `conversation:68d7fb3cad3248bcbb8f84c33f3a94a8`\n+- Summary: Run Reliability Gap.\n+- Signals:\n+  - `run_reliability`: Run Reliability Gap | Latest goal run ended with status 'failed'.\n+- Proposed actions:\n+  - Add stricter preflight checks and staged rollback planning before execution.\n+\n+---",
+          "size_bytes": 1946
+        }
+      ],
+      "metadata": {
+        "analysis_summary": "Run Reliability Gap.",
+        "autonomous": true,
+        "reflection_key": "conversation:68d7fb3cad3248bcbb8f84c33f3a94a8",
+        "run_id": "run_20260223T160333_3e46d899",
+        "signal_codes": [
+          "run_reliability"
+        ],
+        "signature": "19d07b38c82685a677",
+        "trigger": "conversation",
+        "trigger_id": "conversation:68d7fb3cad3248bcbb8f84c33f3a94a8"
+      },
+      "decision": null,
+      "merge": null
+    },
+    {
+      "id": "improve_20260223T162238_b81092e0",
+      "title": "Autonomous Improvement: Run Reliability Gap",
+      "summary": "Run Reliability Gap. This proposal was drafted autonomously from structured reflections and run evidence.",
+      "rationale": "Trigger: conversation (conversation:3abc44b9836d4f6392446f54ba9db78e)\nRun context: run_20260223T160333_3e46d899 / status=failed\nReflection key: conversation:3abc44b9836d4f6392446f54ba9db78e\n\nWhy this change was drafted:\n- Run Reliability Gap.\n- Convert lessons into concrete planning and memory-indexing heuristics.\n- Keep core safety constraints immutable and require human approval before merge.",
+      "status": "pending",
+      "created_at": "2026-02-23T16:22:38.556497+00:00",
+      "updated_at": "2026-02-23T16:22:38.556497+00:00",
+      "source": "self_improvement_engine",
+      "actor": "david_autonomous",
+      "sandbox_dir": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260223T162238_b81092e0",
+      "proposal_doc": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260223T162238_b81092e0/PROPOSAL.md",
+      "changes": [
+        {
+          "path": "agent/self_improvement/autonomous_playbook.py",
+          "change_type": "edited",
+          "sandbox_file": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260223T162238_b81092e0/prototype/agent/self_improvement/autonomous_playbook.py",
+          "added": 2,
+          "removed": 2,
+          "patch": "--- a/agent/self_improvement/autonomous_playbook.py\n+++ b/agent/self_improvement/autonomous_playbook.py\n@@ -6,9 +6,9 @@\n \n from __future__ import annotations\n \n-GENERATED_AT_UTC = \"2026-02-23T16:01:52.105345+00:00\"\n+GENERATED_AT_UTC = \"2026-02-23T16:22:38.528378+00:00\"\n TRIGGER = \"conversation\"\n-TRIGGER_ID = \"conversation:8791307afcbd41e8b7504f8f35953e5a\"\n+TRIGGER_ID = \"conversation:3abc44b9836d4f6392446f54ba9db78e\"\n SIGNAL_CODES = [\"run_reliability\"]\n \n SIGNALS = [",
+          "size_bytes": 962
+        },
+        {
+          "path": "agent/self_improvement/autonomous_state.json",
+          "change_type": "edited",
+          "sandbox_file": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260223T162238_b81092e0/prototype/agent/self_improvement/autonomous_state.json",
+          "added": 4,
+          "removed": 4,
+          "patch": "--- a/agent/self_improvement/autonomous_state.json\n+++ b/agent/self_improvement/autonomous_state.json\n@@ -1,10 +1,10 @@\n {\n-  \"generated_at_utc\": \"2026-02-23T16:01:52.105345+00:00\",\n+  \"generated_at_utc\": \"2026-02-23T16:22:38.528378+00:00\",\n   \"trigger\": \"conversation\",\n-  \"trigger_id\": \"conversation:8791307afcbd41e8b7504f8f35953e5a\",\n-  \"run_id\": \"run_20260222T151748_a51c7807\",\n+  \"trigger_id\": \"conversation:3abc44b9836d4f6392446f54ba9db78e\",\n+  \"run_id\": \"run_20260223T160333_3e46d899\",\n   \"run_status\": \"failed\",\n-  \"reflection_key\": \"conversation:8791307afcbd41e8b7504f8f35953e5a\",\n+  \"reflection_key\": \"conversation:3abc44b9836d4f6392446f54ba9db78e\",\n   \"analysis_summary\": \"Run Reliability Gap.\",\n   \"signals\": [\n     {",
+          "size_bytes": 828
+        },
+        {
+          "path": "docs/self_improvement_change_history.md",
+          "change_type": "edited",
+          "sandbox_file": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260223T162238_b81092e0/prototype/docs/self_improvement_change_history.md",
+          "added": 13,
+          "removed": 0,
+          "patch": "--- a/docs/self_improvement_change_history.md\n+++ b/docs/self_improvement_change_history.md\n@@ -40,3 +40,16 @@\n   - Add stricter preflight checks and staged rollback planning before execution.\n \n ---\n+\n+## 2026-02-23T16:22:38.528378+00:00\n+\n+- Trigger: `conversation` (`conversation:3abc44b9836d4f6392446f54ba9db78e`)\n+- Run: `run_20260223T160333_3e46d899` / status: `failed`\n+- Reflection: `conversation:3abc44b9836d4f6392446f54ba9db78e`\n+- Summary: Run Reliability Gap.\n+- Signals:\n+  - `run_reliability`: Run Reliability Gap | Latest goal run ended with status 'failed'.\n+- Proposed actions:\n+  - Add stricter preflight checks and staged rollback planning before execution.\n+\n+---",
+          "size_bytes": 1946
+        }
+      ],
+      "metadata": {
+        "analysis_summary": "Run Reliability Gap.",
+        "autonomous": true,
+        "reflection_key": "conversation:3abc44b9836d4f6392446f54ba9db78e",
+        "run_id": "run_20260223T160333_3e46d899",
+        "signal_codes": [
+          "run_reliability"
+        ],
+        "signature": "e365cc501db0729db7",
+        "trigger": "conversation",
+        "trigger_id": "conversation:3abc44b9836d4f6392446f54ba9db78e"
+      },
+      "decision": null,
+      "merge": null
     }
   ]
 }

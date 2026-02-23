@@ -35,6 +35,27 @@ class FakeCenter:
             "demo_mode": False,
             "upload_vision_mode": False,
             "upload_vision_model": "",
+            "voice_mode_enabled": False,
+            "voice_text_only_mode": False,
+            "voice_input_mode": "manual",
+            "voice_vad_threshold": 0.035,
+            "voice_vad_silence_ms": 900,
+            "voice_vad_min_speech_ms": 300,
+            "vad_threshold": 0.035,
+            "vad_silence_ms": 900,
+            "vad_min_speech_ms": 300,
+            "voice_style": "warm",
+            "voice_rate": 100,
+            "voice_stt_engine": "none",
+            "voice_stt_model": "base",
+            "voice_stt_language": "en",
+            "voice_stt_command": "whisper",
+            "voice_whisper_cpp_command": "whisper-cli",
+            "voice_whisper_cpp_model_path": "",
+            "voice_tts_engine": "browser",
+            "voice_tts_command": "piper",
+            "voice_tts_model_path": "",
+            "voice_chunk_chars": 180,
             "personality_warmth": 55,
             "personality_verbosity": 55,
             "personality_curiosity": 50,
@@ -717,6 +738,26 @@ class FakeCenter:
         if sid:
             rows = [row for row in rows if str(row.get("session_id", "")) == sid]
         return {"conversations": rows[:limit], "session_id": sid, "total": len(rows)}
+
+    def clear_conversations(self, session_id="", actor="web_ui"):
+        sid = str(session_id or "").strip()
+        if self._settings.get("safe_mode"):
+            return False, {"error": "Safe mode is enabled. Conversation clearing is blocked in read-only mode."}
+        before = len(self._conversations)
+        if sid:
+            self._conversations = [row for row in self._conversations if str(row.get("session_id", "")) != sid]
+        else:
+            self._conversations = []
+        removed = before - len(self._conversations)
+        return True, {
+            "status": "cleared",
+            "scope": "session" if sid else "all",
+            "session_id": sid,
+            "removed_count": removed,
+            "remaining_count": len(self._conversations),
+            "actor": actor,
+            "timestamp_utc": "2026-01-01T00:00:00+00:00",
+        }
 
     def chat_sessions(self, limit=120):
         sessions = {}
@@ -1525,3 +1566,30 @@ def test_memory_conversations_and_sessions_endpoints(client):
     assert sessions.status_code == 200
     session_rows = sessions.get_json()["data"]
     assert any(str(item.get("session_id")) == session_id for item in session_rows)
+
+
+def test_memory_clear_conversations_endpoint(client):
+    first = client.post("/api/chat", json={"message": "Question 1?", "intent": "ask", "session_id": "session_a"})
+    assert first.status_code == 200
+    second = client.post("/api/chat", json={"message": "Question 2?", "intent": "ask", "session_id": "session_b"})
+    assert second.status_code == 200
+
+    clear_session = client.post("/api/memory/conversations/clear", json={"session_id": "session_a"})
+    assert clear_session.status_code == 200
+    clear_data = clear_session.get_json()["data"]
+    assert clear_data["scope"] == "session"
+    assert clear_data["session_id"] == "session_a"
+    assert int(clear_data["removed_count"]) >= 2
+
+    session_a_rows = client.get("/api/memory/conversations?session_id=session_a").get_json()["data"]
+    session_b_rows = client.get("/api/memory/conversations?session_id=session_b").get_json()["data"]
+    assert int(session_a_rows["total"]) == 0
+    assert int(session_b_rows["total"]) >= 2
+
+    clear_all = client.post("/api/memory/conversations/clear", json={})
+    assert clear_all.status_code == 200
+    clear_all_data = clear_all.get_json()["data"]
+    assert clear_all_data["scope"] == "all"
+
+    all_rows = client.get("/api/memory/conversations").get_json()["data"]
+    assert int(all_rows["total"]) == 0

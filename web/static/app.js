@@ -2,6 +2,8 @@
 const STAGES = ["planner", "coder", "safety", "executor", "critic", "memory"];
 const STREAM_RETRY_MS = 3000;
 const WALKTHROUGH_DISMISSED_KEY = "dcc_walkthrough_dismissed";
+const VOICE_TURN_STATES = ["idle", "listening_armed", "recording", "stopping", "transcribing", "responding"];
+const VOICE_VAD_START_DEBOUNCE_MS = 140;
 
 const state = {
   status: null,
@@ -86,13 +88,19 @@ const state = {
     speaking: false,
     muted: false,
     textOnlyMode: false,
-    inputMode: "ptt",
+    inputMode: "manual",
+    turnState: "idle",
     vadThreshold: 0.035,
     vadSilenceMs: 900,
+    vadMinSpeechMs: 300,
     vadActive: false,
     vadRaf: 0,
     vadLastSpeech: 0,
-    vadCooldownUntil: 0,
+    vadAboveThresholdSince: 0,
+    vadSilenceSince: 0,
+    vadSpeechMs: 0,
+    vadLastFrameAt: 0,
+    vadSilenceCountdownMs: 0,
     vadLevel: 0,
     monitoring: false,
     vadBuffer: null,
@@ -116,7 +124,14 @@ const state = {
     autoSubmitAfterStop: true,
     keepStreamOnStop: false,
     streamAbortController: null,
+    transcribeAbortController: null,
     ttsFallbackWarned: false,
+    sttFallbackMode: "local",
+    sttFallbackReason: "",
+    sttFallbackCheckedAt: 0,
+    browserRecognition: null,
+    browserTranscriptFinal: "",
+    browserTranscriptInterim: "",
   },
 };
 
@@ -221,6 +236,7 @@ const el = {
   settingVoiceVadThreshold: document.getElementById("settingVoiceVadThreshold"),
   settingVoiceVadThresholdValue: document.getElementById("settingVoiceVadThresholdValue"),
   settingVoiceVadSilenceMs: document.getElementById("settingVoiceVadSilenceMs"),
+  settingVoiceVadMinSpeechMs: document.getElementById("settingVoiceVadMinSpeechMs"),
   settingVoiceStyle: document.getElementById("settingVoiceStyle"),
   settingVoiceRate: document.getElementById("settingVoiceRate"),
   settingVoiceRateValue: document.getElementById("settingVoiceRateValue"),
@@ -277,7 +293,9 @@ const el = {
   voiceMuteBtn: document.getElementById("voiceMuteBtn"),
   voiceTextOnlyMode: document.getElementById("voiceTextOnlyMode"),
   voiceWaveform: document.getElementById("voiceWaveform"),
+  voiceMicMeter: document.getElementById("voiceMicMeter"),
   voiceStatusText: document.getElementById("voiceStatusText"),
+  voiceAutoIndicator: document.getElementById("voiceAutoIndicator"),
   voiceTypingIndicator: document.getElementById("voiceTypingIndicator"),
   voicePlaybackIndicator: document.getElementById("voicePlaybackIndicator"),
   voiceTranscriptPreview: document.getElementById("voiceTranscriptPreview"),
@@ -526,7 +544,7 @@ async function api(path, options = {}) {
   return json.data;
 }
 
-async function apiMultipart(path, formData) {
+async function apiMultipart(path, formData, options = {}) {
   const headers = {};
   if (state.csrfToken) {
     headers["X-CSRF-Token"] = state.csrfToken;
@@ -535,6 +553,7 @@ async function apiMultipart(path, formData) {
     method: "POST",
     body: formData,
     headers,
+    signal: options?.signal || undefined,
   });
   const json = await response.json().catch(() => ({}));
   if (!response.ok || !json.ok) {
@@ -654,12 +673,14 @@ function inferChatRequest(rawText) {
 }
 
 function pushChatMessage(kind, text, meta = {}) {
+  const source = String(meta?.source || "local").trim().toLowerCase() || "local";
   state.chatMessages.push({
     message_id: String(meta?.message_id || `${Date.now()}_${Math.random().toString(16).slice(2)}`),
     session_id: String(meta?.session_id || state.selectedChatSessionId || ""),
     kind: String(kind || "system"),
     text: String(text || ""),
     meta,
+    source,
     timestamp_utc: new Date().toISOString(),
   });
   if (state.chatMessages.length > 120) {
@@ -743,28 +764,38 @@ function renderChatSessions() {
 }
 
 function syncChatMessagesFromConversations(rows) {
-  if (!Array.isArray(rows) || !rows.length) return;
-  const seen = new Set(state.chatMessages.map((row) => String(row.message_id || "")));
-  rows.forEach((row) => {
-    const messageId = String(row?.message_id || "");
-    if (!messageId || seen.has(messageId)) return;
-    const role = String(row?.role || "assistant");
-    const intent = String(row?.intent || "chat");
-    const kind =
-      role === "user" ? "user" : intent === "ask" ? "ask" : intent === "teach" ? "teach" : "system";
-    state.chatMessages.push({
-      message_id: messageId,
-      session_id: String(row?.session_id || ""),
-      kind,
-      text: String(row?.text || ""),
-      meta: row?.metadata || {},
-      timestamp_utc: String(row?.timestamp_utc || new Date().toISOString()),
+  const conversationRows = Array.isArray(rows) ? rows : [];
+  const mapped = conversationRows
+    .filter((row) => row && typeof row === "object")
+    .map((row) => {
+      const role = String(row?.role || "assistant");
+      const intent = String(row?.intent || "chat");
+      const kind =
+        role === "user" ? "user" : intent === "ask" ? "ask" : intent === "teach" ? "teach" : "system";
+      return {
+        message_id: String(row?.message_id || ""),
+        session_id: String(row?.session_id || ""),
+        kind,
+        text: String(row?.text || ""),
+        meta: row?.metadata || {},
+        source: "conversation",
+        timestamp_utc: String(row?.timestamp_utc || new Date().toISOString()),
+      };
     });
-  });
-  state.chatMessages.sort((a, b) => String(a.timestamp_utc || "").localeCompare(String(b.timestamp_utc || "")));
-  if (state.chatMessages.length > 500) {
-    state.chatMessages.splice(0, state.chatMessages.length - 500);
+  mapped.sort((a, b) => String(a.timestamp_utc || "").localeCompare(String(b.timestamp_utc || "")));
+  const serverIds = new Set(mapped.map((row) => String(row?.message_id || "")).filter(Boolean));
+  const localRows = (Array.isArray(state.chatMessages) ? state.chatMessages : [])
+    .filter((row) => String(row?.source || "local") !== "conversation")
+    .filter((row) => {
+      const messageId = String(row?.message_id || "");
+      return !messageId || !serverIds.has(messageId);
+    });
+  const merged = [...localRows, ...mapped];
+  merged.sort((a, b) => String(a.timestamp_utc || "").localeCompare(String(b.timestamp_utc || "")));
+  if (merged.length > 500) {
+    merged.splice(0, merged.length - 500);
   }
+  state.chatMessages = merged;
 }
 
 function renderChatHistory() {
@@ -785,7 +816,8 @@ function renderChatHistory() {
     system: "System",
   };
 
-  el.memoryChatHistory.innerHTML = rows
+  const displayRows = rows.slice().reverse();
+  el.memoryChatHistory.innerHTML = displayRows
     .map((row) => {
       const kind = row.kind || "system";
       const label = labels[kind] || "Message";
@@ -874,7 +906,7 @@ function renderChatHistory() {
     })
     .join("");
 
-  el.memoryChatHistory.scrollTop = el.memoryChatHistory.scrollHeight;
+  el.memoryChatHistory.scrollTop = 0;
 }
 
 function memoryEventKey(eventType, payload) {
@@ -1004,6 +1036,12 @@ function clampVoiceVadSilence(value, fallback = 900) {
   return Math.max(250, Math.min(2500, Math.round(parsed)));
 }
 
+function clampVoiceVadMinSpeech(value, fallback = 300) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(120, Math.min(4000, Math.round(parsed)));
+}
+
 function voiceVadThresholdDescriptor(value) {
   const threshold = clampVoiceVadThreshold(value, 0.035);
   return threshold.toFixed(3);
@@ -1014,6 +1052,105 @@ function renderVoiceVadLabel() {
   if (el.settingVoiceVadThresholdValue) {
     el.settingVoiceVadThresholdValue.textContent = voiceVadThresholdDescriptor(threshold);
   }
+}
+
+function normalizeVoiceTurnState(value) {
+  const clean = String(value || "").trim().toLowerCase();
+  return VOICE_TURN_STATES.includes(clean) ? clean : "idle";
+}
+
+function nextVoiceTurnState(current, eventName) {
+  const currentState = normalizeVoiceTurnState(current);
+  const event = String(eventName || "").trim().toLowerCase();
+  const transitions = {
+    idle: { arm: "listening_armed", start_recording: "recording", transcribe_start: "transcribing" },
+    listening_armed: { start_recording: "recording", cancel: "idle", deactivate: "idle" },
+    recording: { stop_request: "stopping", cancel: "idle" },
+    stopping: { transcribe_start: "transcribing", arm: "listening_armed", complete: "idle", cancel: "idle" },
+    transcribing: { respond_start: "responding", arm: "listening_armed", complete: "idle", cancel: "idle" },
+    responding: { arm: "listening_armed", complete: "idle", cancel: "idle" },
+  };
+  return transitions[currentState]?.[event] || currentState;
+}
+
+function setVoiceTurnState(nextState) {
+  state.voice.turnState = normalizeVoiceTurnState(nextState);
+}
+
+function transitionVoiceTurn(eventName) {
+  setVoiceTurnState(nextVoiceTurnState(state.voice.turnState, eventName));
+}
+
+function evaluateVadFrame(snapshot) {
+  const nowMs = Number(snapshot?.nowMs || 0);
+  const threshold = Number(snapshot?.threshold || 0);
+  const silenceMs = Math.max(250, Number(snapshot?.silenceMs || 900));
+  const minSpeechMs = Math.max(120, Number(snapshot?.minSpeechMs || 300));
+  const debounceMs = Math.max(40, Number(snapshot?.debounceMs || VOICE_VAD_START_DEBOUNCE_MS));
+  const level = Number(snapshot?.level || 0);
+  const aboveThreshold = level >= threshold;
+  const turnState = normalizeVoiceTurnState(snapshot?.turnState);
+  const lastFrameMs = Number(snapshot?.lastFrameMs || 0);
+  const deltaMs = lastFrameMs > 0 ? Math.max(0, nowMs - lastFrameMs) : 0;
+
+  let aboveSinceMs = Number(snapshot?.aboveSinceMs || 0);
+  let silenceSinceMs = Number(snapshot?.silenceSinceMs || 0);
+  let speechMs = Math.max(0, Number(snapshot?.speechMs || 0));
+  let silenceCountdownMs = 0;
+  let shouldStartRecording = false;
+  let shouldStopRecording = false;
+  let shouldAccept = false;
+  let bargeInSignal = false;
+
+  if (turnState === "listening_armed") {
+    speechMs = 0;
+    silenceSinceMs = 0;
+    if (aboveThreshold) {
+      if (!aboveSinceMs) {
+        aboveSinceMs = nowMs;
+      }
+      if (nowMs - aboveSinceMs >= debounceMs) {
+        shouldStartRecording = true;
+      }
+      bargeInSignal = true;
+    } else {
+      aboveSinceMs = 0;
+    }
+  } else if (turnState === "recording") {
+    aboveSinceMs = aboveThreshold ? (aboveSinceMs || nowMs) : 0;
+    if (aboveThreshold) {
+      speechMs += deltaMs;
+      silenceSinceMs = 0;
+      silenceCountdownMs = 0;
+    } else {
+      if (!silenceSinceMs) {
+        silenceSinceMs = nowMs;
+      }
+      const elapsedSilenceMs = Math.max(0, nowMs - silenceSinceMs);
+      silenceCountdownMs = Math.max(0, silenceMs - elapsedSilenceMs);
+      if (elapsedSilenceMs >= silenceMs) {
+        shouldStopRecording = true;
+        shouldAccept = speechMs >= minSpeechMs;
+      }
+    }
+  } else {
+    aboveSinceMs = 0;
+    silenceSinceMs = 0;
+    speechMs = 0;
+    silenceCountdownMs = 0;
+  }
+
+  return {
+    aboveSinceMs,
+    silenceSinceMs,
+    speechMs,
+    lastFrameMs: nowMs,
+    silenceCountdownMs,
+    shouldStartRecording,
+    shouldStopRecording,
+    shouldAccept,
+    bargeInSignal,
+  };
 }
 
 function summarizeText(value, maxLen = 180) {
@@ -3015,13 +3152,27 @@ function renderSettings(data) {
     el.settingVoiceTextOnlyMode.checked = !!safeData.voice_text_only_mode;
   }
   if (el.settingVoiceInputMode) {
-    el.settingVoiceInputMode.value = String(safeData.voice_input_mode || "ptt").trim().toLowerCase() || "ptt";
+    const savedMode = String(safeData.voice_input_mode || "manual").trim().toLowerCase() || "manual";
+    const normalizedMode = savedMode === "ptt" ? "manual" : savedMode;
+    el.settingVoiceInputMode.value = normalizedMode === "vad" ? "vad" : "manual";
   }
   if (el.settingVoiceVadThreshold) {
-    el.settingVoiceVadThreshold.value = clampVoiceVadThreshold(safeData.voice_vad_threshold, 0.035);
+    el.settingVoiceVadThreshold.value = clampVoiceVadThreshold(
+      safeData.voice_vad_threshold ?? safeData.vad_threshold,
+      0.035
+    );
   }
   if (el.settingVoiceVadSilenceMs) {
-    el.settingVoiceVadSilenceMs.value = clampVoiceVadSilence(safeData.voice_vad_silence_ms, 900);
+    el.settingVoiceVadSilenceMs.value = clampVoiceVadSilence(
+      safeData.voice_vad_silence_ms ?? safeData.vad_silence_ms,
+      900
+    );
+  }
+  if (el.settingVoiceVadMinSpeechMs) {
+    el.settingVoiceVadMinSpeechMs.value = clampVoiceVadMinSpeech(
+      safeData.voice_vad_min_speech_ms ?? safeData.vad_min_speech_ms,
+      300
+    );
   }
   if (el.settingVoiceStyle) {
     el.settingVoiceStyle.value = String(safeData.voice_style || "warm").trim().toLowerCase() || "warm";
@@ -3083,12 +3234,22 @@ function renderSettings(data) {
   }
   state.voice.rate = clampVoiceRate(safeData.voice_rate, 100);
   state.voice.textOnlyMode = !!safeData.voice_text_only_mode;
-  state.voice.inputMode = String(safeData.voice_input_mode || "ptt").trim().toLowerCase() || "ptt";
-  if (!["ptt", "vad"].includes(state.voice.inputMode)) {
-    state.voice.inputMode = "ptt";
+  state.voice.inputMode = String(safeData.voice_input_mode || "manual").trim().toLowerCase() || "manual";
+  if (state.voice.inputMode === "ptt") {
+    state.voice.inputMode = "manual";
   }
-  state.voice.vadThreshold = clampVoiceVadThreshold(safeData.voice_vad_threshold, 0.035);
-  state.voice.vadSilenceMs = clampVoiceVadSilence(safeData.voice_vad_silence_ms, 900);
+  if (!["manual", "vad"].includes(state.voice.inputMode)) {
+    state.voice.inputMode = "manual";
+  }
+  state.voice.vadThreshold = clampVoiceVadThreshold(safeData.voice_vad_threshold ?? safeData.vad_threshold, 0.035);
+  state.voice.vadSilenceMs = clampVoiceVadSilence(safeData.voice_vad_silence_ms ?? safeData.vad_silence_ms, 900);
+  state.voice.vadMinSpeechMs = clampVoiceVadMinSpeech(
+    safeData.voice_vad_min_speech_ms ?? safeData.vad_min_speech_ms,
+    300
+  );
+  resetVoiceSttFallbackCache();
+  state.voice.vadSilenceCountdownMs = 0;
+  setVoiceTurnState(state.voice.vadActive ? "listening_armed" : "idle");
   renderVoiceRateLabel();
   renderVoiceVadLabel();
   if (el.voiceTextOnlyMode) {
@@ -3154,6 +3315,10 @@ function renderSettings(data) {
     state.pendingCliRunOptions.tddMode = !!safeData.tdd_mode;
   }
   refreshRunOptionSummary();
+  const voiceInputMode = (() => {
+    const raw = String(safeData.voice_input_mode || "manual").trim().toLowerCase();
+    return raw === "ptt" ? "manual" : raw || "manual";
+  })();
   kvList(el.settingsInfo, [
     ["Model", safeData.model || "-"],
     ["Planner model", safeData.planner_model || safeData.planner_model_default || "-"],
@@ -3166,9 +3331,10 @@ function renderSettings(data) {
     ["Upload OCR/Vision mode", fmtBool(safeData.upload_vision_mode)],
     ["Upload OCR/Vision model", safeData.upload_vision_model || safeData.model || "-"],
     ["Voice mode", fmtBool(safeData.voice_mode_enabled)],
-    ["Voice input mode", safeData.voice_input_mode || "ptt"],
-    ["Voice VAD threshold", String(safeData.voice_vad_threshold ?? 0.035)],
-    ["Voice VAD silence (ms)", String(safeData.voice_vad_silence_ms ?? 900)],
+    ["Voice input mode", voiceInputMode],
+    ["Voice VAD threshold", String(safeData.voice_vad_threshold ?? safeData.vad_threshold ?? 0.035)],
+    ["Voice VAD silence (ms)", String(safeData.voice_vad_silence_ms ?? safeData.vad_silence_ms ?? 900)],
+    ["Voice VAD min speech (ms)", String(safeData.voice_vad_min_speech_ms ?? safeData.vad_min_speech_ms ?? 300)],
     ["Voice style", safeData.voice_style || "warm"],
     ["Voice rate", voiceRateDescriptor(safeData.voice_rate ?? 100)],
     ["Voice STT engine", safeData.voice_stt_engine || "none"],
@@ -3751,13 +3917,15 @@ function nextVoiceTurnId() {
 
 function handleVoiceBargeIn(reason = "") {
   const hasPlayback = !!state.voice.audioPlaying || Number(state.voice.pendingSpeechCount || 0) > 0;
-  const hasStream = !!state.voice.streamAbortController;
+  const hasStream = !!state.voice.streamAbortController || !!state.voice.transcribeAbortController;
   if (!hasPlayback && !state.voice.generating && !hasStream) return;
   abortVoiceStream();
+  abortVoiceTranscription();
   clearVoiceAudioQueue(true);
   state.voice.generating = false;
   state.voice.partialAssistant = "";
   setVoiceAssistantPreview("");
+  transitionVoiceTurn("arm");
   if (reason) {
     setCliOutput(`Voice barge-in: ${reason}`);
   }
@@ -3772,16 +3940,17 @@ function beginVoiceTurn(reason = "") {
 function renderVoiceModeHint() {
   if (!el.voiceModeHint) return;
   if (state.voice.inputMode === "vad") {
-    el.voiceModeHint.textContent = `Auto VAD starts on mic threshold ${voiceVadThresholdDescriptor(
+    el.voiceModeHint.textContent = `Auto (VAD) arms the mic, starts above ${voiceVadThresholdDescriptor(
       state.voice.vadThreshold
-    )} and stops after ${state.voice.vadSilenceMs}ms of silence.`;
+    )}, stops after ${state.voice.vadSilenceMs}ms silence, and keeps clips over ${state.voice.vadMinSpeechMs}ms.`;
     return;
   }
-  el.voiceModeHint.textContent = "Hold the button or spacebar to record.";
+  el.voiceModeHint.textContent = "Manual mode: click Start Listening, then Send to submit.";
 }
 
 function setVoiceInputMode(mode, { syncSetting = true } = {}) {
-  const normalized = mode === "vad" ? "vad" : "ptt";
+  const raw = String(mode || "").trim().toLowerCase();
+  const normalized = raw === "vad" ? "vad" : "manual";
   if (state.voice.inputMode === normalized) return;
   state.voice.inputMode = normalized;
   if (syncSetting && el.settingVoiceInputMode) {
@@ -3789,6 +3958,9 @@ function setVoiceInputMode(mode, { syncSetting = true } = {}) {
   }
   if (normalized !== "vad") {
     stopVoiceVad({ submit: false }).catch(() => {});
+    setVoiceTurnState("idle");
+  } else {
+    setVoiceTurnState(state.voice.vadActive ? "listening_armed" : "idle");
   }
   renderVoiceModeHint();
   syncVoiceUiState();
@@ -3798,6 +3970,13 @@ function updateVoiceSpeakingState() {
   const speaking = !!state.voice.audioPlaying || Number(state.voice.pendingSpeechCount || 0) > 0;
   state.voice.speaking = speaking;
   syncVoiceUiState();
+}
+
+function renderVoiceMeter(level = 0) {
+  if (!el.voiceMicMeter) return;
+  const numeric = Number(level);
+  const clamped = Number.isFinite(numeric) ? Math.max(0, Math.min(1, numeric * 8)) : 0;
+  el.voiceMicMeter.style.width = `${Math.round(clamped * 100)}%`;
 }
 
 function clearVoiceAudioQueue(stopActive = false) {
@@ -3823,6 +4002,44 @@ function abortVoiceStream() {
     } catch (_) {}
     state.voice.streamAbortController = null;
   }
+}
+
+function abortVoiceTranscription() {
+  if (state.voice.transcribeAbortController) {
+    try {
+      state.voice.transcribeAbortController.abort();
+    } catch (_) {}
+    state.voice.transcribeAbortController = null;
+  }
+}
+
+async function cancelVoiceTurn({ disarmAuto = false, reason = "" } = {}) {
+  abortVoiceStream();
+  abortVoiceTranscription();
+  abortBrowserSpeechRecognition();
+  clearVoiceAudioQueue(true);
+  state.voice.generating = false;
+  state.voice.partialAssistant = "";
+  state.voice.autoSubmitAfterStop = false;
+  setVoiceAssistantPreview("");
+  if (reason) {
+    setCliOutput(reason);
+  }
+  if (state.voice.listening || state.voice.recordingStarting) {
+    await stopVoiceListening({
+      submit: false,
+      keepStream: !!state.voice.vadActive && !disarmAuto,
+    });
+  }
+  if (disarmAuto) {
+    await stopVoiceVad({ submit: false });
+    setVoiceTurnState("idle");
+  } else if (state.voice.vadActive) {
+    setVoiceTurnState("listening_armed");
+  } else {
+    setVoiceTurnState("idle");
+  }
+  syncVoiceUiState();
 }
 
 function playNextVoiceAudioChunk() {
@@ -3919,6 +4136,7 @@ function stopVoiceWaveform() {
   ctx.moveTo(0, height / 2);
   ctx.lineTo(width, height / 2);
   ctx.stroke();
+  renderVoiceMeter(0);
 }
 
 function startVoiceWaveform() {
@@ -3952,6 +4170,7 @@ function startVoiceWaveform() {
       else ctx.lineTo(x, y);
     }
     ctx.stroke();
+    renderVoiceMeter(computeVadLevel());
     state.voice.waveformRaf = requestAnimationFrame(draw);
   };
 
@@ -3976,25 +4195,40 @@ function cleanupVoiceAudioResources() {
   state.voice.analyser = null;
   state.voice.monitoring = false;
   state.voice.vadBuffer = null;
+  state.voice.vadLevel = 0;
+  state.voice.vadSilenceCountdownMs = 0;
+  renderVoiceMeter(0);
 }
 
 function syncVoiceUiState() {
   const enabled = !!state.voice.enabled;
-  const inputMode = state.voice.inputMode === "vad" ? "vad" : "ptt";
-  setSegmentButton(el.voiceModePttBtn, inputMode === "ptt");
+  const inputMode = state.voice.inputMode === "vad" ? "vad" : "manual";
+  const inFlight = !!state.voice.generating || !!state.voice.streamAbortController || !!state.voice.transcribeAbortController;
+  const canStopNow =
+    !!state.voice.listening || !!state.voice.recordingStarting || inFlight || !!state.voice.speaking || !!state.voice.vadActive;
+  setSegmentButton(el.voiceModePttBtn, inputMode === "manual");
   setSegmentButton(el.voiceModeVadBtn, inputMode === "vad");
   renderVoiceModeHint();
   if (el.voiceStartBtn) {
-    el.voiceStartBtn.disabled = !enabled || inputMode !== "ptt" || state.voice.listening || state.voice.recordingStarting;
-    el.voiceStartBtn.classList.toggle("hidden", inputMode !== "ptt");
-    el.voiceStartBtn.classList.toggle("active", inputMode === "ptt" && state.voice.listening);
-    el.voiceStartBtn.setAttribute("aria-pressed", state.voice.listening ? "true" : "false");
+    const activeManual = inputMode === "manual" && !!state.voice.listening;
+    const activeAuto = inputMode === "vad" && !!state.voice.vadActive;
+    el.voiceStartBtn.disabled = !enabled || activeAuto || !!state.voice.recordingStarting;
+    el.voiceStartBtn.classList.remove("hidden");
+    el.voiceStartBtn.classList.toggle("active", activeManual || activeAuto);
+    el.voiceStartBtn.setAttribute("aria-pressed", activeManual || activeAuto ? "true" : "false");
+    if (inputMode === "vad") {
+      el.voiceStartBtn.textContent = "Start Listening";
+    } else if (activeManual) {
+      el.voiceStartBtn.textContent = "Send";
+    } else {
+      el.voiceStartBtn.textContent = "Start Listening";
+    }
   }
   if (el.voiceStopBtn) {
-    el.voiceStopBtn.disabled = !enabled;
-    el.voiceStopBtn.classList.toggle("hidden", inputMode !== "vad");
-    el.voiceStopBtn.textContent = state.voice.vadActive ? "Stop Auto Listen" : "Start Auto Listen";
-    el.voiceStopBtn.setAttribute("aria-pressed", state.voice.vadActive ? "true" : "false");
+    el.voiceStopBtn.disabled = !enabled || !canStopNow;
+    el.voiceStopBtn.classList.remove("hidden");
+    el.voiceStopBtn.textContent = "Stop";
+    el.voiceStopBtn.setAttribute("aria-pressed", canStopNow ? "true" : "false");
   }
   if (el.voiceMuteBtn) {
     el.voiceMuteBtn.classList.toggle("active", !!state.voice.muted);
@@ -4004,16 +4238,38 @@ function syncVoiceUiState() {
   if (el.voiceTextOnlyMode) {
     el.voiceTextOnlyMode.checked = !!state.voice.textOnlyMode;
   }
+  if (el.voiceAutoIndicator) {
+    const autoActive = enabled && inputMode === "vad" && (state.voice.vadActive || state.voice.turnState === "listening_armed");
+    el.voiceAutoIndicator.classList.toggle("hidden", !autoActive);
+    el.voiceAutoIndicator.classList.toggle("active", autoActive);
+  }
   if (el.voiceStatusText) {
     if (!enabled) el.voiceStatusText.textContent = "Voice disabled. Enable Voice Mode in Settings.";
-    else if (state.voice.listening && inputMode === "ptt")
-      el.voiceStatusText.textContent = "Listening... release to stop and send.";
-    else if (state.voice.listening && inputMode === "vad")
-      el.voiceStatusText.textContent = "Recording... pause to stop and send.";
-    else if (state.voice.generating) el.voiceStatusText.textContent = "Transcribing and generating response...";
-    else if (state.voice.speaking) el.voiceStatusText.textContent = "Playback active.";
-    else if (state.voice.vadActive) el.voiceStatusText.textContent = "Auto listening... speak to start.";
-    else el.voiceStatusText.textContent = "Voice ready.";
+    else if (state.voice.turnState === "listening_armed")
+      el.voiceStatusText.textContent = "Listening (Auto). Speak to start recording.";
+    else if (state.voice.turnState === "recording" && inputMode === "vad") {
+      const countdown = Math.max(0, Math.round(Number(state.voice.vadSilenceCountdownMs || 0)));
+      if (countdown > 0) {
+        const seconds = (countdown / 1000).toFixed(1);
+        el.voiceStatusText.textContent = `Recording (Auto). Silence countdown: ${seconds}s`;
+      } else {
+        el.voiceStatusText.textContent = "Recording (Auto)...";
+      }
+    } else if (state.voice.turnState === "recording" && !!state.voice.browserRecognition) {
+      el.voiceStatusText.textContent = "Listening (Browser STT fallback)... click Send or Stop.";
+    } else if (state.voice.turnState === "recording") {
+      el.voiceStatusText.textContent = "Recording (Manual)... click Send or Stop to cancel.";
+    } else if (state.voice.turnState === "stopping") {
+      el.voiceStatusText.textContent = "Stopping recording...";
+    } else if (state.voice.turnState === "transcribing") {
+      el.voiceStatusText.textContent = "Transcribing audio...";
+    } else if (state.voice.turnState === "responding" || state.voice.generating) {
+      el.voiceStatusText.textContent = "Generating response...";
+    } else if (state.voice.speaking) {
+      el.voiceStatusText.textContent = "Playback active.";
+    } else {
+      el.voiceStatusText.textContent = "Voice ready.";
+    }
   }
   if (el.voiceTypingIndicator) {
     el.voiceTypingIndicator.classList.toggle("hidden", !state.voice.generating);
@@ -4028,6 +4284,162 @@ function syncVoiceUiState() {
 
 function voiceCaptureSupported() {
   return !!navigator.mediaDevices?.getUserMedia && typeof window.MediaRecorder !== "undefined";
+}
+
+function browserSpeechRecognitionCtor() {
+  return window.SpeechRecognition || window.webkitSpeechRecognition || null;
+}
+
+function browserSpeechRecognitionSupported() {
+  return typeof browserSpeechRecognitionCtor() === "function";
+}
+
+function resetVoiceSttFallbackCache() {
+  state.voice.sttFallbackMode = "local";
+  state.voice.sttFallbackReason = "";
+  state.voice.sttFallbackCheckedAt = 0;
+}
+
+async function resolveVoiceSttFallback() {
+  if (!browserSpeechRecognitionSupported()) {
+    return { useBrowser: false, reason: "" };
+  }
+  const now = Date.now();
+  if (now - Number(state.voice.sttFallbackCheckedAt || 0) < 30000) {
+    return {
+      useBrowser: state.voice.sttFallbackMode === "browser",
+      reason: String(state.voice.sttFallbackReason || ""),
+    };
+  }
+  const diagnostics = await fetchVoiceDiagnostics();
+  const sttReady = !!diagnostics?.ok && !!diagnostics?.data?.stt?.ready;
+  const reason = String(diagnostics?.data?.stt?.error || diagnostics?.error || "Local STT is unavailable.").trim();
+  const useBrowser = !sttReady;
+  state.voice.sttFallbackMode = useBrowser ? "browser" : "local";
+  state.voice.sttFallbackReason = reason;
+  state.voice.sttFallbackCheckedAt = now;
+  return { useBrowser, reason };
+}
+
+function abortBrowserSpeechRecognition() {
+  const recognition = state.voice.browserRecognition;
+  if (!recognition) return;
+  state.voice.autoSubmitAfterStop = false;
+  try {
+    recognition.abort();
+  } catch (_) {}
+  state.voice.browserRecognition = null;
+  state.voice.browserTranscriptFinal = "";
+  state.voice.browserTranscriptInterim = "";
+  state.voice.listening = false;
+  state.voice.recordingStarting = false;
+}
+
+async function startBrowserSpeechListening({ announceFallback = false } = {}) {
+  const RecognitionCtor = browserSpeechRecognitionCtor();
+  if (typeof RecognitionCtor !== "function") {
+    throw new Error("Browser speech recognition is not available in this browser.");
+  }
+  if (!state.voice.enabled) {
+    showToast("Enable Voice Mode in Settings first.");
+    return;
+  }
+  if (state.voice.browserRecognition || state.voice.listening || state.voice.recordingStarting) return;
+
+  state.voice.recordingStarting = true;
+  clearVoiceAudioQueue(true);
+  beginVoiceTurn("browser stt fallback");
+  setVoiceCrisisOverlay(false);
+  setVoiceAssistantPreview("");
+  setVoiceTranscriptPreview("");
+  const turnId = state.voice.activeTurnId || nextVoiceTurnId();
+  state.voice.activeTurnId = turnId;
+
+  const recognition = new RecognitionCtor();
+  recognition.lang = String(el.settingVoiceSttLanguage?.value || "en").trim() || "en";
+  recognition.interimResults = true;
+  recognition.continuous = true;
+  recognition.maxAlternatives = 1;
+  state.voice.browserRecognition = recognition;
+  state.voice.browserTranscriptFinal = "";
+  state.voice.browserTranscriptInterim = "";
+  state.voice.autoSubmitAfterStop = true;
+  state.voice.keepStreamOnStop = false;
+  state.voice.listening = true;
+  state.voice.generating = false;
+  state.voice.recordingStarting = false;
+  transitionVoiceTurn("start_recording");
+  syncVoiceUiState();
+  if (announceFallback) {
+    showToast("Using browser speech recognition fallback.");
+  }
+
+  recognition.onresult = (event) => {
+    if (state.voice.browserRecognition !== recognition) return;
+    let finalText = String(state.voice.browserTranscriptFinal || "");
+    let interimText = "";
+    for (let i = Number(event?.resultIndex || 0); i < Number(event?.results?.length || 0); i += 1) {
+      const row = event.results[i];
+      const transcript = String(row?.[0]?.transcript || "").trim();
+      if (!transcript) continue;
+      if (row?.isFinal) {
+        finalText = `${finalText} ${transcript}`.trim();
+      } else {
+        interimText = `${interimText} ${transcript}`.trim();
+      }
+    }
+    state.voice.browserTranscriptFinal = finalText;
+    state.voice.browserTranscriptInterim = interimText;
+    setVoiceTranscriptPreview(`${finalText} ${interimText}`.trim());
+  };
+
+  recognition.onerror = (event) => {
+    const code = String(event?.error || "").trim().toLowerCase();
+    if (!code || code === "aborted") return;
+    setCliOutput(`Browser STT error: ${code}`);
+  };
+
+  recognition.onend = () => {
+    if (state.voice.browserRecognition !== recognition) return;
+    state.voice.browserRecognition = null;
+    state.voice.listening = false;
+    state.voice.recordingStarting = false;
+    const transcript = `${state.voice.browserTranscriptFinal} ${state.voice.browserTranscriptInterim}`.trim();
+    state.voice.browserTranscriptFinal = "";
+    state.voice.browserTranscriptInterim = "";
+    transitionVoiceTurn("complete");
+    if (state.voice.vadActive) {
+      transitionVoiceTurn("arm");
+    }
+    syncVoiceUiState();
+    if (!state.voice.autoSubmitAfterStop) return;
+    if (!transcript) {
+      setCliOutput("No speech captured from microphone.");
+      setVoiceTranscriptPreview("No speech captured.");
+      return;
+    }
+    setVoiceTranscriptPreview(transcript);
+    if (el.memoryChatInput) {
+      el.memoryChatInput.value = transcript;
+    }
+    updateIntentPreview();
+    handleVoiceChatStream(transcript, { turnId }).catch((err) => {
+      const message = err?.message || "Voice stream failed.";
+      setCliOutput(message);
+      pushChatMessage("system", message, { session_id: state.selectedChatSessionId });
+    });
+  };
+
+  try {
+    recognition.start();
+  } catch (err) {
+    state.voice.browserRecognition = null;
+    state.voice.listening = false;
+    state.voice.recordingStarting = false;
+    setVoiceTurnState(state.voice.vadActive ? "listening_armed" : "idle");
+    syncVoiceUiState();
+    throw new Error(err?.message || "Browser speech recognition failed to start.");
+  }
 }
 
 async function ensureVoiceStream() {
@@ -4080,6 +4492,11 @@ async function startVoiceRecording({ keepStream = false } = {}) {
     state.voice.listening = true;
     state.voice.generating = false;
     state.voice.recordingStarting = false;
+    state.voice.vadSpeechMs = 0;
+    state.voice.vadLastFrameAt = 0;
+    state.voice.vadSilenceSince = 0;
+    state.voice.vadSilenceCountdownMs = 0;
+    transitionVoiceTurn("start_recording");
     setVoiceTranscriptPreview("");
     syncVoiceUiState();
     startVoiceWaveform();
@@ -4092,6 +4509,7 @@ async function startVoiceRecording({ keepStream = false } = {}) {
     recorder.onerror = () => {
       setCliOutput("Voice recording failed.");
       state.voice.listening = false;
+      setVoiceTurnState(state.voice.vadActive ? "listening_armed" : "idle");
       syncVoiceUiState();
     };
     recorder.onstop = async () => {
@@ -4105,6 +4523,10 @@ async function startVoiceRecording({ keepStream = false } = {}) {
       } else if (!state.voice.monitoring) {
         stopVoiceWaveform();
       }
+      transitionVoiceTurn("complete");
+      if (state.voice.vadActive) {
+        transitionVoiceTurn("arm");
+      }
       syncVoiceUiState();
       if (!state.voice.autoSubmitAfterStop) return;
       const blob = new Blob(chunks, { type: mimeType });
@@ -4116,9 +4538,17 @@ async function startVoiceRecording({ keepStream = false } = {}) {
       try {
         await transcribeVoiceBlob(blob);
       } catch (err) {
+        if (err?.name === "AbortError") {
+          return;
+        }
         const message = err?.message || "Voice transcription failed.";
-        setCliOutput(message);
-        pushChatMessage("system", message, { session_id: state.selectedChatSessionId });
+        const hint = voiceSttRecoveryHint(message);
+        const detail = hint ? `${message}\n${hint}` : message;
+        setCliOutput(detail);
+        pushChatMessage("system", detail, { session_id: state.selectedChatSessionId });
+        if (hint) {
+          showToast("Voice STT is not ready. Check Settings.");
+        }
       }
     };
     recorder.start(250);
@@ -4128,6 +4558,7 @@ async function startVoiceRecording({ keepStream = false } = {}) {
     state.voice.listening = false;
     state.voice.recorder = null;
     state.voice.recordingStarting = false;
+    setVoiceTurnState(state.voice.vadActive ? "listening_armed" : "idle");
     syncVoiceUiState();
     const message = err?.message || "Microphone access failed.";
     setCliOutput(message);
@@ -4137,16 +4568,30 @@ async function startVoiceRecording({ keepStream = false } = {}) {
 
 async function stopVoiceListening({ submit = true, keepStream = false } = {}) {
   const recorder = state.voice.recorder;
+  const browserRecognition = state.voice.browserRecognition;
   state.voice.autoSubmitAfterStop = !!submit;
   state.voice.keepStreamOnStop = !!keepStream;
   state.voice.listening = false;
   state.voice.recordingStarting = false;
+  state.voice.vadSilenceCountdownMs = 0;
+  transitionVoiceTurn("stop_request");
   syncVoiceUiState();
+  if (browserRecognition) {
+    try {
+      browserRecognition.stop();
+    } catch (_) {
+      abortBrowserSpeechRecognition();
+      setVoiceTurnState(state.voice.vadActive ? "listening_armed" : "idle");
+      syncVoiceUiState();
+    }
+    return;
+  }
   if (!recorder) {
     if (!keepStream && !state.voice.monitoring) {
       cleanupVoiceAudioResources();
       stopVoiceWaveform();
     }
+    setVoiceTurnState(state.voice.vadActive ? "listening_armed" : "idle");
     return;
   }
   try {
@@ -4158,12 +4603,20 @@ async function stopVoiceListening({ submit = true, keepStream = false } = {}) {
     }
     state.voice.recorder = null;
     state.voice.chunks = [];
+    setVoiceTurnState(state.voice.vadActive ? "listening_armed" : "idle");
     syncVoiceUiState();
   }
 }
 
 async function startVoiceListening() {
-  if (state.voice.inputMode !== "ptt") return;
+  if (state.voice.inputMode !== "manual") return;
+  const fallback = await resolveVoiceSttFallback().catch(() => ({ useBrowser: false, reason: "" }));
+  if (fallback.useBrowser) {
+    const reason = String(fallback.reason || "Local STT is unavailable.").trim();
+    setCliOutput(`${reason}\nUsing browser speech recognition fallback.`);
+    await startBrowserSpeechListening({ announceFallback: true });
+    return;
+  }
   await startVoiceRecording({ keepStream: false });
 }
 
@@ -4177,15 +4630,28 @@ async function startVoiceVad() {
     setCliOutput("Voice capture is not supported in this browser.");
     return;
   }
+  const fallback = await resolveVoiceSttFallback().catch(() => ({ useBrowser: false, reason: "" }));
+  if (fallback.useBrowser) {
+    const reason = String(fallback.reason || "Local STT is unavailable.").trim();
+    setVoiceInputMode("manual");
+    setCliOutput(`${reason}\nAuto (VAD) requires local STT. Switched to Manual mode with browser speech fallback.`);
+    await startBrowserSpeechListening({ announceFallback: true });
+    return;
+  }
   try {
     await ensureVoiceStream();
     if (!state.voice.analyser) {
       throw new Error("Audio analyser unavailable. Auto VAD requires Web Audio support.");
     }
     state.voice.vadActive = true;
-    state.voice.vadCooldownUntil = 0;
+    state.voice.vadAboveThresholdSince = 0;
+    state.voice.vadSilenceSince = 0;
+    state.voice.vadSpeechMs = 0;
+    state.voice.vadLastFrameAt = 0;
+    state.voice.vadSilenceCountdownMs = 0;
     state.voice.vadLastSpeech = 0;
     state.voice.monitoring = true;
+    setVoiceTurnState("listening_armed");
     renderVoiceModeHint();
     syncVoiceUiState();
     startVoiceWaveform();
@@ -4216,6 +4682,8 @@ async function stopVoiceVad({ submit = true } = {}) {
     cleanupVoiceAudioResources();
     stopVoiceWaveform();
   }
+  setVoiceTurnState("idle");
+  state.voice.vadSilenceCountdownMs = 0;
   syncVoiceUiState();
 }
 
@@ -4248,28 +4716,58 @@ function startVoiceVadLoop() {
     }
     const now = performance.now();
     state.voice.vadLevel = computeVadLevel();
-    const threshold = state.voice.vadThreshold;
-    if (now < state.voice.vadCooldownUntil) {
-      state.voice.vadRaf = requestAnimationFrame(loop);
-      return;
-    }
     if (!state.voice.listening && !state.voice.recordingStarting) {
-      if (state.voice.vadLevel >= threshold) {
-        state.voice.vadLastSpeech = now;
-        state.voice.vadCooldownUntil = 0;
-        startVoiceRecording({ keepStream: true }).catch((err) => {
-          setCliOutput(err?.message || "Auto VAD recording failed.");
-        });
-      }
-    } else if (state.voice.listening) {
-      if (state.voice.vadLevel >= threshold) {
-        state.voice.vadLastSpeech = now;
-      }
-      if (now - state.voice.vadLastSpeech >= state.voice.vadSilenceMs) {
-        state.voice.vadCooldownUntil = now + 250;
-        stopVoiceListening({ submit: true, keepStream: true });
+      if (state.voice.turnState !== "transcribing" && state.voice.turnState !== "responding") {
+        setVoiceTurnState("listening_armed");
       }
     }
+
+    const frame = evaluateVadFrame({
+      nowMs: now,
+      level: state.voice.vadLevel,
+      threshold: state.voice.vadThreshold,
+      silenceMs: state.voice.vadSilenceMs,
+      minSpeechMs: state.voice.vadMinSpeechMs,
+      debounceMs: VOICE_VAD_START_DEBOUNCE_MS,
+      turnState: state.voice.turnState,
+      aboveSinceMs: state.voice.vadAboveThresholdSince,
+      silenceSinceMs: state.voice.vadSilenceSince,
+      speechMs: state.voice.vadSpeechMs,
+      lastFrameMs: state.voice.vadLastFrameAt,
+    });
+    state.voice.vadAboveThresholdSince = frame.aboveSinceMs;
+    state.voice.vadSilenceSince = frame.silenceSinceMs;
+    state.voice.vadSpeechMs = frame.speechMs;
+    state.voice.vadLastFrameAt = frame.lastFrameMs;
+    const priorCountdownMs = Number(state.voice.vadSilenceCountdownMs || 0);
+    state.voice.vadSilenceCountdownMs = frame.silenceCountdownMs;
+    if (Math.abs(priorCountdownMs - state.voice.vadSilenceCountdownMs) >= 40) {
+      syncVoiceUiState();
+    }
+
+    if (frame.bargeInSignal && (state.voice.speaking || state.voice.generating)) {
+      handleVoiceBargeIn("speech detected while assistant audio was active");
+    }
+
+    if (frame.shouldStartRecording && !state.voice.listening && !state.voice.recordingStarting) {
+      startVoiceRecording({ keepStream: true }).catch((err) => {
+        setCliOutput(err?.message || "Auto VAD recording failed.");
+      });
+    } else if (frame.shouldStopRecording && state.voice.listening) {
+      const keep = frame.shouldAccept;
+      stopVoiceListening({ submit: keep, keepStream: true }).catch(() => {});
+      if (!keep) {
+        setCliOutput(
+          `Ignored short noise burst (${Math.round(state.voice.vadSpeechMs)}ms < ${state.voice.vadMinSpeechMs}ms).`
+        );
+        setVoiceTranscriptPreview("Ignored short noise burst.");
+      }
+      state.voice.vadSpeechMs = 0;
+      state.voice.vadSilenceSince = 0;
+      state.voice.vadAboveThresholdSince = 0;
+      state.voice.vadSilenceCountdownMs = 0;
+    }
+
     state.voice.vadRaf = requestAnimationFrame(loop);
   };
   state.voice.vadRaf = requestAnimationFrame(loop);
@@ -4347,6 +4845,21 @@ async function streamJsonSse(path, payload, onEvent, options = {}) {
 function formatLatency(ms) {
   if (!Number.isFinite(ms)) return "-";
   return `${Math.round(ms)}ms`;
+}
+
+function voiceSttRecoveryHint(errorMessage) {
+  const message = String(errorMessage || "").trim();
+  if (!message) return "";
+  if (/Local command not found:\s*whisper/i.test(message) || /Whisper CLI command not found/i.test(message)) {
+    return "Voice STT is set to Whisper CLI, but `whisper` is not installed. Install Whisper CLI or change STT engine in Settings.";
+  }
+  if (/Voice STT is disabled/i.test(message)) {
+    return "Voice STT is disabled. Open Settings and choose an STT engine, or use typed chat input.";
+  }
+  if (/whisper\\.cpp model path is missing|whisper\\.cpp model path not found/i.test(message)) {
+    return "whisper.cpp is selected, but model path is invalid. Set a valid model path in Settings.";
+  }
+  return "";
 }
 
 function renderVoiceDiagnostics(checks, statusText) {
@@ -4551,6 +5064,7 @@ async function applyAdvancedChatResult(result, fallbackText) {
     pushChatMessage("user", result.user_turn.text || text, {
       message_id: result.user_turn.message_id,
       session_id: result.user_turn.session_id || state.selectedChatSessionId,
+      source: "conversation",
     });
   } else if (text) {
     pushChatMessage("user", text, { session_id: state.selectedChatSessionId });
@@ -4570,6 +5084,7 @@ async function applyAdvancedChatResult(result, fallbackText) {
   pushChatMessage(kind, assistantText, {
     message_id: result.assistant_turn?.message_id,
     session_id: result.assistant_turn?.session_id || state.selectedChatSessionId,
+    source: "conversation",
     response,
     citations: response.citations || [],
     memory_insight: response.memory_insight || {},
@@ -4664,6 +5179,7 @@ async function handleVoiceChatStream(rawMessage, options = {}) {
   state.voice.activeTurnId = turnId;
   state.voice.ttsMode = "none";
   state.voice.generating = true;
+  transitionVoiceTurn("respond_start");
   state.voice.partialAssistant = "";
   state.voice.ttsFallbackWarned = false;
   setVoiceAssistantPreview("");
@@ -4758,6 +5274,10 @@ async function handleVoiceChatStream(rawMessage, options = {}) {
       state.voice.streamAbortController = null;
     }
     state.voice.generating = false;
+    transitionVoiceTurn("complete");
+    if (state.voice.vadActive) {
+      transitionVoiceTurn("arm");
+    }
     syncVoiceUiState();
   }
 
@@ -4783,6 +5303,7 @@ async function transcribeVoiceBlob(blob) {
   const turnId = state.voice.activeTurnId || nextVoiceTurnId();
   state.voice.activeTurnId = turnId;
   state.voice.generating = true;
+  transitionVoiceTurn("transcribe_start");
   syncVoiceUiState();
   const form = new FormData();
   form.append("audio", blob, `voice_${Date.now()}.webm`);
@@ -4790,8 +5311,10 @@ async function transcribeVoiceBlob(blob) {
   if (state.selectedChatSessionId) {
     form.append("session_id", state.selectedChatSessionId);
   }
+  const controller = new AbortController();
+  state.voice.transcribeAbortController = controller;
   try {
-    const result = await apiMultipart("/api/voice/transcribe", form);
+    const result = await apiMultipart("/api/voice/transcribe", form, { signal: controller.signal });
     const transcript = String(result?.text || "").trim();
     if (turnId !== state.voice.activeTurnId) {
       return;
@@ -4806,7 +5329,16 @@ async function transcribeVoiceBlob(blob) {
     updateIntentPreview();
     await handleVoiceChatStream(transcript, { turnId });
   } finally {
+    if (state.voice.transcribeAbortController === controller) {
+      state.voice.transcribeAbortController = null;
+    }
     state.voice.generating = false;
+    if (state.voice.turnState === "transcribing") {
+      transitionVoiceTurn("complete");
+      if (state.voice.vadActive) {
+        transitionVoiceTurn("arm");
+      }
+    }
     syncVoiceUiState();
   }
 }
@@ -5288,9 +5820,13 @@ function wireActions() {
         upload_vision_model: String(el.settingUploadVisionModel?.value || "").trim(),
         voice_mode_enabled: el.settingVoiceModeEnabled ? !!el.settingVoiceModeEnabled.checked : false,
         voice_text_only_mode: el.settingVoiceTextOnlyMode ? !!el.settingVoiceTextOnlyMode.checked : false,
-        voice_input_mode: String(el.settingVoiceInputMode?.value || "ptt").trim().toLowerCase() || "ptt",
+        voice_input_mode: String(el.settingVoiceInputMode?.value || "manual").trim().toLowerCase() || "manual",
         voice_vad_threshold: clampVoiceVadThreshold(el.settingVoiceVadThreshold?.value, 0.035),
         voice_vad_silence_ms: clampVoiceVadSilence(el.settingVoiceVadSilenceMs?.value, 900),
+        voice_vad_min_speech_ms: clampVoiceVadMinSpeech(el.settingVoiceVadMinSpeechMs?.value, 300),
+        vad_threshold: clampVoiceVadThreshold(el.settingVoiceVadThreshold?.value, 0.035),
+        vad_silence_ms: clampVoiceVadSilence(el.settingVoiceVadSilenceMs?.value, 900),
+        vad_min_speech_ms: clampVoiceVadMinSpeech(el.settingVoiceVadMinSpeechMs?.value, 300),
         voice_style: String(el.settingVoiceStyle?.value || "warm").trim().toLowerCase() || "warm",
         voice_rate: clampVoiceRate(el.settingVoiceRate?.value, 100),
         voice_stt_engine: String(el.settingVoiceSttEngine?.value || "none").trim().toLowerCase() || "none",
@@ -5339,14 +5875,21 @@ function wireActions() {
     state.voice.vadSilenceMs = clampVoiceVadSilence(el.settingVoiceVadSilenceMs?.value, 900);
     renderVoiceModeHint();
   });
+  el.settingVoiceVadMinSpeechMs?.addEventListener("change", () => {
+    state.voice.vadMinSpeechMs = clampVoiceVadMinSpeech(el.settingVoiceVadMinSpeechMs?.value, 300);
+    renderVoiceModeHint();
+  });
   el.settingVoiceModeEnabled?.addEventListener("change", () => {
     state.voice.enabled = !!el.settingVoiceModeEnabled?.checked;
     if (!state.voice.enabled) {
       abortVoiceStream();
+      abortVoiceTranscription();
+      abortBrowserSpeechRecognition();
       stopVoiceVad({ submit: false }).catch(() => {});
       stopVoiceListening({ submit: false, keepStream: false }).catch(() => {});
       clearVoiceAudioQueue(true);
       state.voice.generating = false;
+      setVoiceTurnState("idle");
       setVoiceAssistantPreview("");
       setVoiceTranscriptPreview("");
       setVoiceCrisisOverlay(false);
@@ -5354,7 +5897,7 @@ function wireActions() {
     syncVoiceUiState();
   });
   el.settingVoiceInputMode?.addEventListener("change", () => {
-    setVoiceInputMode(el.settingVoiceInputMode?.value || "ptt", { syncSetting: false });
+    setVoiceInputMode(el.settingVoiceInputMode?.value || "manual", { syncSetting: false });
   });
   el.settingVoiceTextOnlyMode?.addEventListener("change", () => {
     state.voice.textOnlyMode = !!el.settingVoiceTextOnlyMode?.checked;
@@ -5400,73 +5943,35 @@ function wireActions() {
   });
   el.memoryChatInput?.addEventListener("input", () => updateIntentPreview());
 
-  el.voiceModePttBtn?.addEventListener("click", () => setVoiceInputMode("ptt"));
+  el.voiceModePttBtn?.addEventListener("click", () => setVoiceInputMode("manual"));
   el.voiceModeVadBtn?.addEventListener("click", () => setVoiceInputMode("vad"));
 
-  let pttHeld = false;
-  const shouldHandlePttKey = (evt) => {
-    if (state.voice.inputMode !== "ptt") return false;
-    if (evt.key !== " " && evt.key !== "Spacebar" && evt.code !== "Space") return false;
-    const target = evt.target;
-    if (!target) return true;
-    if (target.isContentEditable) return false;
-    const tag = String(target.tagName || "").toUpperCase();
-    return tag !== "INPUT" && tag !== "TEXTAREA";
-  };
-  const startPtt = () => {
-    if (state.voice.inputMode !== "ptt") return;
-    if (pttHeld) return;
-    pttHeld = true;
-    startVoiceListening().catch((err) => setCliOutput(err?.message || "Voice start failed."));
-  };
-  const stopPtt = () => {
-    if (!pttHeld) return;
-    pttHeld = false;
-    stopVoiceListening({ submit: true }).catch((err) => setCliOutput(err?.message || "Voice stop failed."));
-  };
-  el.voiceStartBtn?.addEventListener("pointerdown", (evt) => {
-    if (state.voice.inputMode !== "ptt") return;
-    evt.preventDefault();
-    startPtt();
-  });
-  el.voiceStartBtn?.addEventListener("pointerup", (evt) => {
-    if (state.voice.inputMode !== "ptt") return;
-    evt.preventDefault();
-    stopPtt();
-  });
-  el.voiceStartBtn?.addEventListener("pointerleave", () => stopPtt());
-  el.voiceStartBtn?.addEventListener("pointercancel", () => stopPtt());
-  el.voiceStartBtn?.addEventListener("keydown", (evt) => {
-    if (!shouldHandlePttKey(evt)) return;
-    evt.preventDefault();
-    startPtt();
-  });
-  el.voiceStartBtn?.addEventListener("keyup", (evt) => {
-    if (!shouldHandlePttKey(evt)) return;
-    evt.preventDefault();
-    stopPtt();
-  });
-  document.addEventListener("keydown", (evt) => {
-    if (!shouldHandlePttKey(evt) || evt.repeat) return;
-    evt.preventDefault();
-    startPtt();
-  });
-  document.addEventListener("keyup", (evt) => {
-    if (!shouldHandlePttKey(evt)) return;
-    evt.preventDefault();
-    stopPtt();
+  el.voiceStartBtn?.addEventListener("click", async () => {
+    try {
+      if (state.voice.inputMode === "vad") {
+        if (state.voice.vadActive) return;
+        await startVoiceVad();
+        return;
+      }
+      if (state.voice.listening) {
+        await stopVoiceListening({ submit: true, keepStream: false });
+        return;
+      }
+      await startVoiceListening();
+    } catch (err) {
+      setCliOutput(err?.message || "Voice start failed.");
+    }
   });
 
   el.voiceStopBtn?.addEventListener("click", async () => {
     try {
-      if (state.voice.inputMode !== "vad") return;
-      if (state.voice.vadActive) {
-        await stopVoiceVad({ submit: true });
-      } else {
-        await startVoiceVad();
+      if (state.voice.inputMode === "vad") {
+        await cancelVoiceTurn({ disarmAuto: true, reason: "Voice stopped by user." });
+        return;
       }
+      await cancelVoiceTurn({ disarmAuto: false, reason: "Voice turn canceled." });
     } catch (err) {
-      setCliOutput(err?.message || "Voice auto mode failed.");
+      setCliOutput(err?.message || "Voice stop failed.");
     }
   });
   el.voiceMuteBtn?.addEventListener("click", () => {
@@ -5518,9 +6023,32 @@ function wireActions() {
     }
   });
 
-  el.memoryClearHistoryBtn?.addEventListener("click", () => {
-    state.chatMessages = [];
-    renderChatHistory();
+  el.memoryClearHistoryBtn?.addEventListener("click", async () => {
+    const sessionId = String(state.selectedChatSessionId || "").trim();
+    const prompt = sessionId
+      ? `Clear this conversation (${sessionId})? This cannot be undone.`
+      : "Clear all conversations? This cannot be undone.";
+    if (!window.confirm(prompt)) return;
+    try {
+      const result = await api("/api/memory/conversations/clear", {
+        method: "POST",
+        body: JSON.stringify({ session_id: sessionId, actor: "web_ui" }),
+      });
+      if (sessionId) {
+        state.chatMessages = state.chatMessages.filter((row) => String(row?.session_id || "") !== sessionId);
+      } else {
+        state.chatMessages = [];
+      }
+      state.selectedChatSessionId = "";
+      localStorage.removeItem("dcc_chat_session_id");
+      await refreshMemory();
+      renderChatHistory();
+      const removedCount = Number(result?.removed_count || 0);
+      showToast(removedCount > 0 ? `Cleared ${removedCount} messages.` : "No messages were removed.");
+    } catch (err) {
+      setCliOutput(err.message);
+      pushChatMessage("system", err.message);
+    }
   });
 
   el.memoryChatRefreshBtn?.addEventListener("click", () => {
@@ -5732,6 +6260,8 @@ function wireActions() {
 
   window.addEventListener("beforeunload", () => {
     abortVoiceStream();
+    abortVoiceTranscription();
+    stopVoiceVad({ submit: false }).catch(() => {});
     stopVoiceListening({ submit: false }).catch(() => {});
     clearVoiceAudioQueue(true);
     cleanupVoiceAudioResources();
