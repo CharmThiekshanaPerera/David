@@ -15,7 +15,7 @@ import threading
 import time
 import uuid
 import zipfile
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -222,6 +222,11 @@ class ControlSettings:
     voice_mode_enabled: bool = False
     voice_text_only_mode: bool = False
     voice_input_mode: str = "manual"
+    voice_continuous_mode: bool = False
+    voice_post_reply_delay_ms: int = 450
+    voice_stop_phrases: list[str] = field(
+        default_factory=lambda: ["stop listening", "end chat", "bye david"]
+    )
     voice_vad_threshold: float = 0.035
     voice_vad_silence_ms: int = 900
     voice_vad_min_speech_ms: int = 300
@@ -291,6 +296,33 @@ class ControlSettings:
             except (TypeError, ValueError):
                 value = default
             return max(0, min(100, value))
+
+        def _normalize_stop_phrases(raw: Any) -> list[str]:
+            default_phrases = ["stop listening", "end chat", "bye david"]
+            parts: list[str] = []
+            if isinstance(raw, list):
+                parts = [str(item or "") for item in raw]
+            elif isinstance(raw, str):
+                parts = raw.split(",")
+            elif raw is not None:
+                parts = [str(raw)]
+            else:
+                parts = []
+
+            normalized: list[str] = []
+            seen: set[str] = set()
+            for item in parts:
+                phrase = str(item or "").strip().lower()
+                if not phrase:
+                    continue
+                phrase = phrase[:40]
+                if not phrase or phrase in seen:
+                    continue
+                seen.add(phrase)
+                normalized.append(phrase)
+                if len(normalized) >= 12:
+                    break
+            return normalized or default_phrases
         return cls(
             safe_mode=bool(data.get("safe_mode", False)),
             rate_limit_seconds=max(0, int(data.get("rate_limit_seconds", 3))),
@@ -315,6 +347,9 @@ class ControlSettings:
             voice_mode_enabled=bool(data.get("voice_mode_enabled", False)),
             voice_text_only_mode=bool(data.get("voice_text_only_mode", False)),
             voice_input_mode=voice_input_mode,
+            voice_continuous_mode=bool(data.get("voice_continuous_mode", False)),
+            voice_post_reply_delay_ms=_bounded("voice_post_reply_delay_ms", 450, 300, 800),
+            voice_stop_phrases=_normalize_stop_phrases(data.get("voice_stop_phrases")),
             voice_vad_threshold=_bounded_float(
                 "voice_vad_threshold" if "voice_vad_threshold" in data else "vad_threshold",
                 0.035,

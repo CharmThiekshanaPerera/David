@@ -495,6 +495,9 @@ def test_api_settings_voice_defaults(memory_client) -> None:
     assert payload["voice_mode_enabled"] is False
     assert payload["voice_text_only_mode"] is False
     assert payload["voice_input_mode"] == "manual"
+    assert payload["voice_continuous_mode"] is False
+    assert int(payload["voice_post_reply_delay_ms"]) == 450
+    assert payload["voice_stop_phrases"] == ["stop listening", "end chat", "bye david"]
     assert float(payload["voice_vad_threshold"]) == 0.035
     assert int(payload["voice_vad_silence_ms"]) == 900
     assert int(payload["voice_vad_min_speech_ms"]) == 300
@@ -515,6 +518,9 @@ def test_api_settings_toggle_voice_mode(memory_client) -> None:
             "voice_mode_enabled": True,
             "voice_text_only_mode": True,
             "voice_input_mode": "vad",
+            "voice_continuous_mode": True,
+            "voice_post_reply_delay_ms": 700,
+            "voice_stop_phrases": [" stop listening ", "Bye David", "bye david", "", "end chat"],
             "voice_vad_threshold": 0.045,
             "voice_vad_silence_ms": 1100,
             "voice_vad_min_speech_ms": 420,
@@ -537,6 +543,9 @@ def test_api_settings_toggle_voice_mode(memory_client) -> None:
     assert data["voice_mode_enabled"] is True
     assert data["voice_text_only_mode"] is True
     assert data["voice_input_mode"] == "vad"
+    assert data["voice_continuous_mode"] is True
+    assert int(data["voice_post_reply_delay_ms"]) == 700
+    assert data["voice_stop_phrases"] == ["stop listening", "bye david", "end chat"]
     assert float(data["voice_vad_threshold"]) == 0.045
     assert int(data["voice_vad_silence_ms"]) == 1100
     assert int(data["voice_vad_min_speech_ms"]) == 420
@@ -567,6 +576,24 @@ def test_api_settings_voice_vad_aliases_and_ptt_back_compat(memory_client) -> No
     assert float(data["voice_vad_threshold"]) == 0.055
     assert int(data["voice_vad_silence_ms"]) == 1250
     assert int(data["voice_vad_min_speech_ms"]) == 520
+
+
+def test_api_settings_voice_stop_phrases_persist_and_normalize(memory_client) -> None:
+    client, _config = memory_client
+    updated = client.post(
+        "/api/settings",
+        json={
+            "voice_stop_phrases": " stop listening , END CHAT, bye david, bye david,   ",
+        },
+    )
+    assert updated.status_code == 200
+    payload = updated.get_json()["data"]
+    assert payload["voice_stop_phrases"] == ["stop listening", "end chat", "bye david"]
+
+    refreshed = client.get("/api/settings")
+    assert refreshed.status_code == 200
+    refreshed_payload = refreshed.get_json()["data"]
+    assert refreshed_payload["voice_stop_phrases"] == ["stop listening", "end chat", "bye david"]
 
 
 def test_api_settings_personality_calibration_defaults_present(memory_client) -> None:

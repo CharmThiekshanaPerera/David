@@ -41,3 +41,57 @@ def test_voice_ui_cancel_path_aborts_stream_and_transcription() -> None:
     assert "abortVoiceTranscription();" in body
     assert "stopVoiceListening({" in body
     assert "stopVoiceVad({ submit: false })" in body
+
+
+def test_voice_ui_continual_mode_rearm_and_echo_guard_hooks_present() -> None:
+    app_js = Path("web/static/app.js").read_text(encoding="utf-8")
+    assert "function scheduleContinualRearm(" in app_js
+    assert "function voiceEchoGuardActive()" in app_js
+    assert "scheduleContinualRearm(\"reply_complete\")" in app_js
+    assert "voiceEchoGuardActive()" in app_js
+    assert "voice_post_reply_delay_ms" in app_js
+
+
+def test_voice_ui_continual_pause_resume_end_controls_present() -> None:
+    app_js = Path("web/static/app.js").read_text(encoding="utf-8")
+    assert "pauseContinualVoiceChat" in app_js
+    assert "resumeContinualVoiceChat" in app_js
+    assert "stopContinualVoiceChat" in app_js
+    assert "voicePauseBtn" in app_js
+    assert "voiceResumeBtn" in app_js
+    assert "voiceEndConversationBtn" in app_js
+
+
+def test_voice_ui_continual_barge_in_and_confirmation_gates_present() -> None:
+    app_js = Path("web/static/app.js").read_text(encoding="utf-8")
+    assert "handleVoiceBargeIn(\"speech detected while assistant audio was active\")" in app_js
+    assert "abortVoiceStream();" in app_js
+    assert "clearVoiceAudioQueue(true);" in app_js
+    assert "window.confirm(`Run this goal from voice transcript?" in app_js
+    assert "overwrite_confirmation_required" in app_js
+
+
+def test_voice_ui_continual_controls_visible_in_html() -> None:
+    index_html = Path("web/static/index.html").read_text(encoding="utf-8")
+    assert "settingVoiceContinuousMode" in index_html
+    assert "settingVoicePostReplyDelayMs" in index_html
+    assert "settingVoiceStopPhrases" in index_html
+    assert "settingVoiceStopPhrasesResetBtn" in index_html
+    assert "voiceContinuousMode" in index_html
+    assert "voicePauseBtn" in index_html
+    assert "voiceResumeBtn" in index_html
+    assert "voiceEndConversationBtn" in index_html
+    assert "voiceContinualIndicator" in index_html
+
+
+def test_voice_ui_stop_phrases_bound_to_backend_not_local_storage() -> None:
+    app_js = Path("web/static/app.js").read_text(encoding="utf-8")
+    assert "voice_stop_phrases" in app_js
+    assert "dcc_voice_stop_phrases" not in app_js
+    assert "settingVoiceStopPhrasesResetBtn" in app_js
+
+
+def test_voice_ui_stop_phrase_matching_exits_continual_mode_deterministically() -> None:
+    app_js = Path("web/static/app.js").read_text(encoding="utf-8")
+    assert "matchesVoiceStopPhrase(transcript)" in app_js
+    assert "stopContinualVoiceChat(\"Continual voice chat stopped by phrase.\")" in app_js

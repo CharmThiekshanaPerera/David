@@ -1191,7 +1191,7 @@ code {
 }
 .voice-control-row {
   display: grid;
-  grid-template-columns: repeat(3, auto) minmax(170px, 1fr);
+  grid-template-columns: repeat(6, auto) minmax(170px, 1fr) minmax(170px, 1fr);
   gap: 0.38rem;
   align-items: center;
 }
@@ -1277,6 +1277,14 @@ code {
 #voiceAutoIndicator.active {
   border-color: color-mix(in oklab, var(--voice-listening) 60%, var(--line));
   color: color-mix(in oklab, var(--voice-listening) 85%, var(--text));
+}
+#voiceContinualIndicator.active {
+  border-color: color-mix(in oklab, var(--voice-generating) 60%, var(--line));
+  color: color-mix(in oklab, var(--voice-generating) 82%, var(--text));
+}
+#voicePausedIndicator.active {
+  border-color: color-mix(in oklab, var(--warning) 62%, var(--line));
+  color: color-mix(in oklab, var(--warning) 82%, var(--text));
 }
 .voice-assistant-preview {
   border: 1px solid color-mix(in oklab, var(--voice-generating) 48%, var(--line));
@@ -1794,7 +1802,7 @@ code {
   #tab-cli .voice-mode-row .segmented { width: 100%; justify-content: center; }
   #tab-cli #voiceModeHint { text-align: center; }
   #tab-cli .voice-control-row {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
   #tab-cli .voice-control-row .check {
     justify-self: start;

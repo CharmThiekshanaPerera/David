@@ -89,6 +89,11 @@ const state = {
     muted: false,
     textOnlyMode: false,
     inputMode: "manual",
+    continuousMode: false,
+    continuousPaused: false,
+    postReplyDelayMs: 450,
+    stopPhrases: ["stop listening", "end chat", "bye david"],
+    rearmTimer: 0,
     turnState: "idle",
     vadThreshold: 0.035,
     vadSilenceMs: 900,
@@ -232,11 +237,15 @@ const el = {
   settingUploadVisionModel: document.getElementById("settingUploadVisionModel"),
   settingVoiceModeEnabled: document.getElementById("settingVoiceModeEnabled"),
   settingVoiceTextOnlyMode: document.getElementById("settingVoiceTextOnlyMode"),
+  settingVoiceContinuousMode: document.getElementById("settingVoiceContinuousMode"),
   settingVoiceInputMode: document.getElementById("settingVoiceInputMode"),
   settingVoiceVadThreshold: document.getElementById("settingVoiceVadThreshold"),
   settingVoiceVadThresholdValue: document.getElementById("settingVoiceVadThresholdValue"),
   settingVoiceVadSilenceMs: document.getElementById("settingVoiceVadSilenceMs"),
   settingVoiceVadMinSpeechMs: document.getElementById("settingVoiceVadMinSpeechMs"),
+  settingVoicePostReplyDelayMs: document.getElementById("settingVoicePostReplyDelayMs"),
+  settingVoiceStopPhrases: document.getElementById("settingVoiceStopPhrases"),
+  settingVoiceStopPhrasesResetBtn: document.getElementById("settingVoiceStopPhrasesResetBtn"),
   settingVoiceStyle: document.getElementById("settingVoiceStyle"),
   settingVoiceRate: document.getElementById("settingVoiceRate"),
   settingVoiceRateValue: document.getElementById("settingVoiceRateValue"),
@@ -290,12 +299,18 @@ const el = {
   voiceModeHint: document.getElementById("voiceModeHint"),
   voiceStartBtn: document.getElementById("voiceStartBtn"),
   voiceStopBtn: document.getElementById("voiceStopBtn"),
+  voicePauseBtn: document.getElementById("voicePauseBtn"),
+  voiceResumeBtn: document.getElementById("voiceResumeBtn"),
+  voiceEndConversationBtn: document.getElementById("voiceEndConversationBtn"),
   voiceMuteBtn: document.getElementById("voiceMuteBtn"),
+  voiceContinuousMode: document.getElementById("voiceContinuousMode"),
   voiceTextOnlyMode: document.getElementById("voiceTextOnlyMode"),
   voiceWaveform: document.getElementById("voiceWaveform"),
   voiceMicMeter: document.getElementById("voiceMicMeter"),
   voiceStatusText: document.getElementById("voiceStatusText"),
   voiceAutoIndicator: document.getElementById("voiceAutoIndicator"),
+  voiceContinualIndicator: document.getElementById("voiceContinualIndicator"),
+  voicePausedIndicator: document.getElementById("voicePausedIndicator"),
   voiceTypingIndicator: document.getElementById("voiceTypingIndicator"),
   voicePlaybackIndicator: document.getElementById("voicePlaybackIndicator"),
   voiceTranscriptPreview: document.getElementById("voiceTranscriptPreview"),
@@ -1042,6 +1057,31 @@ function clampVoiceVadMinSpeech(value, fallback = 300) {
   return Math.max(120, Math.min(4000, Math.round(parsed)));
 }
 
+function clampVoicePostReplyDelay(value, fallback = 450) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(300, Math.min(800, Math.round(parsed)));
+}
+
+function parseVoiceStopPhrases(value) {
+  const defaults = ["stop listening", "end chat", "bye david"];
+  const parts = Array.isArray(value) ? value : String(value || "").split(",");
+  const out = [];
+  const seen = new Set();
+  parts.forEach((item) => {
+    const phrase = String(item || "").trim().toLowerCase().slice(0, 40);
+    if (!phrase || seen.has(phrase)) return;
+    seen.add(phrase);
+    out.push(phrase);
+  });
+  return out.slice(0, 12).length ? out.slice(0, 12) : defaults;
+}
+
+function voiceStopPhrasesDisplay(value) {
+  const phrases = Array.isArray(value) ? value : parseVoiceStopPhrases(value);
+  return phrases.join(", ");
+}
+
 function voiceVadThresholdDescriptor(value) {
   const threshold = clampVoiceVadThreshold(value, 0.035);
   return threshold.toFixed(3);
@@ -1102,7 +1142,7 @@ function evaluateVadFrame(snapshot) {
   let shouldAccept = false;
   let bargeInSignal = false;
 
-  if (turnState === "listening_armed") {
+  if (turnState === "listening_armed" || turnState === "responding") {
     speechMs = 0;
     silenceSinceMs = 0;
     if (aboveThreshold) {
@@ -3151,6 +3191,9 @@ function renderSettings(data) {
   if (el.settingVoiceTextOnlyMode) {
     el.settingVoiceTextOnlyMode.checked = !!safeData.voice_text_only_mode;
   }
+  if (el.settingVoiceContinuousMode) {
+    el.settingVoiceContinuousMode.checked = !!safeData.voice_continuous_mode;
+  }
   if (el.settingVoiceInputMode) {
     const savedMode = String(safeData.voice_input_mode || "manual").trim().toLowerCase() || "manual";
     const normalizedMode = savedMode === "ptt" ? "manual" : savedMode;
@@ -3173,6 +3216,14 @@ function renderSettings(data) {
       safeData.voice_vad_min_speech_ms ?? safeData.vad_min_speech_ms,
       300
     );
+  }
+  if (el.settingVoicePostReplyDelayMs) {
+    el.settingVoicePostReplyDelayMs.value = clampVoicePostReplyDelay(safeData.voice_post_reply_delay_ms, 450);
+  }
+  if (el.settingVoiceStopPhrases) {
+    const loadedPhrases = parseVoiceStopPhrases(safeData.voice_stop_phrases);
+    el.settingVoiceStopPhrases.value = voiceStopPhrasesDisplay(loadedPhrases);
+    state.voice.stopPhrases = loadedPhrases;
   }
   if (el.settingVoiceStyle) {
     el.settingVoiceStyle.value = String(safeData.voice_style || "warm").trim().toLowerCase() || "warm";
@@ -3234,6 +3285,9 @@ function renderSettings(data) {
   }
   state.voice.rate = clampVoiceRate(safeData.voice_rate, 100);
   state.voice.textOnlyMode = !!safeData.voice_text_only_mode;
+  state.voice.continuousMode = !!safeData.voice_continuous_mode;
+  state.voice.continuousPaused = false;
+  state.voice.postReplyDelayMs = clampVoicePostReplyDelay(safeData.voice_post_reply_delay_ms, 450);
   state.voice.inputMode = String(safeData.voice_input_mode || "manual").trim().toLowerCase() || "manual";
   if (state.voice.inputMode === "ptt") {
     state.voice.inputMode = "manual";
@@ -3247,6 +3301,10 @@ function renderSettings(data) {
     safeData.voice_vad_min_speech_ms ?? safeData.vad_min_speech_ms,
     300
   );
+  if (el.voiceContinuousMode) {
+    el.voiceContinuousMode.checked = !!state.voice.continuousMode;
+  }
+  state.voice.stopPhrases = parseVoiceStopPhrases(safeData.voice_stop_phrases);
   resetVoiceSttFallbackCache();
   state.voice.vadSilenceCountdownMs = 0;
   setVoiceTurnState(state.voice.vadActive ? "listening_armed" : "idle");
@@ -3332,6 +3390,9 @@ function renderSettings(data) {
     ["Upload OCR/Vision model", safeData.upload_vision_model || safeData.model || "-"],
     ["Voice mode", fmtBool(safeData.voice_mode_enabled)],
     ["Voice input mode", voiceInputMode],
+    ["Voice continual mode", fmtBool(safeData.voice_continuous_mode)],
+    ["Voice post-reply delay (ms)", String(safeData.voice_post_reply_delay_ms ?? 450)],
+    ["Voice stop phrases", voiceStopPhrasesDisplay(safeData.voice_stop_phrases || [])],
     ["Voice VAD threshold", String(safeData.voice_vad_threshold ?? safeData.vad_threshold ?? 0.035)],
     ["Voice VAD silence (ms)", String(safeData.voice_vad_silence_ms ?? safeData.vad_silence_ms ?? 900)],
     ["Voice VAD min speech (ms)", String(safeData.voice_vad_min_speech_ms ?? safeData.vad_min_speech_ms ?? 300)],
@@ -3919,6 +3980,7 @@ function handleVoiceBargeIn(reason = "") {
   const hasPlayback = !!state.voice.audioPlaying || Number(state.voice.pendingSpeechCount || 0) > 0;
   const hasStream = !!state.voice.streamAbortController || !!state.voice.transcribeAbortController;
   if (!hasPlayback && !state.voice.generating && !hasStream) return;
+  clearVoiceRearmTimer();
   abortVoiceStream();
   abortVoiceTranscription();
   clearVoiceAudioQueue(true);
@@ -3939,6 +4001,11 @@ function beginVoiceTurn(reason = "") {
 
 function renderVoiceModeHint() {
   if (!el.voiceModeHint) return;
+  if (state.voice.continuousMode) {
+    const phrases = voiceStopPhrasesDisplay(state.voice.stopPhrases);
+    el.voiceModeHint.textContent = `Continual Voice Chat is ${state.voice.continuousPaused ? "paused" : "active"}: listen -> transcribe -> respond -> speak -> auto-listen. Stop phrases: ${phrases}.`;
+    return;
+  }
   if (state.voice.inputMode === "vad") {
     el.voiceModeHint.textContent = `Auto (VAD) arms the mic, starts above ${voiceVadThresholdDescriptor(
       state.voice.vadThreshold
@@ -3951,6 +4018,13 @@ function renderVoiceModeHint() {
 function setVoiceInputMode(mode, { syncSetting = true } = {}) {
   const raw = String(mode || "").trim().toLowerCase();
   const normalized = raw === "vad" ? "vad" : "manual";
+  if (state.voice.continuousMode && normalized !== "vad") {
+    state.voice.continuousMode = false;
+    state.voice.continuousPaused = false;
+    clearVoiceRearmTimer();
+    if (el.voiceContinuousMode) el.voiceContinuousMode.checked = false;
+    if (el.settingVoiceContinuousMode) el.settingVoiceContinuousMode.checked = false;
+  }
   if (state.voice.inputMode === normalized) return;
   state.voice.inputMode = normalized;
   if (syncSetting && el.settingVoiceInputMode) {
@@ -4203,6 +4277,8 @@ function cleanupVoiceAudioResources() {
 function syncVoiceUiState() {
   const enabled = !!state.voice.enabled;
   const inputMode = state.voice.inputMode === "vad" ? "vad" : "manual";
+  const continual = !!state.voice.continuousMode;
+  const paused = continual && !!state.voice.continuousPaused;
   const inFlight = !!state.voice.generating || !!state.voice.streamAbortController || !!state.voice.transcribeAbortController;
   const canStopNow =
     !!state.voice.listening || !!state.voice.recordingStarting || inFlight || !!state.voice.speaking || !!state.voice.vadActive;
@@ -4212,11 +4288,16 @@ function syncVoiceUiState() {
   if (el.voiceStartBtn) {
     const activeManual = inputMode === "manual" && !!state.voice.listening;
     const activeAuto = inputMode === "vad" && !!state.voice.vadActive;
-    el.voiceStartBtn.disabled = !enabled || activeAuto || !!state.voice.recordingStarting;
+    const startDisabled = !enabled || !!state.voice.recordingStarting || (continual && !paused);
+    el.voiceStartBtn.disabled = startDisabled || activeAuto;
     el.voiceStartBtn.classList.remove("hidden");
     el.voiceStartBtn.classList.toggle("active", activeManual || activeAuto);
     el.voiceStartBtn.setAttribute("aria-pressed", activeManual || activeAuto ? "true" : "false");
-    if (inputMode === "vad") {
+    if (continual && paused) {
+      el.voiceStartBtn.textContent = "Resume";
+    } else if (continual) {
+      el.voiceStartBtn.textContent = "Continual Active";
+    } else if (inputMode === "vad") {
       el.voiceStartBtn.textContent = "Start Listening";
     } else if (activeManual) {
       el.voiceStartBtn.textContent = "Send";
@@ -4227,8 +4308,24 @@ function syncVoiceUiState() {
   if (el.voiceStopBtn) {
     el.voiceStopBtn.disabled = !enabled || !canStopNow;
     el.voiceStopBtn.classList.remove("hidden");
-    el.voiceStopBtn.textContent = "Stop";
+    el.voiceStopBtn.textContent = continual ? "End Conversation" : "Stop";
     el.voiceStopBtn.setAttribute("aria-pressed", canStopNow ? "true" : "false");
+  }
+  if (el.voicePauseBtn) {
+    el.voicePauseBtn.disabled = !enabled || !continual || paused;
+    el.voicePauseBtn.classList.toggle("hidden", !continual || paused);
+  }
+  if (el.voiceResumeBtn) {
+    el.voiceResumeBtn.disabled = !enabled || !continual || !paused;
+    el.voiceResumeBtn.classList.toggle("hidden", !continual || !paused);
+  }
+  if (el.voiceEndConversationBtn) {
+    el.voiceEndConversationBtn.disabled = !enabled || !continual;
+    el.voiceEndConversationBtn.classList.toggle("hidden", !continual);
+  }
+  if (el.voiceContinuousMode) {
+    el.voiceContinuousMode.checked = continual;
+    el.voiceContinuousMode.disabled = !enabled;
   }
   if (el.voiceMuteBtn) {
     el.voiceMuteBtn.classList.toggle("active", !!state.voice.muted);
@@ -4239,12 +4336,23 @@ function syncVoiceUiState() {
     el.voiceTextOnlyMode.checked = !!state.voice.textOnlyMode;
   }
   if (el.voiceAutoIndicator) {
-    const autoActive = enabled && inputMode === "vad" && (state.voice.vadActive || state.voice.turnState === "listening_armed");
+    const autoActive = enabled && inputMode === "vad" && (state.voice.vadActive || state.voice.turnState === "listening_armed") && !paused;
     el.voiceAutoIndicator.classList.toggle("hidden", !autoActive);
     el.voiceAutoIndicator.classList.toggle("active", autoActive);
   }
+  if (el.voiceContinualIndicator) {
+    const active = enabled && continual;
+    el.voiceContinualIndicator.classList.toggle("hidden", !active);
+    el.voiceContinualIndicator.classList.toggle("active", active);
+  }
+  if (el.voicePausedIndicator) {
+    const active = enabled && continual && paused;
+    el.voicePausedIndicator.classList.toggle("hidden", !active);
+    el.voicePausedIndicator.classList.toggle("active", active);
+  }
   if (el.voiceStatusText) {
     if (!enabled) el.voiceStatusText.textContent = "Voice disabled. Enable Voice Mode in Settings.";
+    else if (continual && paused) el.voiceStatusText.textContent = "Continual conversation paused.";
     else if (state.voice.turnState === "listening_armed")
       el.voiceStatusText.textContent = "Listening (Auto). Speak to start recording.";
     else if (state.voice.turnState === "recording" && inputMode === "vad") {
@@ -4300,6 +4408,98 @@ function resetVoiceSttFallbackCache() {
   state.voice.sttFallbackCheckedAt = 0;
 }
 
+function clearVoiceRearmTimer() {
+  if (state.voice.rearmTimer) {
+    clearTimeout(state.voice.rearmTimer);
+    state.voice.rearmTimer = 0;
+  }
+}
+
+function matchesVoiceStopPhrase(text) {
+  const spoken = String(text || "").trim().toLowerCase();
+  if (!spoken) return false;
+  const phrases = Array.isArray(state.voice.stopPhrases) ? state.voice.stopPhrases : [];
+  return phrases.some((phrase) => phrase && spoken.includes(String(phrase).toLowerCase()));
+}
+
+function stopContinualVoiceChat(reason = "Continual conversation ended.") {
+  state.voice.continuousMode = false;
+  state.voice.continuousPaused = false;
+  clearVoiceRearmTimer();
+  if (el.voiceContinuousMode) {
+    el.voiceContinuousMode.checked = false;
+  }
+  if (el.settingVoiceContinuousMode) {
+    el.settingVoiceContinuousMode.checked = false;
+  }
+  setVoiceTurnState(state.voice.vadActive ? "listening_armed" : "idle");
+  renderVoiceModeHint();
+  syncVoiceUiState();
+  if (reason) {
+    setCliOutput(reason);
+    showToast(reason);
+  }
+}
+
+async function pauseContinualVoiceChat(reason = "Continual voice chat paused.") {
+  state.voice.continuousPaused = true;
+  clearVoiceRearmTimer();
+  await cancelVoiceTurn({ disarmAuto: true, reason });
+  renderVoiceModeHint();
+  syncVoiceUiState();
+}
+
+async function resumeContinualVoiceChat() {
+  if (!state.voice.continuousMode) return;
+  state.voice.continuousPaused = false;
+  renderVoiceModeHint();
+  syncVoiceUiState();
+  const fallback = await resolveVoiceSttFallback().catch(() => ({ useBrowser: false, reason: "" }));
+  if (fallback.useBrowser) {
+    await pauseContinualVoiceChat("Continual mode requires local STT + VAD. Configure Whisper or whisper.cpp, then resume.");
+    return;
+  }
+  if (state.voice.inputMode !== "vad") {
+    setVoiceInputMode("vad");
+  }
+  if (!state.voice.vadActive) {
+    await startVoiceVad();
+  }
+}
+
+function voiceEchoGuardActive() {
+  return !!state.voice.audioPlaying || Number(state.voice.pendingSpeechCount || 0) > 0 || !!state.voice.activeAudio;
+}
+
+function scheduleContinualRearm(reason = "next_turn", delayMs = null) {
+  if (!state.voice.continuousMode || state.voice.continuousPaused) return;
+  clearVoiceRearmTimer();
+  const delay = delayMs == null ? state.voice.postReplyDelayMs : clampVoicePostReplyDelay(delayMs, state.voice.postReplyDelayMs);
+  state.voice.rearmTimer = setTimeout(async () => {
+    state.voice.rearmTimer = 0;
+    if (!state.voice.enabled || !state.voice.continuousMode || state.voice.continuousPaused) return;
+    if (state.voice.generating || state.voice.streamAbortController || state.voice.transcribeAbortController || voiceEchoGuardActive()) {
+      scheduleContinualRearm(reason, 220);
+      return;
+    }
+    const fallback = await resolveVoiceSttFallback().catch(() => ({ useBrowser: false, reason: "" }));
+    if (fallback.useBrowser) {
+      await pauseContinualVoiceChat("Continual mode paused: local STT is unavailable for VAD turns.");
+      return;
+    }
+    if (state.voice.inputMode !== "vad") {
+      setVoiceInputMode("vad");
+    }
+    if (!state.voice.vadActive) {
+      try {
+        await startVoiceVad();
+      } catch (_) {
+        await pauseContinualVoiceChat("Continual mode paused: could not re-arm microphone.");
+      }
+    }
+  }, Math.max(0, delay));
+}
+
 async function resolveVoiceSttFallback() {
   if (!browserSpeechRecognitionSupported()) {
     return { useBrowser: false, reason: "" };
@@ -4323,6 +4523,7 @@ async function resolveVoiceSttFallback() {
 
 function abortBrowserSpeechRecognition() {
   const recognition = state.voice.browserRecognition;
+  clearVoiceRearmTimer();
   if (!recognition) return;
   state.voice.autoSubmitAfterStop = false;
   try {
@@ -4416,6 +4617,12 @@ async function startBrowserSpeechListening({ announceFallback = false } = {}) {
     if (!transcript) {
       setCliOutput("No speech captured from microphone.");
       setVoiceTranscriptPreview("No speech captured.");
+      return;
+    }
+    if (state.voice.continuousMode && matchesVoiceStopPhrase(transcript)) {
+      pauseContinualVoiceChat("Continual voice chat stopped by phrase.")
+        .then(() => stopContinualVoiceChat("Continual voice chat stopped by phrase."))
+        .catch(() => stopContinualVoiceChat("Continual voice chat stopped by phrase."));
       return;
     }
     setVoiceTranscriptPreview(transcript);
@@ -4633,6 +4840,10 @@ async function startVoiceVad() {
   const fallback = await resolveVoiceSttFallback().catch(() => ({ useBrowser: false, reason: "" }));
   if (fallback.useBrowser) {
     const reason = String(fallback.reason || "Local STT is unavailable.").trim();
+    if (state.voice.continuousMode) {
+      await pauseContinualVoiceChat("Continual mode requires local STT + VAD. Configure STT and resume.");
+      return;
+    }
     setVoiceInputMode("manual");
     setCliOutput(`${reason}\nAuto (VAD) requires local STT. Switched to Manual mode with browser speech fallback.`);
     await startBrowserSpeechListening({ announceFallback: true });
@@ -5169,6 +5380,9 @@ async function handleVoiceChatStream(rawMessage, options = {}) {
     confirmSensitive = window.confirm(`Run this goal from voice transcript?\n\n${text}`);
     if (!confirmSensitive) {
       setCliOutput("Voice goal run canceled.");
+      if (state.voice.continuousMode) {
+        await pauseContinualVoiceChat("Continual mode paused: goal execution requires explicit confirmation.");
+      }
       state.voice.generating = false;
       syncVoiceUiState();
       return;
@@ -5288,15 +5502,33 @@ async function handleVoiceChatStream(rawMessage, options = {}) {
     setCliOutput(streamError);
     pushChatMessage("system", streamError);
     setVoiceAssistantPreview("");
+    if (state.voice.continuousMode && !state.voice.continuousPaused) {
+      if (/confirmation is required/i.test(streamError)) {
+        await pauseContinualVoiceChat("Continual mode paused: confirmation is required before continuing.");
+      } else {
+        scheduleContinualRearm("stream_error");
+      }
+    }
     return;
   }
   if (!finalResult) {
     const fallback = "Voice stream ended without final response payload.";
     setCliOutput(fallback);
     pushChatMessage("system", fallback);
+    if (state.voice.continuousMode && !state.voice.continuousPaused) {
+      scheduleContinualRearm("missing_final");
+    }
     return;
   }
   await applyAdvancedChatResult(finalResult, text);
+  if (state.voice.continuousMode && !state.voice.continuousPaused) {
+    const responseStatus = String(finalResult?.response?.status || "").trim().toLowerCase();
+    if (responseStatus === "overwrite_confirmation_required") {
+      await pauseContinualVoiceChat("Continual mode paused: overwrite confirmation required in UI.");
+      return;
+    }
+    scheduleContinualRearm("reply_complete");
+  }
 }
 
 async function transcribeVoiceBlob(blob) {
@@ -5322,6 +5554,11 @@ async function transcribeVoiceBlob(blob) {
     setVoiceTranscriptPreview(transcript);
     if (!transcript) {
       throw new Error("No transcript text was returned.");
+    }
+    if (state.voice.continuousMode && matchesVoiceStopPhrase(transcript)) {
+      await pauseContinualVoiceChat("Continual voice chat stopped by phrase.");
+      stopContinualVoiceChat("Continual voice chat stopped by phrase.");
+      return;
     }
     if (el.memoryChatInput) {
       el.memoryChatInput.value = transcript;
@@ -5821,6 +6058,9 @@ function wireActions() {
         voice_mode_enabled: el.settingVoiceModeEnabled ? !!el.settingVoiceModeEnabled.checked : false,
         voice_text_only_mode: el.settingVoiceTextOnlyMode ? !!el.settingVoiceTextOnlyMode.checked : false,
         voice_input_mode: String(el.settingVoiceInputMode?.value || "manual").trim().toLowerCase() || "manual",
+        voice_continuous_mode: el.settingVoiceContinuousMode ? !!el.settingVoiceContinuousMode.checked : false,
+        voice_post_reply_delay_ms: clampVoicePostReplyDelay(el.settingVoicePostReplyDelayMs?.value, 450),
+        voice_stop_phrases: parseVoiceStopPhrases(el.settingVoiceStopPhrases?.value || ""),
         voice_vad_threshold: clampVoiceVadThreshold(el.settingVoiceVadThreshold?.value, 0.035),
         voice_vad_silence_ms: clampVoiceVadSilence(el.settingVoiceVadSilenceMs?.value, 900),
         voice_vad_min_speech_ms: clampVoiceVadMinSpeech(el.settingVoiceVadMinSpeechMs?.value, 300),
@@ -5882,6 +6122,11 @@ function wireActions() {
   el.settingVoiceModeEnabled?.addEventListener("change", () => {
     state.voice.enabled = !!el.settingVoiceModeEnabled?.checked;
     if (!state.voice.enabled) {
+      state.voice.continuousMode = false;
+      state.voice.continuousPaused = false;
+      clearVoiceRearmTimer();
+      if (el.voiceContinuousMode) el.voiceContinuousMode.checked = false;
+      if (el.settingVoiceContinuousMode) el.settingVoiceContinuousMode.checked = false;
       abortVoiceStream();
       abortVoiceTranscription();
       abortBrowserSpeechRecognition();
@@ -5896,8 +6141,52 @@ function wireActions() {
     }
     syncVoiceUiState();
   });
+  el.settingVoiceContinuousMode?.addEventListener("change", async () => {
+    const enabled = !!el.settingVoiceContinuousMode?.checked;
+    state.voice.continuousMode = enabled;
+    state.voice.continuousPaused = false;
+    if (el.voiceContinuousMode) {
+      el.voiceContinuousMode.checked = enabled;
+    }
+    if (enabled && state.voice.inputMode !== "vad") {
+      setVoiceInputMode("vad");
+    }
+    if (enabled && state.voice.enabled) {
+      await resumeContinualVoiceChat().catch((err) => setCliOutput(err?.message || "Unable to start continual mode."));
+    } else if (!enabled) {
+      clearVoiceRearmTimer();
+      stopVoiceVad({ submit: false }).catch(() => {});
+      syncVoiceUiState();
+    }
+    renderVoiceModeHint();
+  });
   el.settingVoiceInputMode?.addEventListener("change", () => {
     setVoiceInputMode(el.settingVoiceInputMode?.value || "manual", { syncSetting: false });
+  });
+  el.settingVoicePostReplyDelayMs?.addEventListener("change", () => {
+    state.voice.postReplyDelayMs = clampVoicePostReplyDelay(el.settingVoicePostReplyDelayMs?.value, 450);
+  });
+  el.settingVoiceStopPhrases?.addEventListener("change", () => {
+    const raw = String(el.settingVoiceStopPhrases?.value || "").trim();
+    const normalized = parseVoiceStopPhrases(raw);
+    state.voice.stopPhrases = normalized;
+    if (el.settingVoiceStopPhrases) {
+      el.settingVoiceStopPhrases.value = voiceStopPhrasesDisplay(normalized);
+    }
+    renderVoiceModeHint();
+  });
+  el.settingVoiceStopPhrasesResetBtn?.addEventListener("click", async () => {
+    try {
+      const defaults = ["stop listening", "end chat", "bye david"];
+      const data = await api("/api/settings", {
+        method: "POST",
+        body: JSON.stringify({ voice_stop_phrases: defaults }),
+      });
+      renderSettings(data);
+      showToast("Stop phrases reset to defaults.");
+    } catch (err) {
+      setMessage(err?.message || "Failed to reset stop phrases.");
+    }
   });
   el.settingVoiceTextOnlyMode?.addEventListener("change", () => {
     state.voice.textOnlyMode = !!el.settingVoiceTextOnlyMode?.checked;
@@ -5948,6 +6237,16 @@ function wireActions() {
 
   el.voiceStartBtn?.addEventListener("click", async () => {
     try {
+      if (state.voice.continuousMode) {
+        if (state.voice.continuousPaused) {
+          await resumeContinualVoiceChat();
+          return;
+        }
+        if (!state.voice.vadActive) {
+          await resumeContinualVoiceChat();
+        }
+        return;
+      }
       if (state.voice.inputMode === "vad") {
         if (state.voice.vadActive) return;
         await startVoiceVad();
@@ -5965,6 +6264,11 @@ function wireActions() {
 
   el.voiceStopBtn?.addEventListener("click", async () => {
     try {
+      if (state.voice.continuousMode) {
+        await cancelVoiceTurn({ disarmAuto: true, reason: "Continual conversation ended by user." });
+        stopContinualVoiceChat("Continual conversation ended.");
+        return;
+      }
       if (state.voice.inputMode === "vad") {
         await cancelVoiceTurn({ disarmAuto: true, reason: "Voice stopped by user." });
         return;
@@ -5980,6 +6284,46 @@ function wireActions() {
       clearVoiceAudioQueue(true);
     }
     syncVoiceUiState();
+  });
+  el.voiceContinuousMode?.addEventListener("change", async () => {
+    const enabled = !!el.voiceContinuousMode?.checked;
+    state.voice.continuousMode = enabled;
+    state.voice.continuousPaused = false;
+    if (el.settingVoiceContinuousMode) {
+      el.settingVoiceContinuousMode.checked = enabled;
+    }
+    if (!enabled) {
+      clearVoiceRearmTimer();
+      await stopVoiceVad({ submit: false }).catch(() => {});
+      syncVoiceUiState();
+      return;
+    }
+    if (state.voice.inputMode !== "vad") {
+      setVoiceInputMode("vad");
+    }
+    await resumeContinualVoiceChat().catch((err) => setCliOutput(err?.message || "Unable to start continual mode."));
+  });
+  el.voicePauseBtn?.addEventListener("click", async () => {
+    try {
+      await pauseContinualVoiceChat("Continual conversation paused.");
+    } catch (err) {
+      setCliOutput(err?.message || "Unable to pause continual mode.");
+    }
+  });
+  el.voiceResumeBtn?.addEventListener("click", async () => {
+    try {
+      await resumeContinualVoiceChat();
+    } catch (err) {
+      setCliOutput(err?.message || "Unable to resume continual mode.");
+    }
+  });
+  el.voiceEndConversationBtn?.addEventListener("click", async () => {
+    try {
+      await cancelVoiceTurn({ disarmAuto: true, reason: "Continual conversation ended by user." });
+      stopContinualVoiceChat("Continual conversation ended.");
+    } catch (err) {
+      setCliOutput(err?.message || "Unable to end continual mode.");
+    }
   });
   el.voiceTextOnlyMode?.addEventListener("change", () => {
     state.voice.textOnlyMode = !!el.voiceTextOnlyMode?.checked;
