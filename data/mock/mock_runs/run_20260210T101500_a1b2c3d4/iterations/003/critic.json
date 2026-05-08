@@ -1,0 +1,8 @@
+{
+  "status": "success",
+  "analysis": "Green achieved with edge-case coverage.",
+  "next_actions": ["Capture lesson for future runs"],
+  "lessons": [
+    {"lesson": "Strict TDD reached green in 3 iterations.", "tags": ["tdd", "iterations"]}
+  ]
+}

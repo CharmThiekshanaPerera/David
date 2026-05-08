@@ -1,0 +1,12 @@
+[
+  {
+    "path": "src/cli.py",
+    "change_type": "new",
+    "workspace_path": "workspace/projects/todo_cli_tdd/src/cli.py",
+    "added": 52,
+    "removed": 0,
+    "before_preview": "",
+    "after_preview": "def run_cli(argv):\n    # parse args\n    ...",
+    "patch": "--- a/src/cli.py\n+++ b/src/cli.py\n@@ -0,0 +1,8 @@\n+def run_cli(argv):\n+    if not argv:\n+        return 2\n+    cmd = argv[0]\n+    if cmd == 'add':\n+        return 0\n+    return 1"
+  }
+]

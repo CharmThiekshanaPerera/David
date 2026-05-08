@@ -11,8 +11,9 @@ from agent.prompts import CODER_SYSTEM_PROMPT
 class Coder:
     """Proposes concrete file edits and verification commands."""
 
-    def __init__(self, llm: OllamaClient) -> None:
+    def __init__(self, llm: OllamaClient, model_name: str | None = None) -> None:
         self._llm = llm
+        self._model_name = model_name
 
     def propose(
         self,
@@ -22,7 +23,22 @@ class Coder:
         memory_context: str,
         critic_feedback: str,
         iteration: int,
+        tdd_mode: bool = False,
+        tdd_phase: str = "normal",
     ) -> CoderOutput:
+        tdd_hint = ""
+        if tdd_mode:
+            if tdd_phase == "tests_first":
+                tdd_hint = (
+                    "TDD mode (tests-first phase): only propose edits under tests/ and run pytest. "
+                    "Do not implement production code yet."
+                )
+            else:
+                tdd_hint = (
+                    "TDD mode (implementation phase): implement only what is needed to satisfy failing tests, "
+                    "then run pytest."
+                )
+
         user_prompt = f"""
 Iteration: {iteration}
 Goal:
@@ -39,10 +55,13 @@ Memory context:
 
 Critic feedback from previous iteration:
 {critic_feedback}
+
+TDD guidance:
+{tdd_hint or "TDD mode disabled."}
 """.strip()
 
         try:
-            raw = self._llm.chat(CODER_SYSTEM_PROMPT, user_prompt)
+            raw = self._llm.chat(CODER_SYSTEM_PROMPT, user_prompt, model=self._model_name)
             data = parse_json_object(raw)
             return CoderOutput.from_dict(data)
         except (JsonParseError, ContractError):

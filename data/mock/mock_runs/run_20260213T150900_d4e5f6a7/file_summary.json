@@ -1,0 +1,42 @@
+{
+  "artifacts_dir": "data/runs/run_20260213T150900_d4e5f6a7",
+  "workspace_dir": "workspace",
+  "project_slug": "companion_memory_demo",
+  "project_path": "workspace/projects/companion_memory_demo",
+  "created": [
+    {
+      "path": "src/memory_helper.py",
+      "change_type": "new",
+      "workspace_path": "workspace/projects/companion_memory_demo/src/memory_helper.py",
+      "added": 18,
+      "removed": 0,
+      "after_preview": "def summarize_memory(entries):\n    ..."
+    },
+    {
+      "path": "tests/test_memory_helper.py",
+      "change_type": "new",
+      "workspace_path": "workspace/projects/companion_memory_demo/tests/test_memory_helper.py",
+      "added": 12,
+      "removed": 0,
+      "after_preview": "def test_summarize_memory():\n    ..."
+    }
+  ],
+  "modified": [],
+  "project_files": [
+    "src/memory_helper.py",
+    "tests/test_memory_helper.py"
+  ],
+  "workspace_files": [
+    {"path": "projects/companion_memory_demo/src/memory_helper.py", "change_type": "workspace", "workspace_path": "workspace/projects/companion_memory_demo/src/memory_helper.py", "added": 0, "removed": 0, "after_preview": "def summarize_memory(entries):\n    ..."},
+    {"path": "projects/companion_memory_demo/tests/test_memory_helper.py", "change_type": "workspace", "workspace_path": "workspace/projects/companion_memory_demo/tests/test_memory_helper.py", "added": 0, "removed": 0, "after_preview": "def test_summarize_memory():\n    ..."}
+  ],
+  "workspace_dirs": [
+    "projects",
+    "projects/companion_memory_demo",
+    "projects/companion_memory_demo/src",
+    "projects/companion_memory_demo/tests"
+  ],
+  "workspace_file_total": 2,
+  "workspace_dir_total": 4,
+  "workspace_files_truncated": false
+}

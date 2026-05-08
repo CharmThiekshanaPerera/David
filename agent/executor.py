@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -25,15 +26,17 @@ class RestrictedExecutor:
 
     def _run_one(self, spec: CommandSpec) -> ExecutionResult:
         start = time.perf_counter()
+        env = self._safe_env()
+        argv = self._resolve_argv(spec.argv, env=env)
         try:
             completed = subprocess.run(
-                spec.argv,
+                argv,
                 cwd=self._workspace_dir,
                 capture_output=True,
                 text=True,
                 timeout=self._timeout_sec,
                 shell=False,
-                env=self._safe_env(),
+                env=env,
             )
             duration = time.perf_counter() - start
             return ExecutionResult(
@@ -56,6 +59,16 @@ class RestrictedExecutor:
                 timed_out=True,
                 duration_sec=round(duration, 3),
             )
+        except FileNotFoundError as exc:
+            duration = time.perf_counter() - start
+            return ExecutionResult(
+                command=spec.raw,
+                returncode=127,
+                stdout="",
+                stderr=self._clip(str(exc)),
+                timed_out=False,
+                duration_sec=round(duration, 3),
+            )
 
     def _clip(self, text: str) -> str:
         if len(text) <= self._max_output_chars:
@@ -69,3 +82,16 @@ class RestrictedExecutor:
         env = {key: value for key, value in os.environ.items() if key in safe_keys}
         env["PYTHONIOENCODING"] = "utf-8"
         return env
+
+    @staticmethod
+    def _resolve_argv(argv: list[str], *, env: dict[str, str]) -> list[str]:
+        resolved = list(argv)
+        if not resolved:
+            return resolved
+        exe = str(resolved[0])
+        path_value = env.get("PATH", "")
+        if exe == "python" and shutil.which("python", path=path_value) is None:
+            python3 = shutil.which("python3", path=path_value)
+            if python3:
+                resolved[0] = python3
+        return resolved

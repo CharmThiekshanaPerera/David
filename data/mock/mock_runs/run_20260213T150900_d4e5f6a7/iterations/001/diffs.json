@@ -1,0 +1,22 @@
+[
+  {
+    "path": "src/memory_helper.py",
+    "change_type": "new",
+    "workspace_path": "workspace/projects/companion_memory_demo/src/memory_helper.py",
+    "added": 10,
+    "removed": 0,
+    "before_preview": "",
+    "after_preview": "def summarize_memory(entries):\n    return ', '.join(entries)",
+    "patch": "--- a/src/memory_helper.py\n+++ b/src/memory_helper.py\n@@ -0,0 +1,3 @@\n+def summarize_memory(entries):\n+    if not entries:\n+        return ''"
+  },
+  {
+    "path": "tests/test_memory_helper.py",
+    "change_type": "new",
+    "workspace_path": "workspace/projects/companion_memory_demo/tests/test_memory_helper.py",
+    "added": 8,
+    "removed": 0,
+    "before_preview": "",
+    "after_preview": "def test_summarize_memory():\n    assert summarize_memory(['a']) == 'a'",
+    "patch": "--- a/tests/test_memory_helper.py\n+++ b/tests/test_memory_helper.py\n@@ -0,0 +1,3 @@\n+def test_summarize_memory():\n+    assert summarize_memory(['a']) == 'a'"
+  }
+]

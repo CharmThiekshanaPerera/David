@@ -29,6 +29,8 @@ Rules:
 - 3 to 7 steps.
 - Steps must be actionable and ordered.
 - Success criteria must be objective (tests/exit code/output).
+- Plan must keep all file operations inside the active project directory (never workspace root).
+- Prefer project layout: `src/`, `tests/`, `docs/`, `data/`, `config/`, and `README.md`.
 - No markdown.
 - No code fences.
 - No explanations outside JSON.
@@ -43,7 +45,7 @@ Return ONLY JSON with this exact schema:
   "summary": "what changed this iteration",
   "edits": [
     {{
-      "path": "relative/path/in/workspace.ext",
+      "path": "relative/path/in/active_project.ext",
       "content": "full file content",
       "reason": "why this edit helps"
     }}
@@ -53,7 +55,8 @@ Return ONLY JSON with this exact schema:
   "done_reason": "short reason"
 }}
 Rules:
-- Paths must be relative and inside workspace.
+- Paths must be relative and inside the active project root (never workspace root).
+- Use project structure: `src/`, `tests/`, `docs/`, `data/`, `config/`, and `README.md` at project root.
 - Propose only text file edits.
 - Commands must start with python or pytest only.
 - Keep edits focused; do not rewrite unrelated files.

@@ -1,0 +1,10 @@
+[
+  {
+    "command": "pytest -q",
+    "returncode": 1,
+    "stdout": "F..\n",
+    "stderr": "AssertionError: expected CLI output mismatch",
+    "timed_out": false,
+    "duration_sec": 4.2
+  }
+]

@@ -1,0 +1,7 @@
+{
+  "goal": "Create companion memory helper module",
+  "steps": [
+    {"id": "S1", "title": "Scaffold module", "details": "Create helper and tests in isolated project folder.", "success_check": "tests pass"}
+  ],
+  "success_criteria": ["Module and tests created under workspace/projects/companion_memory_demo"]
+}

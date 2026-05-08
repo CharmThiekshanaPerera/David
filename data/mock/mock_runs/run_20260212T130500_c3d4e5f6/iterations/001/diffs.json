@@ -1,0 +1,12 @@
+[
+  {
+    "path": "src/pipeline.py",
+    "change_type": "edited",
+    "workspace_path": "workspace/projects/deploy_refactor/src/pipeline.py",
+    "added": 9,
+    "removed": 2,
+    "before_preview": "def pipeline(): ...",
+    "after_preview": "def build_steps(): ...",
+    "patch": "--- a/src/pipeline.py\n+++ b/src/pipeline.py\n@@ -1 +1 @@\n-def pipeline():\n+def build_steps():"
+  }
+]

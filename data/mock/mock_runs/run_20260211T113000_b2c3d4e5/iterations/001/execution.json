@@ -1,0 +1,10 @@
+[
+  {
+    "command": "pytest -q",
+    "returncode": 0,
+    "stdout": "..\n2 passed\n",
+    "stderr": "",
+    "timed_out": false,
+    "duration_sec": 3.9
+  }
+]

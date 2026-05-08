@@ -37,6 +37,15 @@ def _require_str_list(value: Any, field: str) -> list[str]:
     return result
 
 
+def _coerce_float(value: Any, field: str, default: float = 0.0) -> float:
+    if value is None:
+        return float(default)
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ContractError(f"{field} must be numeric.") from exc
+
+
 @dataclass(frozen=True)
 class PlanStep:
     id: str
@@ -206,4 +215,139 @@ class CriticOutput:
             "analysis": self.analysis,
             "next_actions": list(self.next_actions),
             "lessons": [asdict(lesson) for lesson in self.lessons],
+        }
+
+
+@dataclass(frozen=True)
+class VisionDetection:
+    label: str
+    confidence: float
+    bbox: dict[str, int]
+
+    @staticmethod
+    def from_dict(data: dict[str, Any]) -> "VisionDetection":
+        src = _require_dict(data, "vision_detection")
+        label = _require_str(src.get("label"), "vision_detection.label")
+        confidence = max(0.0, min(1.0, _coerce_float(src.get("confidence", 0.0), "vision_detection.confidence", 0.0)))
+        bbox_src = src.get("bbox", {})
+        bbox_dict = _require_dict(bbox_src, "vision_detection.bbox")
+        bbox: dict[str, int] = {}
+        for key in ("x1", "y1", "x2", "y2"):
+            try:
+                bbox[key] = int(bbox_dict.get(key, 0))
+            except (TypeError, ValueError) as exc:
+                raise ContractError(f"vision_detection.bbox.{key} must be an integer.") from exc
+        return VisionDetection(
+            label=label,
+            confidence=round(confidence, 4),
+            bbox=bbox,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class VisionMotion:
+    detected: bool
+    sustained: bool
+    ratio: float
+    regions: list[dict[str, Any]]
+    method: str
+
+    @staticmethod
+    def from_dict(data: dict[str, Any]) -> "VisionMotion":
+        src = _require_dict(data, "vision_motion")
+        detected = bool(src.get("detected", False))
+        sustained = bool(src.get("sustained", False))
+        ratio = max(0.0, _coerce_float(src.get("ratio", 0.0), "vision_motion.ratio", 0.0))
+        method = str(src.get("method", "")).strip() or "unknown"
+        regions_raw = src.get("regions", [])
+        if not isinstance(regions_raw, list):
+            raise ContractError("vision_motion.regions must be a list.")
+        regions = [dict(item) for item in regions_raw if isinstance(item, dict)]
+        return VisionMotion(
+            detected=detected,
+            sustained=sustained,
+            ratio=round(ratio, 5),
+            regions=regions,
+            method=method,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class VisionContextEvent:
+    timestamp_utc: str
+    frame_id: str
+    detections: list[VisionDetection]
+    motion: VisionMotion
+    detector_source: str
+
+    @staticmethod
+    def from_dict(data: dict[str, Any]) -> "VisionContextEvent":
+        src = _require_dict(data, "vision_event")
+        timestamp_utc = _require_str(src.get("timestamp_utc"), "vision_event.timestamp_utc")
+        frame_id = _require_str(src.get("frame_id"), "vision_event.frame_id")
+        detections_raw = src.get("detections", [])
+        if not isinstance(detections_raw, list):
+            raise ContractError("vision_event.detections must be a list.")
+        detections = [VisionDetection.from_dict(item) for item in detections_raw]
+        motion = VisionMotion.from_dict(src.get("motion", {}))
+        detector_source = str(src.get("detector_source", "")).strip() or "none"
+        return VisionContextEvent(
+            timestamp_utc=timestamp_utc,
+            frame_id=frame_id,
+            detections=detections,
+            motion=motion,
+            detector_source=detector_source,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "timestamp_utc": self.timestamp_utc,
+            "frame_id": self.frame_id,
+            "detections": [item.to_dict() for item in self.detections],
+            "motion": self.motion.to_dict(),
+            "detector_source": self.detector_source,
+        }
+
+
+@dataclass(frozen=True)
+class VisionContext:
+    session_id: str
+    active: bool
+    planner_context: str
+    summary: dict[str, Any]
+    events: list[VisionContextEvent]
+
+    @staticmethod
+    def from_dict(data: dict[str, Any]) -> "VisionContext":
+        src = _require_dict(data, "vision_context")
+        session_id = str(src.get("session_id", "")).strip()
+        active = bool(src.get("active", False))
+        planner_context = str(src.get("planner_context", "")).strip()
+        summary_raw = src.get("summary", {})
+        summary = _require_dict(summary_raw, "vision_context.summary")
+        events_raw = src.get("events", [])
+        if not isinstance(events_raw, list):
+            raise ContractError("vision_context.events must be a list.")
+        events = [VisionContextEvent.from_dict(item) for item in events_raw]
+        return VisionContext(
+            session_id=session_id,
+            active=active,
+            planner_context=planner_context,
+            summary=summary,
+            events=events,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "session_id": self.session_id,
+            "active": self.active,
+            "planner_context": self.planner_context,
+            "summary": dict(self.summary),
+            "events": [item.to_dict() for item in self.events],
         }

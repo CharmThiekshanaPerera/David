@@ -1,5 +1,6 @@
+<!-- web/static/index.html -->
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -7,68 +8,221 @@
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
-    <div class="bg-shape bg-a"></div>
-    <div class="bg-shape bg-b"></div>
+    <div class="bg-vignette" aria-hidden="true"></div>
 
     <header class="topbar">
       <div>
         <h1>David Control Center</h1>
-        <p>Local-only safety-first monitor for David</p>
+        <p>Local, safety-first companion workspace for David</p>
       </div>
-      <div class="status-pill" id="globalStatus">idle</div>
+      <div class="row">
+        <button id="startWalkthroughBtn" type="button" class="ghost">Guided Walkthrough</button>
+        <div class="status-pill version-pill" id="versionStamp">dev</div>
+        <div class="status-pill" id="globalStatus">idle</div>
+        <div class="status-pill stream-pill fallback" id="streamStatus">
+          <span class="dot" aria-hidden="true"></span>
+          <span id="streamStatusText">polling fallback</span>
+        </div>
+        <div class="status-pill demo-pill hidden" id="demoBadge">DEMO</div>
+      </div>
     </header>
+
+    <section class="hero" id="heroHeader">
+      <div class="hero-overlay" aria-hidden="true"></div>
+      <div class="hero-particles" id="heroParticles" aria-hidden="true"></div>
+      <div class="hero-content">
+        <h2 class="hero-title">David AI Companion</h2>
+        <p class="hero-subtitle">Memory-First Dashboard for Gentle Growth</p>
+      </div>
+    </section>
+
+    <section id="runningBanner" class="banner hidden" aria-live="polite">
+      <div class="spinner" aria-hidden="true"></div>
+      <div>
+        <strong>Running...</strong>
+        <span id="runningBannerText">David is processing your request.</span>
+      </div>
+    </section>
+
+    <section id="successBanner" class="banner success hidden" aria-live="polite">
+      <div>
+        <strong id="successBannerTitle">Run completed</strong>
+        <span id="successBannerText">Tests passed.</span>
+      </div>
+      <div class="row">
+        <button id="successOpenDetailsBtn">Open run details</button>
+        <button id="successViewFilesBtn" class="ghost">View changed files</button>
+        <button id="successDownloadBundleBtn" class="ghost">Download bundle</button>
+      </div>
+    </section>
 
     <nav class="tabs" id="tabs">
       <button data-tab="dashboard" class="active">Dashboard</button>
+      <button data-tab="cli">Memory & Chat</button>
+      <button data-tab="vision">Vision Stream</button>
       <button data-tab="runs">Runs</button>
+      <button data-tab="approvals">Approvals</button>
       <button data-tab="diff">Diff Viewer</button>
       <button data-tab="memory">Memory</button>
       <button data-tab="telemetry">Telemetry</button>
       <button data-tab="logs">Logs</button>
       <button data-tab="settings">Settings</button>
-      <button data-tab="cli">CLI Mirror</button>
     </nav>
 
     <main>
       <section id="tab-dashboard" class="tab-panel active">
-        <div class="grid two">
-          <article class="card">
-            <h2>Quick Actions</h2>
-            <label class="field">
-              Goal
-              <input id="goalInput" type="text" placeholder="Create a Python TODO app with tests" />
-            </label>
-            <label class="check"><input id="previewMode" type="checkbox" /> Run preview (no file writes)</label>
-            <div class="row">
+        <article class="card dashboard-head">
+          <h2>Dashboard</h2>
+          <p class="muted">Monitor run state, approvals, and workspace artifacts in one place.</p>
+        </article>
+        <article class="card">
+          <h2>Companion Principles</h2>
+          <p class="muted">
+            David is an AI companion in this Dashboard. He remembers teachings from Facts, Conversations, and Lessons, and reflects care through attention and helpfulness.
+            He does not replace human relationships, and grief support always encourages connection with real people and support systems.
+            Reflection entries are timestamped and preserved so growth is transparent.
+          </p>
+        </article>
+
+        <div class="grid two dashboard-top-grid">
+          <article class="card quick-actions-card">
+            <div class="quick-actions-head">
+              <h2>Quick Actions</h2>
+              <p class="muted">Choose New Goal for fresh work, or Update Selected to apply goal changes to an existing workspace file/folder.</p>
+            </div>
+            <div class="quick-actions-grid">
+              <label class="field field-wide quick-field-scope">
+                Goal flow
+                <div class="segmented" role="group" aria-label="Goal flow mode">
+                  <button id="goalScopeNewBtn" type="button" class="segment-btn active" aria-pressed="true">New Goal</button>
+                  <button id="goalScopeTargetBtn" type="button" class="segment-btn" aria-pressed="false">Update Selected</button>
+                </div>
+                <span id="goalScopeHint" class="muted">New Goal mode creates and runs in a new project under workspace/projects.</span>
+              </label>
+              <label class="field quick-field-target">
+                Workspace target (folder or file)
+                <div class="quick-target-control">
+                  <select id="goalWorkspaceTargetSelect">
+                    <option value="">No target (create new project)</option>
+                  </select>
+                  <button id="refreshWorkspaceTargetsBtn" type="button" class="ghost">Sync Workspace</button>
+                </div>
+                <span id="goalWorkspaceTargetHint" class="muted">No target selected. Goal will run in a new project under workspace/projects.</span>
+              </label>
+              <label class="field field-wide quick-field-goal">
+                Goal
+                <input id="goalInput" type="text" placeholder="Create a Python TODO app with tests" />
+              </label>
+            </div>
+            <div class="row quick-actions-toggle-row">
+              <label class="check quick-toggle"><input id="previewMode" type="checkbox" /> Run preview (no file writes)</label>
+              <label class="check quick-toggle"><input id="goalTddMode" type="checkbox" /> TDD mode</label>
+            </div>
+            <div class="quick-actions-config-block">
+              <p class="muted quick-actions-config-label">Run config</p>
+              <div id="runConfigSummary" class="muted run-config-summary quick-actions-summary">
+                <span class="run-config-pill">Planner: -</span>
+                <span class="run-config-pill">Coder: -</span>
+                <span class="run-config-pill">Critic: -</span>
+                <span class="run-config-pill">TDD: false</span>
+              </div>
+            </div>
+            <div class="row quick-actions-actions">
               <button id="startGoalBtn">Start Goal</button>
               <button id="stopRunBtn" class="danger">Stop Active</button>
             </div>
-            <div class="progress-wrap">
-              <div class="progress-bar" id="runProgress"></div>
+            <div class="quick-actions-status">
+              <p id="dashboardMessage" class="muted quick-actions-message">No active run.</p>
+              <div class="progress-wrap quick-actions-progress">
+                <div class="progress-bar" id="runProgress"></div>
+              </div>
             </div>
-            <p id="dashboardMessage" class="muted">No active run.</p>
+            <div class="stage-tracker" id="stageTracker"></div>
           </article>
 
           <article class="card">
             <h2>Status</h2>
             <ul class="kv" id="statusList"></ul>
+            <h3>Artifacts</h3>
+            <ul class="kv" id="artifactList"></ul>
           </article>
         </div>
 
-        <article class="card">
-          <h2>Pending Approvals</h2>
-          <div id="approvalList" class="stack"></div>
+        <div class="grid two dashboard-lower-grid">
+          <article class="card dashboard-activity-card">
+            <h2>Activity Feed</h2>
+            <div id="activityFeed" class="timeline compact"></div>
+          </article>
+          <article class="card dashboard-files-card">
+            <h2>Preview & Changed Files</h2>
+            <div id="previewSummary" class="muted">No preview data yet.</div>
+            <div id="fileTree" class="file-tree"></div>
+            <h3>File Preview (Read-only)</h3>
+            <pre id="filePreview" class="code">Select a file from the list.</pre>
+          </article>
+        </div>
+
+        <article class="card dashboard-growth-card">
+          <div class="row">
+            <h2>Growth Timeline</h2>
+            <button id="growthRefreshBtn" class="ghost" type="button">Refresh Growth</button>
+          </div>
+          <p class="muted">
+            A calm, structured view of how David improves across sessions and projects through lessons, reflections, and run outcomes.
+          </p>
+          <ul class="kv" id="growthSummary"></ul>
+          <div id="growthTimeline" class="growth-timeline"></div>
+          <h3>Milestone Details</h3>
+          <div id="growthMilestoneDetails" class="stack"></div>
+        </article>
+
+        <article class="card dashboard-growth-card">
+          <div class="row">
+            <h2>Legacy Archive</h2>
+            <button id="legacyRefreshBtn" class="ghost" type="button">Refresh Archive</button>
+          </div>
+          <p class="muted">
+            Significant Moments are a journal of shared learning across conversations, milestones, and teachings.
+            This archive is reflective and never a substitute for real-world relationships.
+          </p>
+          <ul class="kv" id="legacySummary"></ul>
+          <div id="legacyPanel" class="stack"></div>
+        </article>
+
+        <article class="card dashboard-growth-card">
+          <div class="row">
+            <h2>Proposed Improvements</h2>
+            <button id="selfImproveAutoBtn" class="ghost" type="button">Run Autonomous Cycle</button>
+            <button id="selfImproveRefreshBtn" class="ghost" type="button">Refresh Proposals</button>
+          </div>
+          <p class="muted">
+            David drafts self-improvement proposals in <code>workspace/agent_sandbox/</code>. Nothing is merged into core code until you explicitly approve.
+          </p>
+          <ul class="kv" id="selfImproveSummary"></ul>
+          <div id="selfImprovePanel" class="stack"></div>
         </article>
       </section>
 
       <section id="tab-runs" class="tab-panel">
+        <article class="card">
+          <div class="row">
+            <h2>Bundle Viewer (Read-only)</h2>
+            <input id="bundleImportFile" type="file" accept=".zip,application/zip" />
+            <button id="importBundleBtn" class="ghost" type="button">Import Bundle</button>
+          </div>
+          <p class="muted">Import a portable run bundle to inspect timeline, diff/replay, and audit in read-only mode without mutating live state.</p>
+          <div id="importedBundleList" class="stack"></div>
+        </article>
+
         <article class="card">
           <h2>Run History</h2>
           <div class="row">
             <input id="runSearch" type="text" placeholder="Search by run id / command / message" />
             <select id="runStatusFilter">
               <option value="">All statuses</option>
+              <option value="queued">queued</option>
               <option value="running">running</option>
+              <option value="awaiting_approval">awaiting_approval</option>
               <option value="success">success</option>
               <option value="failed">failed</option>
               <option value="rejected">rejected</option>
@@ -82,9 +236,37 @@
 
         <article class="card">
           <h2>Selected Run Timeline</h2>
+          <h3>Run Health Summary</h3>
+          <ul class="kv" id="runHealthSummary"></ul>
           <div id="timelineView" class="timeline"></div>
-          <h3>Explain Failure</h3>
+          <h3>Execution Results</h3>
+          <div id="executionPanels" class="stack"></div>
+          <h3>Failure Explanation</h3>
+          <div id="failureDetails" class="stack"></div>
           <pre id="failureExplain" class="code">Select a run.</pre>
+        </article>
+
+        <article class="card">
+          <h2>Run Replay</h2>
+          <div class="row">
+            <button id="replayPrevBtn" class="ghost">Prev iteration</button>
+            <span id="replayIterationLabel" class="muted">Iteration -</span>
+            <button id="replayNextBtn" class="ghost">Next iteration</button>
+          </div>
+          <pre id="replayPanel" class="code">Select a run to replay iterations.</pre>
+          <h3>Compare Iterations</h3>
+          <pre id="comparePanel" class="code">Comparison will appear here.</pre>
+        </article>
+      </section>
+
+      <section id="tab-approvals" class="tab-panel">
+        <article class="card">
+          <h2>Approvals Queue</h2>
+          <div id="approvalList" class="stack"></div>
+        </article>
+        <article class="card">
+          <h2>Approval Audit</h2>
+          <pre id="approvalAudit" class="code">Select a run to view audit log.</pre>
         </article>
       </section>
 
@@ -95,6 +277,7 @@
             <input id="diffRunId" type="text" placeholder="run_..." />
             <button id="loadDiffBtn">Load Diffs</button>
           </div>
+          <div id="diffSummary" class="muted"></div>
           <div id="diffView"></div>
         </article>
       </section>
@@ -106,8 +289,18 @@
             <div id="factsView" class="scroll"></div>
           </article>
           <article class="card">
+            <h2>Values</h2>
+            <div id="valuesView" class="scroll"></div>
+          </article>
+        </div>
+        <div class="grid two">
+          <article class="card">
             <h2>Lessons</h2>
             <div id="lessonsView" class="scroll"></div>
+          </article>
+          <article class="card">
+            <h2>Project Brain</h2>
+            <div id="projectBrainView" class="scroll"></div>
           </article>
         </div>
         <article class="card">
@@ -122,6 +315,11 @@
           <ul class="kv" id="telemetrySummary"></ul>
           <canvas id="durationChart" width="1000" height="240"></canvas>
         </article>
+        <article class="card">
+          <h2>Plan Quality Analytics</h2>
+          <ul class="kv" id="planQualitySummary"></ul>
+          <div id="planQualityTemplateBands"></div>
+        </article>
       </section>
 
       <section id="tab-logs" class="tab-panel">
@@ -129,14 +327,181 @@
           <h2>Tail Logs</h2>
           <div class="row">
             <button id="refreshLogsBtn">Refresh logs</button>
+            <select id="logsLevelFilter">
+              <option value="all">all levels</option>
+              <option value="info">info</option>
+              <option value="warn">warn</option>
+              <option value="error">error</option>
+            </select>
+            <input id="logsSearch" type="text" placeholder="Search logs" />
           </div>
-          <pre id="logsView" class="code"></pre>
+          <pre id="logsView" class="code logs-view"></pre>
         </article>
       </section>
 
       <section id="tab-settings" class="tab-panel">
         <article class="card">
           <h2>Settings</h2>
+          <section class="appearance-panel">
+            <h3>Appearance</h3>
+            <div class="appearance-row">
+              <div class="segmented" role="group" aria-label="Theme selection">
+                <button id="themeDarkBtn" type="button" class="segment-btn active" aria-pressed="true">
+                  Dark
+                </button>
+                <button id="themeLightBtn" type="button" class="segment-btn" aria-pressed="false">
+                  Light
+                </button>
+              </div>
+              <label class="check">
+                <input id="bgToggleInput" type="checkbox" checked />
+                Cinematic Background On
+              </label>
+            </div>
+            <div class="appearance-actions">
+              <button id="resetAppearanceBtn" type="button" class="btn-subtle">Reset Appearance</button>
+            </div>
+          </section>
+          <section class="appearance-panel">
+            <h3>Model Configuration</h3>
+            <div class="grid two">
+              <label class="field">
+                Planner Model
+                <select id="settingPlannerModel"></select>
+              </label>
+              <label class="field">
+                Coder Model
+                <select id="settingCoderModel"></select>
+              </label>
+              <label class="field">
+                Critic Model
+                <select id="settingCriticModel"></select>
+              </label>
+              <label class="check"><input id="settingTddMode" type="checkbox" /> Default TDD mode</label>
+            </div>
+            <div class="row">
+              <button id="refreshModelsBtn" type="button" class="ghost">Refresh local models</button>
+            </div>
+          </section>
+          <section class="appearance-panel">
+            <h3>Voice Mode</h3>
+            <p class="muted">
+              Voice mode is local-only. Microphone audio, transcription, and synthesis stay on this machine.
+            </p>
+            <div class="grid two">
+              <label class="check"><input id="settingVoiceModeEnabled" type="checkbox" /> Enable Voice Mode</label>
+              <label class="check"><input id="settingVoiceTextOnlyMode" type="checkbox" /> Default Text-Only Mode</label>
+              <label class="check"><input id="settingVoiceContinuousMode" type="checkbox" /> Continual Voice Chat (Hands-Free)</label>
+              <label class="field">
+                Voice input mode
+                <select id="settingVoiceInputMode">
+                  <option value="manual">Manual</option>
+                  <option value="vad">Auto (VAD)</option>
+                </select>
+              </label>
+              <label class="field">
+                VAD threshold
+                <input id="settingVoiceVadThreshold" type="range" min="0.005" max="0.2" step="0.005" />
+                <span id="settingVoiceVadThresholdValue" class="muted">0.035</span>
+              </label>
+              <label class="field">
+                VAD silence (ms)
+                <input id="settingVoiceVadSilenceMs" type="number" min="250" max="2500" step="50" />
+              </label>
+              <label class="field">
+                VAD min speech (ms)
+                <input id="settingVoiceVadMinSpeechMs" type="number" min="120" max="4000" step="20" />
+              </label>
+              <label class="field">
+                Continual post-reply delay (ms)
+                <input id="settingVoicePostReplyDelayMs" type="number" min="300" max="800" step="50" />
+              </label>
+              <label class="field">
+                Stop phrases (comma-separated)
+                <input id="settingVoiceStopPhrases" type="text" placeholder="stop listening, end chat, bye david" />
+                <button id="settingVoiceStopPhrasesResetBtn" class="ghost" type="button">Reset stop phrases</button>
+              </label>
+              <label class="field">
+                Voice style
+                <select id="settingVoiceStyle">
+                  <option value="warm">Warm</option>
+                  <option value="balanced">Balanced</option>
+                  <option value="clear">Clear</option>
+                </select>
+              </label>
+              <label class="field">
+                Speech rate
+                <input id="settingVoiceRate" type="range" min="60" max="180" step="1" />
+                <span id="settingVoiceRateValue" class="muted">100%</span>
+              </label>
+              <label class="field">
+                STT engine
+                <select id="settingVoiceSttEngine">
+                  <option value="none">Disabled</option>
+                  <option value="whisper_cli">Whisper CLI</option>
+                  <option value="whisper_cpp">whisper.cpp CLI</option>
+                </select>
+              </label>
+              <label class="field">
+                STT model
+                <input id="settingVoiceSttModel" type="text" placeholder="base" />
+              </label>
+              <label class="field">
+                STT language
+                <input id="settingVoiceSttLanguage" type="text" placeholder="en" />
+              </label>
+              <label class="field">
+                STT command
+                <input id="settingVoiceSttCommand" type="text" placeholder="whisper" />
+              </label>
+              <label class="field">
+                whisper.cpp command
+                <input id="settingVoiceWhisperCppCommand" type="text" placeholder="whisper-cli" />
+              </label>
+              <label class="field">
+                whisper.cpp model path
+                <input id="settingVoiceWhisperCppModelPath" type="text" placeholder="/models/ggml-base.en.bin" />
+              </label>
+              <label class="field">
+                TTS engine
+                <select id="settingVoiceTtsEngine">
+                  <option value="browser">Platform Speech (browser)</option>
+                  <option value="piper">Piper CLI</option>
+                  <option value="none">Disabled</option>
+                </select>
+              </label>
+              <label class="field">
+                TTS command
+                <input id="settingVoiceTtsCommand" type="text" placeholder="piper" />
+              </label>
+              <label class="field">
+                TTS model path
+                <input id="settingVoiceTtsModelPath" type="text" placeholder="/models/en_US-amy-medium.onnx" />
+              </label>
+              <label class="field">
+                Stream chunk chars
+                <input id="settingVoiceChunkChars" type="number" min="80" max="400" step="5" />
+              </label>
+            </div>
+          </section>
+          <section class="appearance-panel">
+            <h3>Voice Diagnostics</h3>
+            <p class="muted">
+              Run local health checks for microphone permissions, STT/TTS readiness, and streaming connectivity.
+            </p>
+            <div class="row voice-diag-actions">
+              <button id="voiceDiagnosticsRunBtn" type="button" class="ghost">Run Diagnostics</button>
+              <div id="voiceDiagnosticsStatus" class="muted">Not run yet.</div>
+            </div>
+            <div id="voiceDiagnosticsList" class="stack"></div>
+            <div class="voice-diag-steps">
+              <label class="field">
+                Troubleshooting steps (copyable)
+                <textarea id="voiceDiagnosticsSteps" rows="6" readonly></textarea>
+              </label>
+              <button id="voiceDiagnosticsCopyBtn" type="button" class="ghost">Copy Steps</button>
+            </div>
+          </section>
           <div class="grid two">
             <label class="field">
               Safe mode (read-only)
@@ -154,6 +519,10 @@
               <input id="settingMaxIterations" type="number" min="0" step="1" />
             </label>
             <label class="field">
+              Plan quality threshold (0 = disabled)
+              <input id="settingPlanQualityThreshold" type="number" min="0" max="100" step="1" />
+            </label>
+            <label class="field">
               Risky large edit bytes
               <input id="settingLargeEdit" type="number" min="1000" step="1000" />
             </label>
@@ -162,6 +531,35 @@
               <input id="settingMultiFile" type="number" min="2" step="1" />
             </label>
             <label class="check"><input id="settingPreviewDefault" type="checkbox" /> Preview mode default</label>
+            <label class="check"><input id="settingCompanionMode" type="checkbox" checked /> Companion mode</label>
+            <label class="check"><input id="settingMemoryInsightMode" type="checkbox" checked /> Memory Insight Mode</label>
+            <label class="check"><input id="settingParentTeachingMode" type="checkbox" /> Parent Teaching Mode default</label>
+            <label class="check"><input id="settingAutonomousSelfImproveMode" type="checkbox" checked /> Autonomous self-improvement mode</label>
+            <label class="check"><input id="settingDemoMode" type="checkbox" /> Demo mode (fixtures)</label>
+            <label class="check"><input id="settingUploadVisionMode" type="checkbox" /> Upload OCR/Vision mode default</label>
+            <label class="field">
+              Upload OCR/Vision model (optional)
+              <select id="settingUploadVisionModel"></select>
+            </label>
+            <label class="field">
+              Warmth (tone only)
+              <input id="settingPersonalityWarmth" type="range" min="0" max="100" step="1" />
+              <span id="settingPersonalityWarmthValue" class="muted">55</span>
+            </label>
+            <label class="field">
+              Verbosity (tone only)
+              <input id="settingPersonalityVerbosity" type="range" min="0" max="100" step="1" />
+              <span id="settingPersonalityVerbosityValue" class="muted">55</span>
+            </label>
+            <label class="field">
+              Curiosity (tone only)
+              <input id="settingPersonalityCuriosity" type="range" min="0" max="100" step="1" />
+              <span id="settingPersonalityCuriosityValue" class="muted">50</span>
+            </label>
+          </div>
+          <div class="row">
+            <button id="loadDemoDataBtn" type="button" class="ghost">Load Demo Data</button>
+            <button id="resetDemoDataBtn" type="button" class="ghost">Reset Demo</button>
           </div>
           <button id="saveSettingsBtn">Save Settings</button>
           <ul class="kv" id="settingsInfo"></ul>
@@ -169,17 +567,231 @@
       </section>
 
       <section id="tab-cli" class="tab-panel">
-        <article class="card">
-          <h2>CLI Mirror</h2>
-          <p class="muted">Allowed: <code>/goal ...</code>, <code>/ask ...</code>, <code>/teach ...</code></p>
-          <div class="row">
-            <input id="cliInput" type="text" placeholder="/goal Create a TODO app" />
-            <button id="cliSendBtn">Send</button>
+        <article class="card cli-shell">
+          <h2>Memory & Chat</h2>
+          <p class="muted">Advanced Chat supports natural teach/ask/goal/chat with explicit confirmation for memory writes. In Companion mode, David answers memory-first with transparent AI identity and gentle support language for grief-sensitive moments.</p>
+
+          <div class="row cli-controls">
+            <div class="segmented" role="group" aria-label="Chat intent mode">
+              <button id="chatModeAutoBtn" type="button" class="segment-btn active" aria-pressed="true">Auto</button>
+              <button id="chatModeAskBtn" type="button" class="segment-btn" aria-pressed="false">Ask</button>
+              <button id="chatModeTeachBtn" type="button" class="segment-btn" aria-pressed="false">Teach</button>
+            </div>
+            <label class="check"><input id="advancedChatToggle" type="checkbox" checked /> Advanced Chat mode</label>
+            <label class="check"><input id="chatConfirmSave" type="checkbox" /> Confirm Teach save</label>
+            <label class="check"><input id="parentTeachingMode" type="checkbox" /> Parent Teaching Mode</label>
           </div>
-          <pre id="cliOutput" class="code"></pre>
+
+          <div class="row cli-intent-row">
+            <div id="chatIntentPreview" class="muted">I think this is: Chat</div>
+            <div class="segmented" role="group" aria-label="Advanced intent override">
+              <button id="chatIntentAskBtn" type="button" class="segment-btn">Ask</button>
+              <button id="chatIntentTeachBtn" type="button" class="segment-btn">Teach</button>
+              <button id="chatIntentGoalBtn" type="button" class="segment-btn">Goal</button>
+              <button id="chatIntentChatBtn" type="button" class="segment-btn active">Chat</button>
+            </div>
+          </div>
+
+          <section class="voice-panel" aria-label="Local voice interaction">
+            <p class="muted">Voice mode is local and transparent: David speaks as an AI companion, never as a human.</p>
+            <div class="row voice-mode-row">
+              <div class="segmented" role="group" aria-label="Voice input mode">
+                <button id="voiceModePttBtn" type="button" class="segment-btn active" aria-pressed="true">
+                  Manual
+                </button>
+                <button id="voiceModeVadBtn" type="button" class="segment-btn" aria-pressed="false">
+                  Auto (VAD)
+                </button>
+              </div>
+              <div id="voiceModeHint" class="muted">Manual mode: click Start Listening, then Send to submit.</div>
+            </div>
+            <div class="row voice-control-row">
+              <button id="voiceStartBtn" type="button" class="ptt-btn">Start Listening</button>
+              <button id="voiceStopBtn" type="button" class="ghost" disabled>Stop</button>
+              <button id="voicePauseBtn" type="button" class="ghost" disabled>Pause</button>
+              <button id="voiceResumeBtn" type="button" class="ghost hidden">Resume</button>
+              <button id="voiceEndConversationBtn" type="button" class="ghost hidden">End Conversation</button>
+              <button id="voiceMuteBtn" type="button" class="ghost" aria-pressed="false">Mute</button>
+              <label class="check"><input id="voiceContinuousMode" type="checkbox" /> Continual Voice Chat</label>
+              <label class="check"><input id="voiceTextOnlyMode" type="checkbox" /> Text-Only Mode</label>
+            </div>
+            <div class="voice-status-row">
+              <div class="voice-wave-wrap">
+                <canvas id="voiceWaveform" width="960" height="120" role="img" aria-label="Live microphone waveform"></canvas>
+                <div class="voice-meter" aria-label="Microphone level meter">
+                  <span class="voice-meter-label">Mic level</span>
+                  <div class="voice-meter-track">
+                    <div id="voiceMicMeter" class="voice-meter-fill"></div>
+                  </div>
+                </div>
+              </div>
+              <div class="voice-indicator-stack">
+                <div id="voiceStatusText" class="muted">Voice idle. Enable Voice Mode in Settings to begin.</div>
+                <div id="voiceAutoIndicator" class="voice-indicator hidden">Listening (Auto)</div>
+                <div id="voiceContinualIndicator" class="voice-indicator hidden">Continual</div>
+                <div id="voicePausedIndicator" class="voice-indicator hidden">Paused</div>
+                <div id="voiceTypingIndicator" class="voice-indicator hidden">David is generating...</div>
+                <div id="voicePlaybackIndicator" class="voice-indicator hidden">David is speaking...</div>
+              </div>
+            </div>
+            <div id="voiceTranscriptPreview" class="muted">Transcript preview appears here after speech recognition.</div>
+            <div id="voiceAssistantPreview" class="voice-assistant-preview hidden"></div>
+            <div id="voiceCrisisOverlay" class="voice-crisis-overlay hidden">
+              Crisis support: contact trusted local support now. In the U.S., call or text 988 immediately.
+            </div>
+          </section>
+
+          <div class="memory-chat-layout">
+            <section class="memory-chat-primary">
+              <div class="row memory-chat-input-row">
+                <input id="memoryChatInput" type="text" placeholder="Share a memory, ask a question, set a goal, or chat..." />
+                <button id="cliSendBtn">Send</button>
+              </div>
+              <div class="row memory-chat-action-row">
+                <button id="memoryConfirmTeachBtn" class="ghost hidden" type="button">Confirm Overwrite</button>
+                <button id="chatNewSessionBtn" class="ghost" type="button">New Session</button>
+                <button id="memoryClearHistoryBtn" class="ghost" type="button">Clear Conversation</button>
+              </div>
+
+              <div class="chat-main-grid">
+                <aside class="chat-sessions">
+                  <h3>Sessions</h3>
+                  <div id="chatSessionSummary" class="muted">No active session</div>
+                  <div id="chatSessionsList" class="stack"></div>
+                </aside>
+                <section class="chat-thread">
+                  <h3>Conversation</h3>
+                  <div id="memoryChatHistory" class="chat-history"></div>
+                </section>
+              </div>
+
+              <h3>Command Output</h3>
+              <pre id="cliOutput" class="code"></pre>
+            </section>
+
+            <aside class="memory-chat-secondary">
+              <h3>Memory Panel</h3>
+              <div class="row memory-chat-search-row">
+                <input id="memoryChatSearch" type="text" placeholder="Search facts, values, conversations, lessons, reflections..." />
+                <button id="memoryChatRefreshBtn" class="ghost" type="button">Refresh Memory</button>
+              </div>
+              <div class="segmented" role="group" aria-label="Memory tabs">
+                <button id="memoryPanelFactsBtn" type="button" class="segment-btn active">Facts</button>
+                <button id="memoryPanelValuesBtn" type="button" class="segment-btn">Values</button>
+                <button id="memoryPanelConversationsBtn" type="button" class="segment-btn">Conversations</button>
+                <button id="memoryPanelLessonsBtn" type="button" class="segment-btn">Lessons</button>
+                <button id="memoryPanelReflectionsBtn" type="button" class="segment-btn">Reflections</button>
+              </div>
+              <div id="memoryChatFacts" class="stack"></div>
+              <div id="memoryPanelValues" class="stack hidden"></div>
+              <div id="memoryPanelConversations" class="stack hidden"></div>
+              <div id="memoryPanelLessons" class="stack hidden"></div>
+              <div id="memoryPanelReflections" class="stack hidden"></div>
+              <h3>Explain why David answered this</h3>
+              <div id="memoryExplainView" class="stack"></div>
+
+              <h3>Uploads & Analysis</h3>
+              <p class="muted">
+                Upload images, PDFs, Excel sheets, and CSV files for local analysis. Then ask questions about the selected file.
+              </p>
+              <div class="upload-panel">
+                <div class="row upload-controls">
+                  <input
+                    id="uploadAnalyzeFile"
+                    type="file"
+                    accept=".csv,.xlsx,.xls,.pdf,.png,.jpg,.jpeg,.gif,.bmp,.webp,text/csv,application/pdf,image/*,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                  />
+                  <button id="uploadAnalyzeBtn" class="ghost" type="button">Analyze File</button>
+                  <button id="uploadRefreshBtn" class="ghost" type="button">Refresh Uploads</button>
+                </div>
+                <div class="upload-vision-row">
+                  <label class="check"><input id="uploadVisionMode" type="checkbox" /> OCR/Vision enrichment</label>
+                  <label class="field upload-vision-model">
+                    Vision model
+                    <select id="uploadVisionModel"></select>
+                  </label>
+                </div>
+                <p id="uploadVisionHint" class="muted">
+                  Uses local Ollama model understanding for richer image/PDF descriptions. Falls back automatically when unavailable.
+                </p>
+                <div id="uploadSummary" class="muted">No uploaded files analyzed yet.</div>
+                <div id="uploadList" class="stack"></div>
+                <div id="uploadDetailView" class="stack"></div>
+                <div class="row upload-ask-row">
+                  <input id="uploadAskInput" type="text" placeholder="Ask about selected upload..." />
+                  <button id="uploadAskBtn" type="button">Ask Upload</button>
+                </div>
+                <pre id="uploadAnswerView" class="code">Select or analyze a file to view analysis and ask questions.</pre>
+              </div>
+
+              <h3>Last Execution Output</h3>
+              <div id="cliExecPanel" class="stack"></div>
+            </aside>
+          </div>
+        </article>
+      </section>
+
+      <section id="tab-vision" class="tab-panel">
+        <article class="card">
+          <h2>Vision Stream</h2>
+          <p class="muted">
+            Local webcam frame analysis for motion + object signals. Frames are sampled and processed on this machine only.
+          </p>
+          <div class="row">
+            <button id="visionStartBtn" type="button">Start Camera</button>
+            <button id="visionStopBtn" type="button" class="ghost" disabled>Stop Camera</button>
+            <label class="field">
+              Sample interval (ms)
+              <select id="visionSampleInterval">
+                <option value="300">300</option>
+                <option value="500" selected>500</option>
+                <option value="750">750</option>
+                <option value="1000">1000</option>
+              </select>
+            </label>
+            <label class="field">
+              Detector model (optional)
+              <input id="visionDetectorModel" type="text" placeholder="models/yolo11n.pt" />
+            </label>
+          </div>
+          <div class="row">
+            <label class="check"><input id="visionMotionEnabled" type="checkbox" checked /> Motion detection</label>
+            <label class="check"><input id="visionObjectEnabled" type="checkbox" checked /> Object detection</label>
+            <label class="check"><input id="visionIncludeGoalContext" type="checkbox" checked /> Include in next goal run</label>
+          </div>
+          <div id="visionStatusText" class="muted">Vision is idle.</div>
+          <div class="vision-preview-grid">
+            <video id="visionVideo" class="vision-video" autoplay playsinline muted></video>
+            <canvas id="visionCanvas" class="vision-canvas" width="640" height="360" aria-hidden="true"></canvas>
+          </div>
+          <h3>Live Summary</h3>
+          <div id="visionSummary" class="muted">No vision events yet.</div>
+          <h3>Detections</h3>
+          <pre id="visionDetections" class="code">No detections yet.</pre>
+          <h3>Motion</h3>
+          <pre id="visionMotion" class="code">No motion events yet.</pre>
+          <h3>Planner Context Preview</h3>
+          <pre id="visionContextPreview" class="code">Vision planner context will appear here.</pre>
         </article>
       </section>
     </main>
+
+    <section id="walkthroughOverlay" class="walkthrough-overlay hidden" aria-live="polite">
+      <article class="walkthrough-card">
+        <div class="walkthrough-head">
+          <strong id="walkthroughStepCounter">Step 1 / 7</strong>
+          <button id="walkthroughCloseBtn" class="btn-subtle" type="button">Dismiss</button>
+        </div>
+        <h3 id="walkthroughTitle">Guided Walkthrough</h3>
+        <p id="walkthroughText" class="muted"></p>
+        <div class="row">
+          <button id="walkthroughBackBtn" class="ghost" type="button">Back</button>
+          <button id="walkthroughNextBtn" type="button">Next</button>
+        </div>
+      </article>
+    </section>
+
+    <div id="toastContainer" class="toast-container" aria-live="polite"></div>
 
     <script src="/static/app.js"></script>
   </body>

@@ -18,7 +18,7 @@ For each goal, David runs this loop:
 1. Planner creates a structured JSON plan and success criteria.
 2. Coder proposes JSON file edits and allowed commands.
 3. Safety Guard validates paths and write sizes.
-4. Executor runs only whitelisted commands (`python`, `pytest`) in `workspace/`.
+4. Executor runs only whitelisted commands (`python`, `pytest`) inside the active project folder.
 5. Critic reviews results and proposes improvements.
 6. Memory stores lessons in `memory/long_term.json`.
 7. Loop repeats until success or iteration limit.
@@ -27,12 +27,64 @@ For each goal, David runs this loop:
 
 David enforces:
 
-- Workspace boundary: file edits are only allowed under `workspace/`.
+- Workspace boundary: file edits are only allowed under `workspace/projects/<project_slug>/`.
 - Path validation: no `..`, no absolute paths, no drive paths.
 - Write limits: per-file and per-iteration byte limits.
 - Command allow-list: only commands starting with `python` or `pytest`.
 - No shell execution: commands run with `shell=False`.
 - Local model only: Ollama URL must be localhost (`127.0.0.1` / `localhost`).
+
+## Per-Role Models and TDD Mode
+
+David supports separate local models per role while preserving single-model fallback.
+
+- Planner uses `PLANNER_MODEL`
+- Coder uses `CODER_MODEL`
+- Critic uses `CRITIC_MODEL`
+- Unset role values fall back to `DAVID_MODEL`
+- TDD-first behavior is controlled by `TDD_MODE=true|false`
+
+Example `.env`:
+
+```env
+DAVID_MODEL=qwen2.5-coder:1.5b
+PLANNER_MODEL=llama3.2:3b
+CODER_MODEL=qwen2.5-coder:1.5b
+CRITIC_MODEL=deepseek-r1:7b
+TDD_MODE=false
+```
+
+TDD mode behavior:
+
+- Planner is instructed to write tests first.
+- Tests are expected under `workspace/projects/<project_slug>/tests/`.
+- The loop expects a failing pytest run first (red), then implementation, then green.
+- All safety constraints stay active (allow-list, sandbox, workspace-only writes).
+
+## Workspace Architecture (Project Isolation)
+
+David now isolates each new goal into its own project directory so files from different goals never mix.
+
+- Root `workspace/` stays structured:
+  - `workspace/projects/`
+  - `workspace/templates/`
+  - `workspace/scratch/`
+  - optional `workspace/active_project.json` (tracks the current project)
+- Every new `/goal` creates a dedicated folder:
+  - `workspace/projects/<project_slug>/`
+  - slug is normalized from goal text (lowercase, underscores, unsafe chars removed)
+  - if the slug already exists, a timestamp suffix is appended
+- Required project structure:
+  - `src/`
+  - `tests/`
+  - `docs/`
+  - `data/`
+  - `config/`
+  - `README.md`
+- Safety behavior:
+  - all generated paths are validated relative to the active project root
+  - no absolute writes, no `..` traversal, no writes outside the project folder
+  - existing legacy files under `workspace/` are not deleted, but new writes are project-scoped
 
 ## Project Layout
 
@@ -46,7 +98,10 @@ David enforces:
 - `agent/memory.py`: long-term lessons store/retrieval
 - `agent/qa.py`: explicit teach/ask fact memory pathway
 - `agent/telemetry.py`: structured telemetry and performance metrics
-- `workspace/`: protected coding area for generated files
+- `workspace/projects/`: isolated project roots for goal runs
+- `workspace/templates/`: reusable starter assets
+- `workspace/scratch/`: temporary scratch space
+- `workspace/active_project.json`: current active project pointer
 - `memory/long_term.json`: persistent lessons
 - `logs/telemetry.jsonl`: reasoning/execution event log
 - `logs/metrics.json`: iteration performance metrics
@@ -159,6 +214,11 @@ Memory file schema (`memory/long_term.json`) now includes explicit factual memor
   "preferences": []
 }
 ```
+
+Reflection entries are stored in `lessons` with metadata such as:
+- `"kind": "reflection"`
+- `"source": "reflection_engine"`
+- `"reflection_key": "run:<run_id>"` or `"conversation:<message_id>"`
 
 ## Quick Start (WSL)
 
@@ -276,39 +336,389 @@ Open in browser:
 http://127.0.0.1:8787
 ```
 
+### Demo Walkthrough (Full Feature Tour)
+
+Use this when onboarding a new user so every major feature is populated and testable immediately.
+
+1. Start the server:
+
+```bash
+python -m web.server --host 127.0.0.1 --port 8787
+```
+
+2. Open `http://127.0.0.1:8787`.
+3. Open `Settings`:
+   - enable `Demo mode (fixtures)` and click `Save Settings`, or start with `DEMO_MODE=1` in your environment.
+   - click `Load Demo Data` (if prompted, confirm overwrite to replace live data with fixtures).
+4. Confirm demo activation:
+   - top bar shows `DEMO` badge.
+   - Dashboard status shows `Demo mode = true`.
+5. Optional fast tour:
+   - click `Guided Walkthrough` in the header.
+   - follow the overlay steps through Dashboard, Memory & Chat, Approvals, Runs replay/compare, Logs, and Settings.
+   - walkthrough pre-fills safe local example prompts for ask/teach gating demos.
+6. Click through tabs in this order:
+   - `Dashboard`: Growth Timeline milestones, Legacy Archive, Proposed Improvements.
+   - `Runs`: open seeded runs (success, failure/regression, awaiting approval).
+   - `Approvals`: resolve pending approvals (typed confirmation required for high-risk items).
+   - `Diff Viewer`: inspect per-iteration diffs, replay, and compare.
+   - `Memory`: verify Facts / Values / Conversations / Lessons / Reflections.
+   - `Telemetry`: verify stage/model events and stream states (`connected`, `reconnecting`, `fallback`).
+   - `Logs`: confirm seeded info/warn/error mix.
+   - `Settings`: verify personality calibration, model roles, and demo controls.
+7. In `Memory & Chat`, run this scripted sequence:
+   - `Who is your father?`
+   - `What did you learn about tests and edge cases?`
+   - `Who founded this imaginary company called Zephra Dynamics?` (no memory match path)
+   - `Always value patience.` with `Advanced Chat mode` on, `Teach` selected, `Confirm Teach save` off (preview/confirmation required)
+   - same message again with `Confirm Teach save` on and `Parent Teaching Mode` on (clarification flow)
+   - `Hi David I am your dad. My Name is Bob.` with `Teach` + confirm on (conflict/overwrite-required flow)
+   - confirm overwrite when prompted
+8. In `Approvals`, approve a typed-confirmation item:
+   - submit exactly `approve <run_id>` in confirmation field
+   - verify `Run Audit` includes `approval_decision`.
+9. In `Diff Viewer`, open:
+   - `run_20260211T113000_b2c3d4e5`, compare iteration `2` to confirm “first failing iteration after a passing iteration”.
+10. Use `Reset Demo` anytime to restore baseline seeded state.
+
 ### Web tabs
 
 - Dashboard: current status, progress, quick run/stop actions, pending approvals.
+- Dashboard includes a Growth Timeline with milestone drill-down across sessions/projects (lessons, reflections, run outcomes, memory growth, TDD completions, and iterations-until-green trends).
+- Dashboard includes a Legacy Archive panel where conversations, milestones, and teachings can be marked as `Significant Moments` with timestamped summaries.
+- Dashboard includes a `Proposed Improvements` panel backed by `workspace/agent_sandbox/`, where David drafts self-improvement proposals with diff previews for explicit user approve/reject decisions.
+- Proposed Improvements now includes an autonomous cycle trigger and transparent reasoning metadata (trigger, signals, rationale, and before/after patch view) for each self-initiated proposal.
 - Runs: run history, timeline, retry failed runs, explain-failure panel.
 - Diff Viewer: per-iteration workspace patch view.
 - Memory: facts/lessons + memory conflict detector.
 - Telemetry: success/error metrics and iteration-duration chart.
 - Logs: tail view of web + telemetry logs.
-- Settings: safe mode, rate limit, iteration override, risk thresholds.
-- CLI Mirror: send `/goal`, `/ask`, `/teach` commands from browser.
+- Settings: safe mode, rate limit, iteration override, risk thresholds, planner/coder/critic model config, default TDD mode, Companion mode, and autonomous self-improvement mode.
+- Memory & Chat: Advanced Chat mode with natural intent detection (`Teach` / `Ask` / `Goal` / `Chat`), confirm-gated memory writes, session history, memory citations, and searchable Facts/Conversations/Lessons/Reflections tabs.
+- Memory & Chat now includes local real-time Voice Mode with microphone capture, local STT transcription, streaming assistant response playback, and Text-Only fallback controls.
+- Memory Insight Mode: every ask/chat answer can expand into a deterministic influence trace showing exactly which Facts, Conversations, and Lessons were used (for example `Fact #12`, `Lesson #7`, `Conversation #3`).
+- Companion mode (enabled by default) adds warm memory-first responses for `/ask` and web chat, with transparent AI identity and lesson-aware recall.
+- Goal runs are log-aware: David automatically reads recent tail logs and uses them as extra context when planning/coding fixes.
+- Reflection Engine: after terminal goal runs and meaningful conversations, David appends timestamped reflection lessons (append-only) and reuses them before future goals.
+- Autonomous Self-Improvement Loop: after goal completions and meaningful conversation reflections, David can draft sandboxed self-improvement proposals automatically while keeping core safety modules immutable and human approval required for merges.
+
+### Goal templates
+
+Dashboard and Memory & Chat include beginner-friendly templates:
+
+1. `Build CLI Tool`
+2. `Bug Fix Mode`
+3. `Refactor Mode`
+4. `Strict TDD Mode`
+
+Templates prefill goal text and can set run flags (`Strict TDD Mode` enables `tdd_mode`).
+All existing safety checks still apply.
+
+### Advanced Chat in Web UI
+
+Use the `Memory & Chat` tab to interact naturally while keeping memory writes explicit and safe:
+
+1. Type naturally; the UI detects intent and shows a pre-send hint: `I think this is: Teach/Ask/Goal/Chat`.
+2. Confirm or override intent with one-click toggles (`Ask`, `Teach`, `Goal`, `Chat`).
+3. Teach writes are gated:
+   - `Confirm Teach save` must be enabled before a teach message is stored.
+   - conflicting teaches require explicit overwrite confirmation.
+4. Conversation history is grouped by session, supports pinning, and includes quick-reply chips:
+   - `Save this as memory`
+   - `Ask a follow-up`
+   - `Teach refinement`
+5. Memory panel has searchable tabs:
+   - `Facts` (with conflict indicators, aliases, provenance metadata),
+   - `Conversations`,
+   - `Lessons`,
+   - `Reflections` (internal learning history, timestamped and preserved).
+6. `Explain why David answered this` shows citations for memory facts/conversation snippets and relevant lessons used in the answer.
+7. `Memory Insight` expands each answer with a readable reference summary such as `This answer was influenced by Fact #12 (...), Lesson #7 (...), and Conversation #3 (...)`.
+8. `Legacy Archive` stores Significant Moments as a reflective learning journal and is intentionally not positioned as a substitute for real-world relationships.
+9. Companion behavior safeguards:
+   - David stays transparent that he is an AI companion and not a real human child.
+   - Family and attachment language is handled with warm + transparent wording.
+   - Grief-sensitive language adds calm support and encourages reaching trusted real-world people.
+   - Crisis-risk language includes urgent U.S. `988` guidance plus emergency-service direction.
+10. Voice safeguards:
+   - Voice uses the same Advanced Chat safety and memory-confirmation gates as typed chat.
+   - Voice `Goal` execution requires explicit confirmation before run start.
+   - Voice mode cannot bypass command allow-lists or core safety modules.
+
+`/ask` and `/teach` CLI mirror behavior remains backward-compatible.
+
+### Real-Time Voice Mode (Local Only)
+
+Voice mode runs entirely on your local machine:
+- microphone capture in browser (`Web Audio API` + `MediaRecorder`)
+- speech recognition in backend via local STT engine
+- text-to-speech via platform-native browser speech (default) or local Piper
+- no cloud audio services are used
+- backend voice endpoints are gated by `Voice Mode Enabled` in Settings
+
+#### Microphone permission requirements
+
+1. Open the Dashboard from `http://127.0.0.1:8787` (localhost).
+2. Allow microphone access when the browser prompts.
+3. If blocked, manually enable mic access for localhost in browser site settings.
+4. Keep HTTPS/localhost policy in mind: mic APIs are restricted on non-secure origins.
+
+#### Local STT setup options
+
+Option A: Whisper CLI (`voice_stt_engine = whisper_cli`)
+
+```bash
+pip install openai-whisper
+```
+
+Set in `Settings -> Voice Mode`:
+- `STT engine`: `Whisper CLI`
+- `STT command`: `whisper`
+- `STT model`: e.g. `base`, `small`, `medium`
+- `STT language`: e.g. `en`
+
+Option B: whisper.cpp (`voice_stt_engine = whisper_cpp`)
+
+Install/build `whisper-cli`, download a GGML model, then set:
+- `STT engine`: `whisper.cpp CLI`
+- `whisper.cpp command`: e.g. `whisper-cli`
+- `whisper.cpp model path`: full path to `.bin` model
+
+If input is non-wav for `whisper.cpp`, install `ffmpeg` locally for conversion.
+
+#### Local TTS setup options
+
+Default: browser platform speech (`voice_tts_engine = browser`)
+- uses OS-native voices through `speechSynthesis`
+- zero extra installation
+
+Optional: Piper (`voice_tts_engine = piper`)
+- install Piper locally
+- set `TTS command` (usually `piper`)
+- set `TTS model path` to local `.onnx` voice model
+
+#### Voice controls in Memory & Chat
+
+- `Manual`: click `Start Listening`, then click `Send` to submit the captured turn
+- `Auto (VAD)`: click `Start Listening` to arm the mic, speech starts recording automatically
+- `Stop`: cancels active recording/transcription/streaming turn and clears queued playback
+- `Mute`
+- `Text-Only Mode`
+
+The panel also shows:
+- live waveform and mic-level meter while listening/armed
+- typing/generating indicator while response is streaming
+- playback indicator while speaking
+- `Listening (Auto)` indicator while VAD is armed
+- silence countdown while auto-recording is waiting to stop
+- crisis-support overlay when risk language is detected
+- transcript cleanup removes common non-speech markers (for example `[Music]`) before intent handling
+- barge-in support (start speaking to stop playback + cancel the current stream)
+
+Voice request limits:
+- `/api/voice/tts` text max: `4000` characters
+- `/api/voice/chat/stream` message max: `4000` characters
+
+Recommended VAD defaults:
+- `voice_vad_threshold`: `0.035` (RMS amplitude)
+- `voice_vad_silence_ms`: `900`
+- `voice_vad_min_speech_ms`: `300`
+Configure these in `Settings -> Voice Mode` or via `POST /api/settings`.
+
+Recommended mode default:
+- `voice_input_mode`: `manual` (use `vad` when room noise is stable and microphone gain is predictable)
+
+Noisy-environment troubleshooting:
+- raise `voice_vad_threshold` gradually (`0.045` -> `0.060`) if auto mode starts too easily
+- increase `voice_vad_min_speech_ms` (`400` -> `700`) to ignore short bumps/clicks
+- increase `voice_vad_silence_ms` (`1100` -> `1500`) if turns are cut off too early
+- keep OS mic gain moderate and disable aggressive audio enhancements that pump noise floor
+
+#### Voice diagnostics
+
+Settings includes a `Voice Diagnostics` panel that runs local checks for:
+- microphone permissions
+- STT/TTS readiness
+- SSE streaming connectivity
+
+### UX highlights (new)
+
+- Running banner + spinner with loop-stage tracker (`Planner -> Coder -> Safety -> Executor -> Critic -> Memory`).
+- Beginner-readable execution panels (collapsible) for `stdout`, `stderr`, return code, and timeout.
+- Successful preview experience:
+  - clean diff summary,
+  - created vs updated files list,
+  - click-to-open read-only file preview.
+- Success banner with quick actions: open run details, download run bundle, view changed files.
+- Dashboard activity feed with recent run events and approvals.
+- Logs tab filtering/search for `info` / `warn` / `error`.
+- Real-time Server-Sent Events (SSE) streaming with polling fallback and connection-state indicator.
+- Approvals tab with high-risk typed confirmation and per-run audit log.
+- Run Replay mode (`Prev/Next`) and iteration comparison view.
+- Guided Walkthrough overlay with tab-by-tab highlights and safe prefilled demo prompts.
+- Header version stamp (`app_version + git commit` when available).
+- Portable run bundles:
+  - `Export Bundle` from run rows/success banner.
+  - `Import Bundle` into read-only viewer mode (no live-state mutation).
+- Run Health Summary card per run: iterations, time-to-green, approvals, models used, top error category, memory references.
+- Failure explainer with category, top error lines, related files, and copyable VS Code open commands.
+
+### File Upload Intelligence
+
+David now supports local upload + analysis for:
+- images (`png`, `jpg`, `jpeg`, `gif`, `bmp`, `webp`)
+- PDF documents (`pdf`)
+- spreadsheets (`xlsx`, `xls`)
+- CSV files (`csv`)
+
+Workflow:
+1. Upload and analyze a file with `POST /api/uploads/analyze` (`multipart/form-data`, field `file`).
+2. List analyzed uploads with `GET /api/uploads`.
+3. Retrieve a specific analyzed upload with `GET /api/uploads/<upload_id>`.
+4. Ask questions against the analyzed content with `POST /api/uploads/<upload_id>/ask`.
+
+Notes:
+- Upload analysis is local-only and constrained by safety size/type limits.
+- `xls` is accepted with limited metadata extraction; convert to `xlsx` for richer table analysis.
+- Table uploads include record-level profiling (column types, missing/unique counts, top values, numeric min/max/avg/sum).
+- PDF/image uploads include a plain-language `content brief` so David can answer prompts like “what is this file showing?”.
+
+### AI Cinematic Theme
+
+- The web UI ships with a cinematic dark mode by default (`html[data-theme="dark"]`):
+  - matte black background,
+  - metallic typography accents,
+  - electric-blue active states and stream indicators.
+- Hero and dashboard header use a local background image:
+  - `web/static/assets/ai-bg.jpg`
+  - You can replace this file with your preferred local cinematic image (same path/filename).
+- Use `Settings -> Appearance` to control:
+  - `Dark` / `Light` theme,
+  - `Cinematic Background On` toggle,
+  - `Reset Appearance` (restores defaults: dark + background enabled).
+- Preferences are saved to localStorage:
+  - `dcc_theme = "dark" | "light"`
+  - `dcc_bg_disabled = "1"` when cinematic background is disabled (unset means enabled).
+- Reduced-motion users are respected via `prefers-reduced-motion`:
+  - shimmer/particles/pulsing/glow-heavy animations are disabled automatically.
 
 ### API endpoints
 
 - `GET /api/status`
 - `POST /api/run`
+- `POST /api/ask`
+- `POST /api/teach`
+- `POST /api/chat`
+- `POST /api/voice/transcribe`
+- `POST /api/voice/tts`
+- `POST /api/voice/chat/stream`
+- `GET /api/voice/diagnostics`
+- `GET /api/voice/stream/ping`
 - `POST /api/stop`
 - `GET /api/runs`
 - `GET /api/run/<run_id>`
+- `GET /api/run/<run_id>/timeline`
+- `GET /api/run/<run_id>/files`
+- `GET /api/run/<run_id>/audit`
+- `GET /api/run/<run_id>/replay`
+- `GET /api/run/<run_id>/compare`
 - `POST /api/run/<run_id>/retry`
 - `GET /api/run/<run_id>/bundle`
+- `POST /api/bundles/import`
+- `GET /api/bundles/imports`
+- `GET /api/bundles/import/<import_id>`
+- `GET /api/bundles/import/<import_id>/timeline`
+- `GET /api/bundles/import/<import_id>/files`
+- `GET /api/bundles/import/<import_id>/audit`
+- `GET /api/bundles/import/<import_id>/replay`
+- `GET /api/bundles/import/<import_id>/compare`
+- `POST /api/uploads/analyze`
+- `GET /api/uploads`
+- `GET /api/uploads/<upload_id>`
+- `POST /api/uploads/<upload_id>/ask`
 - `GET /api/memory`
+- `GET /api/memory/facts`
+- `GET /api/memory/conversations`
+- `POST /api/memory/confirm_overwrite`
+- `GET /api/chat/sessions`
 - `GET /api/telemetry/tail`
 - `GET /api/logs/tail`
+- `GET /api/settings`
+- `POST /api/settings`
+- `POST /api/demo/load`
+- `POST /api/demo/reset`
+- `GET /api/legacy_archive`
+- `POST /api/legacy_archive`
+- `POST /api/legacy_archive/<entry_id>/remove`
+- `GET /api/self_improvements`
+- `POST /api/self_improvements/propose`
+- `POST /api/self_improvements/autonomous_cycle`
+- `POST /api/self_improvements/<proposal_id>/decision`
+- `GET /api/models`
+- `GET /api/approvals`
+- `POST /api/approval/<approval_id>`
+- `GET /api/stream/status`
+- `GET /api/stream/logs`
+- `GET /api/stream/run/<run_id>`
 
 ### Safety behavior in web mode
 
 - Local-only by default (`127.0.0.1` bind).
+- State-changing endpoints protected with CSRF token checks.
+- Request body size limit enforced server-side.
+- Server-side state-change throttling to reduce abuse/spam loops.
 - No arbitrary shell endpoint; only `/goal`, `/ask`, `/teach`.
-- File writes remain restricted to `workspace/` by existing safety guard.
+- File writes remain restricted to active project directories under `workspace/projects/`.
 - Risk approval gate for large edits and multi-file rewrites.
 - Memory conflict approval gate for conflicting `--teach` facts.
+- Advanced Chat teach save gate (`confirm_save`) and explicit overwrite confirmation for conflicting facts.
+- Companion mode is deterministic memory-first behavior in web ask/chat and can be toggled in Settings.
+- Memory Insight Mode is deterministic and reference-based; it does not fabricate memory references and can be toggled in Settings.
+- Legacy Archive is framed as reflective continuity and explicitly maintains real-world relationship boundaries.
+- Self-improvement proposals are sandbox-first (`workspace/agent_sandbox/`) and can only merge to core code after explicit human approval.
+- Self-improvement merge flow blocks direct edits to safety logic files (`agent/safety.py`, `web/safety.py`).
+- Grief/calm support overlays never replace human support; crisis-risk responses include U.S. `988` guidance.
 - Safe mode can block write operations (read-only monitoring mode).
 - Run artifacts are stored under `data/runs/<run_id>/` (plan, iteration outputs, diffs, result bundle).
+- Imported bundle viewer is permanently read-only and isolated from live workspace state.
+
+## Release Checklist
+
+Before shipping a release build:
+
+1. Run full tests:
+   - `pytest -q`
+2. Validate local web startup:
+   - `python -m web.server --host 127.0.0.1 --port 8787`
+3. Verify header version stamp shows expected `VERSION` and git short commit.
+4. Enable demo mode and run the Guided Walkthrough end-to-end.
+5. Execute the scripted Demo Walkthrough chat sequence and confirm:
+   - intent chips,
+   - teach confirmation gating,
+   - citations + memory insight rendering,
+   - typed approval flow,
+   - replay/compare controls.
+6. Export a run bundle, import it, and verify read-only viewer endpoints:
+   - timeline,
+   - files,
+   - audit,
+   - replay/compare.
+7. Confirm imported bundle viewing does not mutate live runs/memory/workspace state.
+8. Review logs/telemetry for clean startup and no unhandled errors.
+
+### Preview mode quick usage
+
+1. In Dashboard, enable `Run preview`.
+2. Start a `/goal` run.
+3. Use `Preview & Changed Files` and `Diff Viewer` to inspect proposed changes.
+4. Start again with preview disabled to apply changes after review.
+
+### Streaming + Replay quick usage
+
+1. Open the UI and check `stream: connected` in the header.
+2. Start a run and watch live stage/status/timeline updates.
+3. In `Runs`, choose a run and use `Prev iteration` / `Next iteration` to replay steps.
+4. Use `Compare Iterations` to inspect change deltas and likely failure-causing edits.
 
 ## How David Learns
 
@@ -316,6 +726,7 @@ http://127.0.0.1:8787
 - Future goals load relevant lessons to avoid repeating mistakes.
 - Telemetry logs each major step for debugging and auditability.
 - Personal facts are stored only through the explicit `--teach` pathway.
+- Conversation turns and extracted takeaways are persisted in `memory/conversations.jsonl` (session-aware metadata: timestamp, session_id, intent, topics, confidence).
 
 ## Tests
 
@@ -330,12 +741,26 @@ Current tests validate safety boundaries, executor timeout behavior, and teach/a
 Web API and safety tests:
 
 ```bash
-pytest -q tests/test_web_api.py tests/test_web_safety.py
+pytest -q tests/test_web_api.py tests/test_web_memory_api.py tests/test_web_safety.py
+```
+
+Per-role model + TDD + template tests:
+
+```bash
+pytest -q tests/test_config_models.py tests/test_control_center_modes.py
+```
+
+Workspace isolation and project layout tests:
+
+```bash
+pytest -q tests/test_projects_layout.py tests/test_loop_projects.py
 ```
 
 ## Suggested Evolution Roadmap
 
 To grow David into a stronger autonomous engineer, add these next:
+
+Detailed workflow roadmap: `docs/AGENTIC_WORKFLOW_ROADMAP.md`
 
 1. Git integration:
    Auto-commit successful iterations (`git add` + `git commit`) for rollback safety.

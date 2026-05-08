@@ -1,0 +1,8 @@
+{
+  "goal": "Refactor deployment workflow with safeguards",
+  "steps": [
+    {"id": "S1", "title": "Refactor pipeline", "details": "Split deployment pipeline into reusable modules.", "success_check": "pytest passes"},
+    {"id": "S2", "title": "Safety review", "details": "Queue approval for high-risk changes.", "success_check": "approval granted"}
+  ],
+  "success_criteria": ["No unsafe writes", "Approval captured"]
+}

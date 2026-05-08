@@ -1,0 +1,3 @@
+{"timestamp_utc":"2026-05-13T15:09:00+00:00","step":"run_started","payload":{"mode":"goal"}}
+{"timestamp_utc":"2026-05-13T15:09:10+00:00","step":"iteration_started","payload":{"iteration":1}}
+{"timestamp_utc":"2026-05-13T15:09:22+00:00","step":"run_success","payload":{"iteration":1,"message":"module ready"}}

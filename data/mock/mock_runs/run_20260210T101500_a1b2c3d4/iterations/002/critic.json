@@ -1,0 +1,8 @@
+{
+  "status": "retry",
+  "analysis": "Implementation mostly works; invalid index edge-case remains.",
+  "next_actions": ["Add strict invalid index handling", "Re-run tests"],
+  "lessons": [
+    {"lesson": "Tests failed due to missing edge-case validation.", "tags": ["testing", "edge-case"]}
+  ]
+}

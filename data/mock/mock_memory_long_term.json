@@ -1,0 +1,148 @@
+{
+  "facts": [
+    {
+      "id": "f_001",
+      "subject": "David",
+      "predicate": "father_name",
+      "object": "Charm Thiekshana",
+      "timestamp": "2026-05-01T09:00:00+00:00",
+      "last_updated": "2026-05-01T09:00:00+00:00"
+    },
+    {
+      "id": "f_002",
+      "subject": "David",
+      "predicate": "mother_name",
+      "object": "Nimali",
+      "timestamp": "2026-05-01T09:01:00+00:00",
+      "last_updated": "2026-05-01T09:01:00+00:00"
+    },
+    {
+      "id": "f_003",
+      "subject": "User",
+      "predicate": "preferred_explanation_style",
+      "object": "step_by_step",
+      "timestamp": "2026-05-02T10:00:00+00:00",
+      "last_updated": "2026-05-02T10:00:00+00:00"
+    },
+    {
+      "id": "f_004",
+      "subject": "User",
+      "predicate": "favorite_saying",
+      "object": "small steps every day",
+      "timestamp": "2026-05-03T07:00:00+00:00",
+      "last_updated": "2026-05-03T07:00:00+00:00"
+    },
+    {
+      "id": "f_005",
+      "subject": "User",
+      "predicate": "birthday",
+      "object": "2001-11-09",
+      "timestamp": "2026-05-04T11:00:00+00:00",
+      "last_updated": "2026-05-04T11:00:00+00:00"
+    },
+    {
+      "id": "f_006",
+      "subject": "Family",
+      "predicate": "night_routine",
+      "object": "nightly reflection and gratitude",
+      "timestamp": "2026-05-04T20:00:00+00:00",
+      "last_updated": "2026-05-04T20:00:00+00:00"
+    }
+  ],
+  "lessons": [
+    {
+      "timestamp_utc": "2026-05-05T11:05:00+00:00",
+      "goal": "conversation:session_demo_1",
+      "lesson": "User prefers step-by-step explanations for better clarity.",
+      "tags": ["reflection", "conversation", "preference"],
+      "context": "session_id=session_demo_1",
+      "kind": "reflection",
+      "source": "reflection_engine",
+      "reflection_key": "conversation:user_msg_demo_1"
+    },
+    {
+      "timestamp_utc": "2026-05-06T09:40:00+00:00",
+      "goal": "goal:tdd_todo_cli",
+      "lesson": "Tests failed due to missing edge-case assertions in parser validation.",
+      "tags": ["testing", "edge-case"],
+      "context": "critic",
+      "kind": "lesson",
+      "source": "critic"
+    },
+    {
+      "timestamp_utc": "2026-05-06T10:10:00+00:00",
+      "goal": "goal:tdd_todo_cli",
+      "lesson": "Strict TDD reached green in 3 iterations after red->green sequencing.",
+      "tags": ["tdd", "iterations", "green"],
+      "context": "run summary",
+      "kind": "lesson",
+      "source": "critic"
+    }
+  ],
+  "preferences": [
+    {
+      "id": "p_001",
+      "name": "response_tone",
+      "value": "warm_and_clear",
+      "timestamp": "2026-05-02T10:05:00+00:00"
+    }
+  ],
+  "values": [
+    {
+      "id": "v_001",
+      "category": "value",
+      "category_label": "Values",
+      "principle": "Always value patience",
+      "application": "Apply patience by debugging one failing case at a time.",
+      "stored_at": "2026-05-08T09:00:00+00:00",
+      "source": "parent_teaching_mode"
+    },
+    {
+      "id": "v_002",
+      "category": "guideline",
+      "category_label": "Guidelines",
+      "principle": "Favor tests before refactors",
+      "application": "Write a failing test before changing implementation logic.",
+      "stored_at": "2026-05-08T09:05:00+00:00",
+      "source": "parent_teaching_mode"
+    }
+  ],
+  "projects": [
+    {
+      "id": "project_brain_todo_cli",
+      "project_slug": "todo_cli",
+      "project_relative_path": "projects/todo_cli",
+      "architecture_summary": "Modular CLI with JSON persistence, command router, and pytest suite.",
+      "design_decisions": [
+        "Use argparse command groups for add/list/done operations.",
+        "Persist task state as deterministic JSON in workspace/project data folder."
+      ],
+      "testing_approach": "pytest with red->green cycles and edge-case tests for malformed JSON and invalid indexes.",
+      "known_weaknesses": [
+        "Input normalization around unicode punctuation needs more tests.",
+        "Error messaging consistency can be improved."
+      ],
+      "last_goal": "Refine TODO CLI validation and tests",
+      "last_run_id": "run_20260210T101500_a1b2c3d4",
+      "updated_at": "2026-05-10T14:00:00+00:00",
+      "source": "project_brain_engine"
+    }
+  ],
+  "legacy_archive": [
+    {
+      "id": "legacy_001",
+      "kind": "significant_moment",
+      "source_type": "conversation",
+      "source_id": "assistant_demo_09",
+      "summary": "Handled a grief-support conversation with transparency and calm language.",
+      "details": "David encouraged real-world support while staying clear he is an AI system.",
+      "timestamp_utc": "2026-05-12T21:10:00+00:00",
+      "recorded_at": "2026-05-12T21:12:00+00:00",
+      "actor": "web_ui",
+      "metadata": {
+        "session_id": "session_grief_support",
+        "intent": "chat"
+      }
+    }
+  ]
+}

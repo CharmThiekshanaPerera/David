@@ -1,0 +1,44 @@
+{
+  "artifacts_dir": "data/runs/run_20260210T101500_a1b2c3d4",
+  "workspace_dir": "workspace",
+  "project_slug": "todo_cli_tdd",
+  "project_path": "workspace/projects/todo_cli_tdd",
+  "created": [
+    {
+      "path": "src/cli.py",
+      "change_type": "new",
+      "workspace_path": "workspace/projects/todo_cli_tdd/src/cli.py",
+      "added": 62,
+      "removed": 0,
+      "after_preview": "def run_cli(argv):\n    ..."
+    },
+    {
+      "path": "tests/test_cli.py",
+      "change_type": "new",
+      "workspace_path": "workspace/projects/todo_cli_tdd/tests/test_cli.py",
+      "added": 48,
+      "removed": 0,
+      "after_preview": "def test_add_item_red():\n    ..."
+    }
+  ],
+  "modified": [],
+  "project_files": [
+    "src/cli.py",
+    "src/storage.py",
+    "tests/test_cli.py"
+  ],
+  "workspace_files": [
+    {"path": "projects/todo_cli_tdd/src/cli.py", "change_type": "workspace", "workspace_path": "workspace/projects/todo_cli_tdd/src/cli.py", "added": 0, "removed": 0, "after_preview": "def run_cli(argv):\n    ..."},
+    {"path": "projects/todo_cli_tdd/src/storage.py", "change_type": "workspace", "workspace_path": "workspace/projects/todo_cli_tdd/src/storage.py", "added": 0, "removed": 0, "after_preview": "def load_tasks(path):\n    ..."},
+    {"path": "projects/todo_cli_tdd/tests/test_cli.py", "change_type": "workspace", "workspace_path": "workspace/projects/todo_cli_tdd/tests/test_cli.py", "added": 0, "removed": 0, "after_preview": "def test_add_item_red():\n    ..."}
+  ],
+  "workspace_dirs": [
+    "projects",
+    "projects/todo_cli_tdd",
+    "projects/todo_cli_tdd/src",
+    "projects/todo_cli_tdd/tests"
+  ],
+  "workspace_file_total": 3,
+  "workspace_dir_total": 4,
+  "workspace_files_truncated": false
+}

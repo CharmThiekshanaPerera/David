@@ -1,0 +1,21 @@
+{
+  "generated_at_utc": "2026-02-23T16:01:52.105345+00:00",
+  "trigger": "conversation",
+  "trigger_id": "conversation:8791307afcbd41e8b7504f8f35953e5a",
+  "run_id": "run_20260222T151748_a51c7807",
+  "run_status": "failed",
+  "reflection_key": "conversation:8791307afcbd41e8b7504f8f35953e5a",
+  "analysis_summary": "Run Reliability Gap.",
+  "signals": [
+    {
+      "code": "run_reliability",
+      "title": "Run Reliability Gap",
+      "evidence": "Latest goal run ended with status 'failed'.",
+      "upgrade": "Add stricter preflight checks and staged rollback planning before execution."
+    }
+  ],
+  "recommended_actions": [
+    "Add stricter preflight checks and staged rollback planning before execution."
+  ],
+  "safety_boundary": "Core safety modules remain immutable: agent/safety.py and web/safety.py are blocked."
+}

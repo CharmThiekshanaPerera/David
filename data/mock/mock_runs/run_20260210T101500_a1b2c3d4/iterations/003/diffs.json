@@ -1,0 +1,22 @@
+[
+  {
+    "path": "src/cli.py",
+    "change_type": "edited",
+    "workspace_path": "workspace/projects/todo_cli_tdd/src/cli.py",
+    "added": 9,
+    "removed": 2,
+    "before_preview": "if cmd == 'done':\n    return 1",
+    "after_preview": "if cmd == 'done' and not index.isdigit():\n    return 2",
+    "patch": "--- a/src/cli.py\n+++ b/src/cli.py\n@@ -10,2 +10,4 @@\n-if cmd == 'done':\n-    return 1\n+if cmd == 'done':\n+    if not index.isdigit():\n+        return 2\n+    return 0"
+  },
+  {
+    "path": "tests/test_cli.py",
+    "change_type": "edited",
+    "workspace_path": "workspace/projects/todo_cli_tdd/tests/test_cli.py",
+    "added": 2,
+    "removed": 1,
+    "before_preview": "assert run_cli(['done','x']) == 1",
+    "after_preview": "assert run_cli(['done','x']) == 2",
+    "patch": "--- a/tests/test_cli.py\n+++ b/tests/test_cli.py\n@@ -4 +4 @@\n-assert run_cli(['done','x']) == 1\n+assert run_cli(['done','x']) == 2"
+  }
+]

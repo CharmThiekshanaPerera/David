@@ -1,0 +1,52 @@
+{
+  "artifacts_dir": "data/runs/run_20260212T130500_c3d4e5f6",
+  "workspace_dir": "workspace",
+  "project_slug": "deploy_refactor",
+  "project_path": "workspace/projects/deploy_refactor",
+  "created": [],
+  "modified": [
+    {
+      "path": "src/deploy.py",
+      "change_type": "edited",
+      "workspace_path": "workspace/projects/deploy_refactor/src/deploy.py",
+      "added": 18,
+      "removed": 9,
+      "after_preview": "def deploy_release(env):\n    ..."
+    },
+    {
+      "path": "src/pipeline.py",
+      "change_type": "edited",
+      "workspace_path": "workspace/projects/deploy_refactor/src/pipeline.py",
+      "added": 12,
+      "removed": 4,
+      "after_preview": "def build_steps():\n    ..."
+    },
+    {
+      "path": "tests/test_deploy.py",
+      "change_type": "edited",
+      "workspace_path": "workspace/projects/deploy_refactor/tests/test_deploy.py",
+      "added": 7,
+      "removed": 1,
+      "after_preview": "def test_deploy_pipeline():\n    ..."
+    }
+  ],
+  "project_files": [
+    "src/deploy.py",
+    "src/pipeline.py",
+    "tests/test_deploy.py"
+  ],
+  "workspace_files": [
+    {"path": "projects/deploy_refactor/src/deploy.py", "change_type": "workspace", "workspace_path": "workspace/projects/deploy_refactor/src/deploy.py", "added": 0, "removed": 0, "after_preview": "def deploy_release(env):\n    ..."},
+    {"path": "projects/deploy_refactor/src/pipeline.py", "change_type": "workspace", "workspace_path": "workspace/projects/deploy_refactor/src/pipeline.py", "added": 0, "removed": 0, "after_preview": "def build_steps():\n    ..."},
+    {"path": "projects/deploy_refactor/tests/test_deploy.py", "change_type": "workspace", "workspace_path": "workspace/projects/deploy_refactor/tests/test_deploy.py", "added": 0, "removed": 0, "after_preview": "def test_deploy_pipeline():\n    ..."}
+  ],
+  "workspace_dirs": [
+    "projects",
+    "projects/deploy_refactor",
+    "projects/deploy_refactor/src",
+    "projects/deploy_refactor/tests"
+  ],
+  "workspace_file_total": 3,
+  "workspace_dir_total": 4,
+  "workspace_files_truncated": false
+}

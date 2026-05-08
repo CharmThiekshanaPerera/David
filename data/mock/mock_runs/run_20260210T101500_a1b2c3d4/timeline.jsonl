@@ -1,0 +1,7 @@
+{"timestamp_utc":"2026-05-10T10:15:00+00:00","step":"run_started","payload":{"mode":"goal","tdd_mode":true}}
+{"timestamp_utc":"2026-05-10T10:15:04+00:00","step":"iteration_started","payload":{"iteration":1}}
+{"timestamp_utc":"2026-05-10T10:15:07+00:00","step":"iteration_retry","payload":{"iteration":1,"reason":"tests failed (expected red)"}}
+{"timestamp_utc":"2026-05-10T10:15:09+00:00","step":"iteration_started","payload":{"iteration":2}}
+{"timestamp_utc":"2026-05-10T10:15:12+00:00","step":"iteration_retry","payload":{"iteration":2,"reason":"edge-case test still failing"}}
+{"timestamp_utc":"2026-05-10T10:15:14+00:00","step":"iteration_started","payload":{"iteration":3}}
+{"timestamp_utc":"2026-05-10T10:15:18+00:00","step":"run_success","payload":{"iteration":3,"message":"Tests green"}}

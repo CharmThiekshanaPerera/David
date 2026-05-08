@@ -1,0 +1,11 @@
+{"timestamp_utc":"2026-05-10T10:15:00+00:00","event_type":"run_started","run_id":"run_20260210T101500_a1b2c3d4","stage":"planner","status":"running","planner_model":"qwen2.5-coder:7b","coder_model":"qwen2.5-coder:7b","critic_model":"llama3.1:8b"}
+{"timestamp_utc":"2026-05-10T10:15:05+00:00","event_type":"stage_transition","run_id":"run_20260210T101500_a1b2c3d4","stage":"coder","status":"running"}
+{"timestamp_utc":"2026-05-10T10:15:12+00:00","event_type":"stage_transition","run_id":"run_20260210T101500_a1b2c3d4","stage":"executor","status":"running"}
+{"timestamp_utc":"2026-05-10T10:15:18+00:00","event_type":"run_success","run_id":"run_20260210T101500_a1b2c3d4","stage":"memory","status":"success","tdd_mode":true,"iterations_until_green":3}
+{"timestamp_utc":"2026-05-11T11:30:00+00:00","event_type":"run_started","run_id":"run_20260211T113000_b2c3d4e5","stage":"planner","status":"running"}
+{"timestamp_utc":"2026-05-11T11:30:30+00:00","event_type":"run_failed","run_id":"run_20260211T113000_b2c3d4e5","stage":"critic","status":"failed","failure":"Tests failed after previous pass"}
+{"timestamp_utc":"2026-05-11T11:31:00+00:00","event_type":"approval_needed","run_id":"run_20260212T130500_c3d4e5f6","stage":"safety","status":"awaiting_approval","approval_id":"appr_demo_001"}
+{"timestamp_utc":"2026-05-11T11:31:10+00:00","event_type":"approval_decision","run_id":"run_20260212T130500_c3d4e5f6","status":"approved","approval_id":"appr_demo_001"}
+{"timestamp_utc":"2026-05-11T11:31:30+00:00","event_type":"stream_connected","status":"connected"}
+{"timestamp_utc":"2026-05-11T11:31:50+00:00","event_type":"stream_reconnecting","status":"reconnecting"}
+{"timestamp_utc":"2026-05-11T11:32:10+00:00","event_type":"stream_fallback","status":"polling_fallback"}

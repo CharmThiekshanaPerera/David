@@ -1,0 +1,10 @@
+{
+  "summary": "Implemented CLI parser and JSON storage handlers.",
+  "edits": [
+    {"path": "src/cli.py", "reason": "implement add/list/done"},
+    {"path": "src/storage.py", "reason": "persist tasks"}
+  ],
+  "commands": ["pytest -q"],
+  "done": false,
+  "done_reason": "One edge-case test still failing."
+}

@@ -1,0 +1,6 @@
+{
+  "status": "retry",
+  "analysis": "Passing baseline; continue with additional invalid token checks.",
+  "next_actions": ["Add regression test for malformed token"],
+  "lessons": []
+}

@@ -1,0 +1,2 @@
+{"timestamp_utc":"2026-05-11T11:30:00+00:00","action":"run_started","payload":{"actor":"demo_seed"}}
+{"timestamp_utc":"2026-05-11T11:30:30+00:00","action":"run_failed","payload":{"category":"test_failure","likely_failure_cause":"First failing iteration after a passing iteration."}}

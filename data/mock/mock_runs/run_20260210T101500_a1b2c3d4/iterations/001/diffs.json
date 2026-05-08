@@ -1,0 +1,12 @@
+[
+  {
+    "path": "tests/test_cli.py",
+    "change_type": "new",
+    "workspace_path": "workspace/projects/todo_cli_tdd/tests/test_cli.py",
+    "added": 34,
+    "removed": 0,
+    "before_preview": "",
+    "after_preview": "def test_add_item_red():\n    assert run_cli(['add']) == 2",
+    "patch": "--- a/tests/test_cli.py\n+++ b/tests/test_cli.py\n@@ -0,0 +1,6 @@\n+def test_add_item_red():\n+    assert run_cli(['add']) == 2\n+\n+def test_invalid_index_red():\n+    assert run_cli(['done', 'x']) == 2"
+  }
+]

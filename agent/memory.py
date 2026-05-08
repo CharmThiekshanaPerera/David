@@ -198,7 +198,7 @@ class LongTermMemory:
     def _ensure_file(self) -> None:
         self._memory_file.parent.mkdir(parents=True, exist_ok=True)
         if not self._memory_file.exists():
-            self._write_payload({"facts": [], "lessons": [], "preferences": []})
+            self._write_payload({"facts": [], "lessons": [], "preferences": [], "values": [], "projects": []})
             return
         payload = self._read_payload()
         self._write_payload(payload)
@@ -218,6 +218,10 @@ class LongTermMemory:
             data["lessons"] = []
         if not isinstance(data.get("preferences"), list):
             data["preferences"] = []
+        if not isinstance(data.get("values"), list):
+            data["values"] = []
+        if not isinstance(data.get("projects"), list):
+            data["projects"] = []
 
         return data
 
