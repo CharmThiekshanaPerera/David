@@ -258,26 +258,16 @@ def create_app(
         if include_vision_context:
             vision_context, vision_meta = _vision_context_bundle(max_events=10)
         try:
-            try:
-                data = center.chat_message(
-                    message,
-                    intent=intent,
-                    confirm_save=confirm_save,
-                    parent_teaching_mode=parent_teaching_mode,
-                    session_id=session_id,
-                    actor=actor,
-                    vision_context=vision_context,
-                    vision_context_meta={**vision_meta, "requested": include_vision_context},
-                )
-            except TypeError:
-                data = center.chat_message(
-                    message,
-                    intent=intent,
-                    confirm_save=confirm_save,
-                    parent_teaching_mode=parent_teaching_mode,
-                    session_id=session_id,
-                    actor=actor,
-                )
+            data = center.chat_message(
+                message,
+                intent=intent,
+                confirm_save=confirm_save,
+                parent_teaching_mode=parent_teaching_mode,
+                session_id=session_id,
+                actor=actor,
+                vision_context=vision_context,
+                vision_context_meta={**vision_meta, "requested": include_vision_context},
+            )
         except ValueError as exc:
             return _json_error(str(exc), status=400)
         return jsonify({"ok": True, "data": data})
@@ -425,27 +415,17 @@ def create_app(
             return "chat"
 
         def _call_chat_message() -> dict[str, Any]:
-            try:
-                return center.chat_message(
-                    message,
-                    intent=selected_intent,
-                    confirm_save=confirm_save,
-                    parent_teaching_mode=parent_teaching_mode,
-                    session_id=session_id,
-                    actor=actor,
-                    vision_context=vision_context,
-                    vision_context_meta={**vision_meta, "requested": include_vision_context},
-                    publish_events=False,
-                )
-            except TypeError:
-                return center.chat_message(
-                    message,
-                    intent=selected_intent,
-                    confirm_save=confirm_save,
-                    parent_teaching_mode=parent_teaching_mode,
-                    session_id=session_id,
-                    actor=actor,
-                )
+            return center.chat_message(
+                message,
+                intent=selected_intent,
+                confirm_save=confirm_save,
+                parent_teaching_mode=parent_teaching_mode,
+                session_id=session_id,
+                actor=actor,
+                vision_context=vision_context,
+                vision_context_meta={**vision_meta, "requested": include_vision_context},
+                publish_events=False,
+            )
 
         selected_intent = _selected_intent()
 
@@ -1170,6 +1150,39 @@ def create_app(
         if not ok:
             return _json_error(str(data.get("error", "Approval update failed.")), status=409)
         return jsonify({"ok": True, "data": data})
+
+    @app.get("/api/approval/policy")
+    def api_approval_policy_get():
+        return jsonify({"ok": True, "data": center.get_approval_policy()})
+
+    @app.post("/api/approval/policy")
+    def api_approval_policy_set():
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return _json_error("JSON body must be an object.")
+        preset = str(payload.get("policy", "")).strip()
+        result = center.set_approval_policy(preset)
+        if not result.get("updated"):
+            return _json_error(str(result.get("error", "Unknown preset.")), status=400)
+        return jsonify({"ok": True, "data": result})
+
+    @app.get("/api/queue")
+    def api_queue_list():
+        return jsonify({"ok": True, "data": center.list_queue()})
+
+    @app.post("/api/queue/<run_id>/cancel")
+    def api_queue_cancel(run_id: str):
+        result = center.cancel_queued_run(run_id)
+        if not result.get("cancelled"):
+            return _json_error(str(result.get("error", "Cancel failed.")), status=409)
+        return jsonify({"ok": True, "data": result})
+
+    @app.get("/api/run/<run_id>/scorecard")
+    def api_run_scorecard(run_id: str):
+        scorecard = center.get_run_scorecard(run_id)
+        if scorecard is None:
+            return _json_error("Run not found.", status=404)
+        return jsonify({"ok": True, "data": scorecard})
 
     @app.get("/api/stream/status")
     def api_stream_status():

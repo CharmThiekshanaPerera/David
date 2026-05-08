@@ -1906,7 +1906,7 @@ function renderStatus() {
   renderStageTracker(s.current_stage || "idle");
   toggleRunningBanner(s);
   updateButtonState();
-  renderRunConfigSummary(s.planner_model_used, s.coder_model_used, s.critic_model_used, s.tdd_mode);
+  refreshRunOptionSummary();
   renderDemoBadge();
   renderVersionStamp();
 }
@@ -3717,6 +3717,9 @@ function renderSettings(data) {
 
   const modelDefaults = [
     safeData.model,
+    safeData.planner_model,
+    safeData.coder_model,
+    safeData.critic_model,
     safeData.planner_model_default,
     safeData.coder_model_default,
     safeData.critic_model_default,

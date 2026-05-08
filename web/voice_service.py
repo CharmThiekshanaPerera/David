@@ -240,11 +240,11 @@ def _run_whisper_cli(input_path: Path, *, tmp_root: Path, config: VoiceRuntimeCo
 
 
 def _run_whisper_cpp(input_path: Path, *, tmp_root: Path, config: VoiceRuntimeConfig) -> str:
-    model_path = Path(config.whisper_cpp_model_path).expanduser().resolve()
     if not config.whisper_cpp_model_path:
         raise ValueError(
             "whisper_cpp model path is missing. Set `voice_whisper_cpp_model_path` in Settings."
         )
+    model_path = Path(config.whisper_cpp_model_path).expanduser().resolve()
     if not model_path.exists() or not model_path.is_file():
         raise ValueError(f"whisper_cpp model not found: {model_path}")
 
@@ -283,9 +283,9 @@ def _run_whisper_cpp(input_path: Path, *, tmp_root: Path, config: VoiceRuntimeCo
 
 
 def _run_piper(text: str, *, config: VoiceRuntimeConfig, speech_rate: int) -> bytes:
-    model_path = Path(config.tts_model_path).expanduser().resolve()
     if not config.tts_model_path:
         raise ValueError("Piper model path is missing. Set `voice_tts_model_path` in Settings.")
+    model_path = Path(config.tts_model_path).expanduser().resolve()
     if not model_path.exists() or not model_path.is_file():
         raise ValueError(f"Piper model not found: {model_path}")
 

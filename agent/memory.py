@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from agent.contracts import LessonProposal
 
@@ -26,6 +27,8 @@ class MemoryLesson:
     lesson: str
     tags: list[str]
     context: str
+    outcome: str = "unknown"          # "success" | "failure" | "unknown"
+    reinforcement_count: int = 0      # incremented each time this lesson preceded a success
 
 
 class LongTermMemory:
@@ -142,29 +145,55 @@ class LongTermMemory:
             return []
 
         goal_terms = set(self._tokenize(goal))
-        scored: list[tuple[int, MemoryLesson]] = []
+        scored: list[tuple[float, MemoryLesson]] = []
 
         for item in items:
             lesson = self._lesson_from_dict(item)
-            text_terms = set(self._tokenize(f"{lesson.lesson} {' '.join(lesson.tags)} {lesson.context}"))
-            score = len(goal_terms & text_terms)
-            if score > 0:
-                scored.append((score, lesson))
+
+            # Tags score 2x — they are curated signals
+            tag_terms = set(self._tokenize(" ".join(lesson.tags)))
+            body_terms = set(self._tokenize(f"{lesson.lesson} {lesson.context}"))
+            tag_score = len(goal_terms & tag_terms) * 2.0
+            body_score = len(goal_terms & body_terms) * 1.0
+            base = tag_score + body_score
+
+            if base == 0:
+                continue
+
+            # Recency boost: lessons < 7 days old get +1.0
+            age_days = self._lesson_age_days(lesson.timestamp_utc)
+            recency_bonus = 1.0 if age_days <= 7 else 0.0
+
+            # Outcome weight: successful lessons rank higher, failures lower
+            outcome_weight = {"success": 1.2, "failure": 0.8}.get(lesson.outcome, 1.0)
+
+            # Reinforcement bonus capped at +0.5 (each success adds 0.1)
+            reinf_bonus = min(0.5, lesson.reinforcement_count * 0.1)
+
+            composite = (base + recency_bonus + reinf_bonus) * outcome_weight
+            scored.append((composite, lesson))
 
         if not scored:
             recent = [self._lesson_from_dict(item) for item in items[-limit:]]
             return list(reversed(recent))
 
-        scored.sort(key=lambda pair: pair[0], reverse=True)
+        scored.sort(key=lambda pair: (pair[0], pair[1].timestamp_utc), reverse=True)
         return [lesson for _, lesson in scored[:limit]]
 
-    def append_lessons(self, goal: str, lessons: list[LessonProposal], context: str) -> None:
+    def append_lessons(
+        self,
+        goal: str,
+        lessons: list[LessonProposal],
+        context: str,
+        outcome: str = "unknown",
+    ) -> None:
         if not lessons:
             return
 
         payload = self._read_payload()
         raw_lessons = payload.setdefault("lessons", [])
         now = datetime.now(tz=timezone.utc).isoformat()
+        safe_outcome = outcome if outcome in ("success", "failure", "unknown") else "unknown"
 
         for lesson in lessons:
             raw_lessons.append(
@@ -175,6 +204,8 @@ class LongTermMemory:
                         lesson=lesson.lesson,
                         tags=lesson.tags,
                         context=context,
+                        outcome=safe_outcome,
+                        reinforcement_count=0,
                     )
                 )
             )
@@ -184,21 +215,140 @@ class LongTermMemory:
 
         self._write_payload(payload)
 
-    def render_context(self, goal: str, limit: int = 8) -> str:
-        lessons = self.relevant_lessons(goal, limit=limit)
-        if not lessons:
-            return "No prior lessons available."
+    def reinforce_lessons(self, goal: str, outcome: str, since_iso: str = "") -> int:
+        """Update outcome and reinforcement_count for lessons from this run.
 
+        Matches lessons by goal string and optional since_iso lower-bound timestamp.
+        Returns the number of lessons updated.
+        """
+        safe_outcome = outcome if outcome in ("success", "failure") else "unknown"
+        payload = self._read_payload()
+        raw_lessons = payload.get("lessons", [])
+        updated = 0
+
+        for item in raw_lessons:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("goal", "")) != goal:
+                continue
+            ts = str(item.get("timestamp_utc", ""))
+            if since_iso and ts < since_iso:
+                continue
+            # Set outcome if still unknown
+            if item.get("outcome", "unknown") == "unknown":
+                item["outcome"] = safe_outcome
+            # Increment reinforcement on success
+            if safe_outcome == "success":
+                item["reinforcement_count"] = int(item.get("reinforcement_count", 0)) + 1
+            updated += 1
+
+        if updated:
+            payload["lessons"] = raw_lessons
+            self._write_payload(payload)
+        return updated
+
+    def render_context(self, goal: str, limit: int = 8) -> str:
+        text, _ = self.render_context_and_meta(goal, limit=limit)
+        return text
+
+    def render_context_and_meta(
+        self, goal: str, limit: int = 8
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """Return (formatted context string, list of lesson metadata dicts).
+
+        The metadata list enables memory-influence telemetry in the agent loop.
+        """
+        lessons = self.relevant_lessons(goal, limit=limit)
         lines: list[str] = []
-        for item in lessons:
-            tags = ", ".join(item.tags) if item.tags else "untagged"
-            lines.append(f"- [{item.timestamp_utc}] ({tags}) {item.lesson}")
-        return "\n".join(lines)
+        meta: list[dict[str, Any]] = []
+
+        if lessons:
+            for item in lessons:
+                tags = ", ".join(item.tags) if item.tags else "untagged"
+                outcome_tag = f" [{item.outcome}]" if item.outcome != "unknown" else ""
+                reinf = f" (reinforced×{item.reinforcement_count})" if item.reinforcement_count > 0 else ""
+                lines.append(f"- [{item.timestamp_utc}] ({tags}){outcome_tag}{reinf} {item.lesson}")
+                meta.append(
+                    {
+                        "timestamp_utc": item.timestamp_utc,
+                        "tags": list(item.tags),
+                        "outcome": item.outcome,
+                        "reinforcement_count": item.reinforcement_count,
+                        "lesson_preview": item.lesson[:80],
+                    }
+                )
+        else:
+            lines.append("No prior lessons available.")
+
+        # Append session hints from the current run (short-lived, not persisted long-term)
+        hints = self.get_session_hints(goal)
+        if hints:
+            lines.append("\nSession hints from current run:")
+            for h in hints:
+                lines.append(f"  • {h}")
+
+        return "\n".join(lines), meta
+
+    # ------------------------------------------------------------------
+    # Session hints — cleared at the start of each run, not persisted
+    # long-term. Used to propagate within-run tactical knowledge between
+    # iterations (safety rejections, TDD violations, etc.).
+    # ------------------------------------------------------------------
+
+    def append_session_hint(
+        self, goal: str, hint: str, tags: list[str] | None = None
+    ) -> None:
+        hint = str(hint or "").strip()
+        if not hint:
+            return
+        payload = self._read_payload()
+        hints = payload.setdefault("session_hints", [])
+        hints.append(
+            {
+                "goal": goal,
+                "hint": hint,
+                "tags": tags or [],
+                "timestamp_utc": datetime.now(tz=timezone.utc).isoformat(),
+            }
+        )
+        self._write_payload(payload)
+
+    def clear_session_hints(self) -> None:
+        payload = self._read_payload()
+        payload["session_hints"] = []
+        self._write_payload(payload)
+
+    def get_session_hints(self, goal: str) -> list[str]:
+        payload = self._read_payload()
+        raw = payload.get("session_hints", [])
+        result: list[str] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            item_goal = str(item.get("goal", ""))
+            if item_goal in (goal, ""):
+                h = str(item.get("hint", "")).strip()
+                if h:
+                    result.append(h)
+        return result
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
 
     def _ensure_file(self) -> None:
         self._memory_file.parent.mkdir(parents=True, exist_ok=True)
         if not self._memory_file.exists():
-            self._write_payload({"facts": [], "lessons": [], "preferences": [], "values": [], "projects": []})
+            self._write_payload(
+                {
+                    "facts": [],
+                    "lessons": [],
+                    "preferences": [],
+                    "values": [],
+                    "projects": [],
+                    "session_hints": [],
+                }
+            )
             return
         payload = self._read_payload()
         self._write_payload(payload)
@@ -222,6 +372,8 @@ class LongTermMemory:
             data["values"] = []
         if not isinstance(data.get("projects"), list):
             data["projects"] = []
+        if not isinstance(data.get("session_hints"), list):
+            data["session_hints"] = []
 
         return data
 
@@ -250,12 +402,23 @@ class LongTermMemory:
                 if isinstance(item, str) and item.strip():
                     tags.append(item.strip())
 
+        outcome = str(data.get("outcome", "unknown")).strip()
+        if outcome not in ("success", "failure", "unknown"):
+            outcome = "unknown"
+
+        try:
+            reinforcement_count = int(data.get("reinforcement_count", 0))
+        except (TypeError, ValueError):
+            reinforcement_count = 0
+
         return MemoryLesson(
             timestamp_utc=timestamp,
             goal=goal,
             lesson=lesson,
             tags=tags,
             context=context,
+            outcome=outcome,
+            reinforcement_count=reinforcement_count,
         )
 
     @staticmethod
@@ -272,6 +435,16 @@ class LongTermMemory:
             confidence=confidence,
             timestamp=str(data.get("timestamp", "")).strip() or "unknown-time",
         )
+
+    @staticmethod
+    def _lesson_age_days(timestamp_utc: str) -> float:
+        """Return age of a lesson in days. Returns large value if unparseable."""
+        try:
+            ts = datetime.fromisoformat(timestamp_utc.replace("Z", "+00:00"))
+            delta = datetime.now(tz=timezone.utc) - ts
+            return delta.total_seconds() / 86400.0
+        except (ValueError, TypeError, OverflowError):
+            return 9999.0
 
     @staticmethod
     def _clean_text(value: str, field: str) -> str:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from agent.coder import Coder
 from agent.config import AgentConfig
@@ -76,8 +77,19 @@ class DavidAgent:
             },
         )
 
+        run_started_at = datetime.now(tz=timezone.utc).isoformat()
+        self._memory.clear_session_hints()
         initial_snapshot = workspace.snapshot()
-        base_memory_context = self._memory.render_context(goal)
+        base_memory_context, memory_meta = self._memory.render_context_and_meta(goal)
+        self._telemetry.event(
+            "memory_context_injected",
+            {
+                "goal": goal,
+                "lessons_count": len(memory_meta),
+                "lessons_used": memory_meta,
+                **project_meta,
+            },
+        )
         log_context = self._build_goal_log_context()
         memory_context = self._compose_goal_context(base_memory_context, log_context)
         threshold = max(0, min(100, int(self._config.plan_quality_threshold)))
@@ -213,7 +225,18 @@ class DavidAgent:
         for iteration in range(1, iteration_limit + 1):
             started = time.perf_counter()
             workspace_snapshot = workspace.snapshot()
-            base_memory_context = self._memory.render_context(goal)
+            base_memory_context, memory_meta = self._memory.render_context_and_meta(goal)
+            if memory_meta:
+                self._telemetry.event(
+                    "memory_context_injected",
+                    {
+                        "goal": goal,
+                        "iteration": iteration,
+                        "lessons_count": len(memory_meta),
+                        "lessons_used": memory_meta,
+                        **project_meta,
+                    },
+                )
             log_context = self._build_goal_log_context()
             memory_context = self._compose_goal_context(base_memory_context, log_context)
             tdd_phase = "implementation" if (tdd_mode and tdd_red_phase_complete) else ("tests_first" if tdd_mode else "normal")
@@ -272,15 +295,10 @@ class DavidAgent:
                             commands_passed=0,
                             started=started,
                         )
-                        self._memory.append_lessons(
-                            goal=goal,
-                            lessons=[
-                                LessonProposal(
-                                    lesson="In TDD mode, write tests under tests/ in the active project before implementation edits.",
-                                    tags=["tdd", "testing", "discipline"],
-                                )
-                            ],
-                            context=reason,
+                        self._memory.append_session_hint(
+                            goal,
+                            "TDD: write tests under tests/ before any implementation edits.",
+                            tags=["tdd", "testing"],
                         )
                         continue
                 written_paths = safety.apply_edits(validated_edits)
@@ -302,15 +320,10 @@ class DavidAgent:
                     commands_passed=0,
                     started=started,
                 )
-                self._memory.append_lessons(
-                    goal=goal,
-                    lessons=[
-                        LessonProposal(
-                            lesson="Safety validation must pass before any file write.",
-                            tags=["safety", "files"],
-                        )
-                    ],
-                    context=reason,
+                self._memory.append_session_hint(
+                    goal,
+                    f"Safety rejected edits: {str(exc)[:120]}",
+                    tags=["safety", "files"],
                 )
                 continue
 
@@ -335,15 +348,10 @@ class DavidAgent:
                     commands_passed=0,
                     started=started,
                 )
-                self._memory.append_lessons(
-                    goal=goal,
-                    lessons=[
-                        LessonProposal(
-                            lesson="Command execution must stay inside the allow-list.",
-                            tags=["safety", "execution"],
-                        )
-                    ],
-                    context=reason,
+                self._memory.append_session_hint(
+                    goal,
+                    f"Safety rejected commands: {str(exc)[:120]}",
+                    tags=["safety", "execution"],
                 )
                 continue
 
@@ -365,15 +373,10 @@ class DavidAgent:
                     commands_passed=0,
                     started=started,
                 )
-                self._memory.append_lessons(
-                    goal=goal,
-                    lessons=[
-                        LessonProposal(
-                            lesson="Every iteration must include at least one validation command.",
-                            tags=["testing", "discipline"],
-                        )
-                    ],
-                    context=reason,
+                self._memory.append_session_hint(
+                    goal,
+                    "No validation commands proposed — include at least one pytest command.",
+                    tags=["testing", "discipline"],
                 )
                 continue
 
@@ -403,15 +406,10 @@ class DavidAgent:
                     commands_passed=self._count_passed_commands(execution_results),
                     started=started,
                 )
-                self._memory.append_lessons(
-                    goal=goal,
-                    lessons=[
-                        LessonProposal(
-                            lesson="TDD loops must run pytest to observe red/green feedback each iteration.",
-                            tags=["tdd", "testing"],
-                        )
-                    ],
-                    context=reason,
+                self._memory.append_session_hint(
+                    goal,
+                    "TDD: every iteration must run pytest to observe red/green feedback.",
+                    tags=["tdd", "testing"],
                 )
                 continue
 
@@ -499,6 +497,7 @@ class DavidAgent:
                         **project_meta,
                     },
                 )
+                self._memory.reinforce_lessons(goal, "success", since_iso=run_started_at)
                 return RunSummary(
                     goal=goal,
                     success=True,
@@ -521,6 +520,7 @@ class DavidAgent:
                         **project_meta,
                     },
                 )
+                self._memory.reinforce_lessons(goal, "failure", since_iso=run_started_at)
                 return RunSummary(
                     goal=goal,
                     success=False,
@@ -545,6 +545,7 @@ class DavidAgent:
                 **project_meta,
             },
         )
+        self._memory.reinforce_lessons(goal, "failure", since_iso=run_started_at)
         return RunSummary(
             goal=goal,
             success=False,
