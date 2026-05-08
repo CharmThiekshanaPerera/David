@@ -1155,3 +1155,304 @@ def test_get_run_files_syncs_full_workspace_listing(tmp_path: Path) -> None:
     assert payload["workspace_file_total"] >= len(workspace_paths)
     assert payload["workspace_dir_total"] >= len(workspace_dirs)
     assert payload["workspace_files_truncated"] is False
+
+
+def test_goal_run_blocks_execution_when_plan_quality_below_threshold(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _make_config(tmp_path)
+    center = DavidControlCenter(config=config, data_root=tmp_path / "data")
+    center.update_settings({"plan_quality_threshold": 90})
+    state = {"planner_calls": 0, "coder_calls": 0}
+
+    class WeakPlanner:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def create_plan(self, goal, workspace_snapshot, memory_context, tdd_mode=False):
+            state["planner_calls"] += 1
+            return PlanOutput(
+                goal=goal,
+                steps=[PlanStep(id="S1", title="Plan", details="Do work.", success_check="Done.")],
+                success_criteria=["looks good"],
+            )
+
+    class FastCoder:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def propose(
+            self,
+            goal,
+            plan_json,
+            workspace_snapshot,
+            memory_context,
+            critic_feedback,
+            iteration,
+            tdd_mode=False,
+            tdd_phase="normal",
+        ):
+            state["coder_calls"] += 1
+            return CoderOutput(
+                summary="should not execute",
+                edits=[CodeEdit(path="app.py", content="print('x')\n", reason="noop")],
+                commands=["pytest -q"],
+                done=True,
+                done_reason="done",
+            )
+
+    monkeypatch.setattr("web.control_center.Planner", WeakPlanner)
+    monkeypatch.setattr("web.control_center.Coder", FastCoder)
+
+    ok, start = center.start_run({"command": "/goal build with weak planning"})
+    assert ok is True
+    run = _wait_for_terminal(center, start["run_id"])
+
+    assert run["meta"]["status"] == "failed"
+    assert int(run["meta"]["plan_quality_threshold"]) == 90
+    assert int(run["meta"]["plan_quality_score"]) < 90
+    assert run["meta"]["plan_quality_passed"] is False
+    assert state["planner_calls"] == 2
+    assert state["coder_calls"] == 0
+
+    result = run["result"]
+    assert str(result.get("status", "")) == "failed"
+    failure = result.get("failure_details", {})
+    assert str(failure.get("category", "")) == "planning_quality"
+
+    plan_quality = run.get("plan_quality", {})
+    assert int(plan_quality.get("threshold", 0)) == 90
+    assert bool(plan_quality.get("passed")) is False
+
+    timeline_steps = [str(row.get("step", "")) for row in run.get("timeline", []) if isinstance(row, dict)]
+    assert "plan_quality_scored" in timeline_steps
+    assert "plan_quality_replan_requested" in timeline_steps
+    assert "plan_quality_rejected" in timeline_steps
+
+
+def test_goal_run_replans_once_and_executes_when_second_plan_passes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _make_config(tmp_path)
+    center = DavidControlCenter(config=config, data_root=tmp_path / "data")
+    center.update_settings({"plan_quality_threshold": 85})
+    state = {"planner_calls": 0, "coder_calls": 0}
+
+    class RecoveringPlanner:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def create_plan(self, goal, workspace_snapshot, memory_context, tdd_mode=False):
+            state["planner_calls"] += 1
+            if state["planner_calls"] == 1:
+                return PlanOutput(
+                    goal=goal,
+                    steps=[PlanStep(id="S1", title="Plan", details="Do work.", success_check="Done.")],
+                    success_criteria=["looks good"],
+                )
+            return PlanOutput(
+                goal=goal,
+                steps=[
+                    PlanStep(
+                        id="S1",
+                        title="Write failing tests first",
+                        details="Create tests in tests/ for expected behavior and edge cases before implementation.",
+                        success_check="pytest -q shows a failing test before code changes.",
+                    ),
+                    PlanStep(
+                        id="S2",
+                        title="Implement focused changes",
+                        details="Apply minimal implementation only within workspace boundaries and keep scope constrained.",
+                        success_check="Changes stay scoped and validation commands run with expected output.",
+                    ),
+                    PlanStep(
+                        id="S3",
+                        title="Verify and enforce safeguards",
+                        details="Run pytest and enforce timeout, size limits, and rollback or approval safeguards.",
+                        success_check="pytest exits with code 0 and safety constraints remain satisfied.",
+                    ),
+                ],
+                success_criteria=[
+                    "pytest -q exits with code 0.",
+                    "Workspace boundaries and allow-list checks are respected.",
+                    "Risk controls include timeout/limits and rollback or approval safeguards.",
+                ],
+            )
+
+    class FastCoder:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def propose(
+            self,
+            goal,
+            plan_json,
+            workspace_snapshot,
+            memory_context,
+            critic_feedback,
+            iteration,
+            tdd_mode=False,
+            tdd_phase="normal",
+        ):
+            state["coder_calls"] += 1
+            return CoderOutput(
+                summary="single pass",
+                edits=[CodeEdit(path="app.py", content="print('ok')\n", reason="implement")],
+                commands=["pytest -q"],
+                done=True,
+                done_reason="done",
+            )
+
+    class FastCritic:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def review(self, goal, plan_json, coder_json, execution_results, tdd_mode=False, tdd_red_phase_complete=False):
+            return CriticOutput(
+                status="success",
+                analysis="all good",
+                next_actions=["finish"],
+                lessons=[LessonProposal(lesson="respond to plan quality feedback", tags=["planning"])],
+            )
+
+    class FastExecutor:
+        def __init__(self, workspace_dir, timeout_sec, max_output_chars):
+            self.workspace_dir = workspace_dir
+
+        def run(self, command_specs):
+            return [
+                ExecutionResult(
+                    command=spec.raw,
+                    returncode=0,
+                    stdout="ok",
+                    stderr="",
+                    timed_out=False,
+                    duration_sec=0.01,
+                )
+                for spec in command_specs
+            ]
+
+    monkeypatch.setattr("web.control_center.Planner", RecoveringPlanner)
+    monkeypatch.setattr("web.control_center.Coder", FastCoder)
+    monkeypatch.setattr("web.control_center.Critic", FastCritic)
+    monkeypatch.setattr("web.control_center.RestrictedExecutor", FastExecutor)
+
+    ok, start = center.start_run({"command": "/goal recover from weak first plan"})
+    assert ok is True
+    run = _wait_for_terminal(center, start["run_id"])
+
+    assert run["meta"]["status"] == "success"
+    assert int(run["meta"]["plan_quality_threshold"]) == 85
+    assert int(run["meta"]["plan_quality_score"]) >= 85
+    assert run["meta"]["plan_quality_passed"] is True
+    assert state["planner_calls"] == 2
+    assert state["coder_calls"] == 1
+
+    timeline_steps = [str(row.get("step", "")) for row in run.get("timeline", []) if isinstance(row, dict)]
+    assert "plan_quality_replan_requested" in timeline_steps
+    assert "plan_quality_rejected" not in timeline_steps
+
+
+def test_plan_quality_telemetry_aggregates_replan_and_recovery(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    center = DavidControlCenter(config=config, data_root=tmp_path / "data")
+    runs_root = tmp_path / "data" / "runs"
+
+    def _write_run(run_id: str, meta: dict, plan_quality: dict) -> None:
+        run_dir = runs_root / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "meta.json").write_text(json.dumps(meta) + "\n", encoding="utf-8")
+        (run_dir / "plan_quality.json").write_text(json.dumps(plan_quality) + "\n", encoding="utf-8")
+
+    _write_run(
+        "run_plan_1",
+        {
+            "id": "run_plan_1",
+            "mode": "goal",
+            "status": "failed",
+            "template_id": "build_cli_tool",
+            "plan_quality_score": 58,
+            "plan_quality_threshold": 70,
+            "plan_quality_passed": False,
+            "started_at": "2026-02-01T00:00:00+00:00",
+        },
+        {
+            "score": 58,
+            "threshold": 70,
+            "passed": False,
+            "attempts": [
+                {"score": 55, "threshold": 70, "passed": False},
+                {"score": 58, "threshold": 70, "passed": False},
+            ],
+        },
+    )
+    _write_run(
+        "run_plan_2",
+        {
+            "id": "run_plan_2",
+            "mode": "goal",
+            "status": "success",
+            "template_id": "bug_fix_mode",
+            "plan_quality_score": 82,
+            "plan_quality_threshold": 70,
+            "plan_quality_passed": True,
+            "started_at": "2026-02-02T00:00:00+00:00",
+        },
+        {
+            "score": 82,
+            "threshold": 70,
+            "passed": True,
+            "attempts": [
+                {"score": 62, "threshold": 70, "passed": False},
+                {"score": 82, "threshold": 70, "passed": True},
+            ],
+        },
+    )
+    _write_run(
+        "run_plan_3",
+        {
+            "id": "run_plan_3",
+            "mode": "goal",
+            "status": "success",
+            "template_id": "bug_fix_mode",
+            "plan_quality_score": 88,
+            "plan_quality_threshold": 70,
+            "plan_quality_passed": True,
+            "started_at": "2026-02-03T00:00:00+00:00",
+        },
+        {
+            "score": 88,
+            "threshold": 70,
+            "passed": True,
+            "attempt": 1,
+            "max_attempts": 1,
+        },
+    )
+    _write_run(
+        "run_non_goal",
+        {
+            "id": "run_non_goal",
+            "mode": "ask",
+            "status": "success",
+            "template_id": "",
+            "started_at": "2026-02-04T00:00:00+00:00",
+        },
+        {},
+    )
+
+    payload = center.plan_quality_telemetry(limit_runs=20)
+    assert int(payload["scored_runs"]) == 3
+    assert int(payload["threshold_enabled_runs"]) == 3
+    assert int(payload["rejected_runs"]) == 1
+    assert int(payload["replanned_runs"]) == 2
+    assert int(payload["recovered_on_replan_runs"]) == 1
+    assert float(payload["reject_rate"]) == pytest.approx(1 / 3, rel=0.0, abs=0.001)
+    assert float(payload["recovered_on_replan_rate"]) == pytest.approx(0.5, rel=0.0, abs=0.001)
+    assert int(payload["max_attempts"]) >= 2
+
+    by_template = {str(row.get("template_id", "")): row for row in payload.get("by_template", [])}
+    assert "bug_fix_mode" in by_template
+    bug_fix = by_template["bug_fix_mode"]
+    assert int(bug_fix["runs"]) == 2
+    assert float(bug_fix["replan_rate"]) == pytest.approx(0.5, rel=0.0, abs=0.001)
+    assert float(bug_fix["recovered_on_replan_rate"]) == pytest.approx(1.0, rel=0.0, abs=0.001)

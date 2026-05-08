@@ -1435,6 +1435,28 @@ code {
     color-mix(in oklab, var(--cyan) 8%, var(--panel))
   );
 }
+
+#tab-vision .vision-preview-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.52rem;
+  margin-top: 0.5rem;
+}
+#tab-vision .vision-video,
+#tab-vision .vision-canvas {
+  width: 100%;
+  border-radius: 0.7rem;
+  border: 1px solid color-mix(in oklab, var(--line) 82%, transparent);
+  background: color-mix(in oklab, var(--panel-soft) 90%, transparent);
+  min-height: 220px;
+}
+#tab-vision .vision-canvas {
+  display: none;
+}
+#tab-vision pre.code {
+  max-height: min(34vh, 300px);
+  overflow: auto;
+}
 #tab-cli .upload-item-top {
   display: flex;
   align-items: center;
@@ -1903,4 +1925,14 @@ code {
   #tab-cli .memory-chat-search-row > button,
   #tab-cli .memory-chat-action-row > button,
   #tab-cli .session-item { width: 100%; min-width: 0; }
+
+  #tab-vision .row {
+    display: grid;
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+  #tab-vision .vision-video,
+  #tab-vision .vision-canvas {
+    min-height: 180px;
+  }
 }

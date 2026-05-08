@@ -326,3 +326,182 @@ def test_loop_tdd_mode_places_tests_under_project(monkeypatch: pytest.MonkeyPatc
     assert (project_dir / "tests" / "test_app.py").exists()
     assert (project_dir / "src" / "app.py").exists()
     assert not (config.workspace_dir / "tests" / "test_app.py").exists()
+
+
+def test_loop_plan_quality_threshold_blocks_execution(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    base = _make_config(tmp_path)
+    config = replace(base, plan_quality_threshold=90)
+    state = {"planner_calls": 0, "coder_calls": 0}
+
+    class WeakPlanner:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def create_plan(self, goal, workspace_snapshot, memory_context, tdd_mode=False):
+            state["planner_calls"] += 1
+            return PlanOutput(
+                goal=goal,
+                steps=[PlanStep(id="S1", title="Plan", details="Do work.", success_check="Done.")],
+                success_criteria=["looks good"],
+            )
+
+    class FastCoder:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def propose(
+            self,
+            goal,
+            plan_json,
+            workspace_snapshot,
+            memory_context,
+            critic_feedback,
+            iteration,
+            tdd_mode=False,
+            tdd_phase="normal",
+        ):
+            state["coder_calls"] += 1
+            return CoderOutput(
+                summary="should not execute",
+                edits=[CodeEdit(path="src/app.py", content="print('x')\n", reason="noop")],
+                commands=["pytest -q"],
+                done=True,
+                done_reason="done",
+            )
+
+    monkeypatch.setattr("agent.loop.Planner", WeakPlanner)
+    monkeypatch.setattr("agent.loop.Coder", FastCoder)
+
+    agent = DavidAgent(config)
+    summary = agent.run("Block weak plan")
+
+    assert summary.success is False
+    assert summary.iterations_used == 0
+    assert state["planner_calls"] == 2
+    assert state["coder_calls"] == 0
+
+    events = _telemetry_events(config.logs_dir / "telemetry.jsonl")
+    event_types = [str(row.get("event_type", "")) for row in events]
+    assert "plan_quality_scored" in event_types
+    assert "plan_quality_replan_requested" in event_types
+    assert "plan_quality_rejected" in event_types
+
+
+def test_loop_plan_quality_replan_allows_execution_when_second_plan_passes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    base = _make_config(tmp_path)
+    config = replace(base, plan_quality_threshold=85)
+    state = {"planner_calls": 0, "coder_calls": 0}
+
+    class RecoveringPlanner:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def create_plan(self, goal, workspace_snapshot, memory_context, tdd_mode=False):
+            state["planner_calls"] += 1
+            if state["planner_calls"] == 1:
+                return PlanOutput(
+                    goal=goal,
+                    steps=[PlanStep(id="S1", title="Plan", details="Do work.", success_check="Done.")],
+                    success_criteria=["looks good"],
+                )
+            return PlanOutput(
+                goal=goal,
+                steps=[
+                    PlanStep(
+                        id="S1",
+                        title="Define tests first",
+                        details="Create tests under tests/ that verify expected behavior and failure cases before implementation.",
+                        success_check="pytest -q reports failing tests before code changes.",
+                    ),
+                    PlanStep(
+                        id="S2",
+                        title="Implement minimal code in scope",
+                        details="Update only project files inside workspace boundaries and avoid unrelated edits.",
+                        success_check="Implementation changes are limited and validated by pytest exit code.",
+                    ),
+                    PlanStep(
+                        id="S3",
+                        title="Validate and guard risk",
+                        details="Run pytest and enforce command limits, timeout checks, and approval or rollback safeguards.",
+                        success_check="pytest exits with code 0 and safety checks pass without violations.",
+                    ),
+                ],
+                success_criteria=[
+                    "pytest -q exits with code 0.",
+                    "All edits stay in workspace scope with safety validation.",
+                    "Rollback or approval safeguard exists for risky changes.",
+                ],
+            )
+
+    class FastCoder:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def propose(
+            self,
+            goal,
+            plan_json,
+            workspace_snapshot,
+            memory_context,
+            critic_feedback,
+            iteration,
+            tdd_mode=False,
+            tdd_phase="normal",
+        ):
+            state["coder_calls"] += 1
+            return CoderOutput(
+                summary="implement",
+                edits=[CodeEdit(path="src/app.py", content="def run():\n    return 'ok'\n", reason="implement")],
+                commands=["pytest -q"],
+                done=True,
+                done_reason="done",
+            )
+
+    class FastCritic:
+        def __init__(self, _llm, model_name=None):
+            self.model_name = model_name
+
+        def review(self, goal, plan_json, coder_json, execution_results, tdd_mode=False, tdd_red_phase_complete=False):
+            return CriticOutput(
+                status="success",
+                analysis="done",
+                next_actions=["finish"],
+                lessons=[LessonProposal(lesson="use quality feedback loops", tags=["planning"])],
+            )
+
+    class FastExecutor:
+        def __init__(self, workspace_dir, timeout_sec, max_output_chars):
+            self.workspace_dir = workspace_dir
+
+        def run(self, command_specs):
+            return [
+                ExecutionResult(
+                    command=spec.raw,
+                    returncode=0,
+                    stdout="ok",
+                    stderr="",
+                    timed_out=False,
+                    duration_sec=0.01,
+                )
+                for spec in command_specs
+            ]
+
+    monkeypatch.setattr("agent.loop.Planner", RecoveringPlanner)
+    monkeypatch.setattr("agent.loop.Coder", FastCoder)
+    monkeypatch.setattr("agent.loop.Critic", FastCritic)
+    monkeypatch.setattr("agent.loop.RestrictedExecutor", FastExecutor)
+
+    agent = DavidAgent(config)
+    summary = agent.run("Recover from weak initial plan")
+
+    assert summary.success is True
+    assert summary.iterations_used == 1
+    assert state["planner_calls"] == 2
+    assert state["coder_calls"] == 1
+
+    events = _telemetry_events(config.logs_dir / "telemetry.jsonl")
+    event_types = [str(row.get("event_type", "")) for row in events]
+    assert "plan_quality_replan_requested" in event_types
+    assert "plan_quality_rejected" not in event_types

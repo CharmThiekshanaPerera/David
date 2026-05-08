@@ -138,6 +138,18 @@ const state = {
     browserTranscriptFinal: "",
     browserTranscriptInterim: "",
   },
+  vision: {
+    active: false,
+    sessionId: "",
+    includeGoalContext: true,
+    stream: null,
+    streamPending: false,
+    timer: 0,
+    frameCounter: 0,
+    sampleIntervalMs: 500,
+    lastPlannerContext: "",
+    lastSummary: null,
+  },
 };
 
 const el = {
@@ -168,6 +180,20 @@ const el = {
   runConfigSummary: document.getElementById("runConfigSummary"),
   startGoalBtn: document.getElementById("startGoalBtn"),
   stopRunBtn: document.getElementById("stopRunBtn"),
+  visionIncludeGoalContext: document.getElementById("visionIncludeGoalContext"),
+  visionStartBtn: document.getElementById("visionStartBtn"),
+  visionStopBtn: document.getElementById("visionStopBtn"),
+  visionSampleInterval: document.getElementById("visionSampleInterval"),
+  visionDetectorModel: document.getElementById("visionDetectorModel"),
+  visionMotionEnabled: document.getElementById("visionMotionEnabled"),
+  visionObjectEnabled: document.getElementById("visionObjectEnabled"),
+  visionStatusText: document.getElementById("visionStatusText"),
+  visionVideo: document.getElementById("visionVideo"),
+  visionCanvas: document.getElementById("visionCanvas"),
+  visionSummary: document.getElementById("visionSummary"),
+  visionDetections: document.getElementById("visionDetections"),
+  visionMotion: document.getElementById("visionMotion"),
+  visionContextPreview: document.getElementById("visionContextPreview"),
   runProgress: document.getElementById("runProgress"),
   dashboardMessage: document.getElementById("dashboardMessage"),
   stageTracker: document.getElementById("stageTracker"),
@@ -217,6 +243,8 @@ const el = {
   projectBrainView: document.getElementById("projectBrainView"),
   memoryConflicts: document.getElementById("memoryConflicts"),
   telemetrySummary: document.getElementById("telemetrySummary"),
+  planQualitySummary: document.getElementById("planQualitySummary"),
+  planQualityTemplateBands: document.getElementById("planQualityTemplateBands"),
   durationChart: document.getElementById("durationChart"),
   refreshLogsBtn: document.getElementById("refreshLogsBtn"),
   logsLevelFilter: document.getElementById("logsLevelFilter"),
@@ -225,6 +253,7 @@ const el = {
   settingSafeMode: document.getElementById("settingSafeMode"),
   settingRateLimit: document.getElementById("settingRateLimit"),
   settingMaxIterations: document.getElementById("settingMaxIterations"),
+  settingPlanQualityThreshold: document.getElementById("settingPlanQualityThreshold"),
   settingLargeEdit: document.getElementById("settingLargeEdit"),
   settingMultiFile: document.getElementById("settingMultiFile"),
   settingPreviewDefault: document.getElementById("settingPreviewDefault"),
@@ -973,6 +1002,248 @@ function fmtBytes(value) {
   return `${rounded} ${units[idx]}`;
 }
 
+function shouldIncludeVisionContext() {
+  if (el.visionIncludeGoalContext) {
+    state.vision.includeGoalContext = !!el.visionIncludeGoalContext.checked;
+  }
+  return !!state.vision.includeGoalContext;
+}
+
+function setVisionStatusText(text) {
+  if (!el.visionStatusText) return;
+  el.visionStatusText.textContent = String(text || "").trim() || "Vision is idle.";
+}
+
+function renderVisionUiState() {
+  if (el.visionStartBtn) {
+    el.visionStartBtn.disabled = !!state.vision.active || !!state.vision.streamPending;
+  }
+  if (el.visionStopBtn) {
+    el.visionStopBtn.disabled = !state.vision.active && !state.vision.stream;
+  }
+  if (el.visionIncludeGoalContext) {
+    el.visionIncludeGoalContext.checked = !!state.vision.includeGoalContext;
+  }
+}
+
+function stopVisionMediaTracks() {
+  const stream = state.vision.stream;
+  if (stream && typeof stream.getTracks === "function") {
+    stream.getTracks().forEach((track) => {
+      try {
+        track.stop();
+      } catch (_) {}
+    });
+  }
+  state.vision.stream = null;
+  if (el.visionVideo) {
+    el.visionVideo.srcObject = null;
+  }
+}
+
+function clearVisionTimer() {
+  if (state.vision.timer) {
+    clearTimeout(state.vision.timer);
+    state.vision.timer = 0;
+  }
+}
+
+function renderVisionFrameResult(result) {
+  const safe = result && typeof result === "object" ? result : {};
+  const summary = safe.summary && typeof safe.summary === "object" ? safe.summary : {};
+  const event = safe.event && typeof safe.event === "object" ? safe.event : {};
+  const detections = Array.isArray(event.detections) ? event.detections : [];
+  const motion = event.motion && typeof event.motion === "object" ? event.motion : {};
+  const topLabels = Array.isArray(summary.top_labels) ? summary.top_labels : [];
+  const plannerContext = String(safe.planner_context || "").trim();
+  state.vision.lastSummary = summary;
+  state.vision.lastPlannerContext = plannerContext;
+
+  if (el.visionSummary) {
+    const labelsText = topLabels
+      .map((row) => `${String(row?.label || "")} (${Number(row?.count || 0)})`)
+      .filter(Boolean)
+      .slice(0, 5)
+      .join(", ");
+    const motionRate = Number(summary.motion_event_rate || 0);
+    const sustained = !!summary.sustained_motion_recent;
+    el.visionSummary.textContent = `Session ${state.vision.sessionId || "-"} · labels: ${
+      labelsText || "none"
+    } · motion rate: ${motionRate.toFixed(3)} · sustained motion: ${sustained ? "yes" : "no"}`;
+  }
+
+  if (el.visionDetections) {
+    if (!detections.length) {
+      el.visionDetections.textContent = "No detections in latest frame.";
+    } else {
+      el.visionDetections.textContent = detections
+        .map((row, idx) => {
+          const label = String(row?.label || `det_${idx + 1}`);
+          const confidence = Math.round(Number(row?.confidence || 0) * 100);
+          const bbox = row?.bbox || {};
+          return `${label} (${confidence}%) bbox=[${bbox.x1 ?? 0}, ${bbox.y1 ?? 0}, ${bbox.x2 ?? 0}, ${bbox.y2 ?? 0}]`;
+        })
+        .join("\n");
+    }
+  }
+
+  if (el.visionMotion) {
+    const regions = Array.isArray(motion.regions) ? motion.regions : [];
+    const regionText = regions.length
+      ? regions
+          .slice(0, 4)
+          .map((row) => `[x=${row?.x ?? 0}, y=${row?.y ?? 0}, w=${row?.w ?? 0}, h=${row?.h ?? 0}]`)
+          .join(" ")
+      : "none";
+    el.visionMotion.textContent = `detected=${!!motion.detected}\nsustained=${!!motion.sustained}\nratio=${Number(
+      motion.ratio || 0
+    ).toFixed(5)}\nregions=${regionText}`;
+  }
+
+  if (el.visionContextPreview) {
+    el.visionContextPreview.textContent = plannerContext || "Vision planner context will appear here.";
+  }
+}
+
+async function refreshVisionContext(maxEvents = 10) {
+  const data = await api(`/api/vision/context?max_events=${encodeURIComponent(String(maxEvents))}`);
+  state.vision.sessionId = String(data?.session_id || "");
+  state.vision.active = !!data?.active;
+  const plannerContext = String(data?.planner_context || "").trim();
+  state.vision.lastPlannerContext = plannerContext;
+  if (el.visionContextPreview) {
+    el.visionContextPreview.textContent = plannerContext || "Vision planner context will appear here.";
+  }
+  const summary = data?.summary && typeof data.summary === "object" ? data.summary : {};
+  if (el.visionSummary) {
+    const labels = Array.isArray(summary.top_labels) ? summary.top_labels : [];
+    const labelsText = labels
+      .map((row) => `${String(row?.label || "")} (${Number(row?.count || 0)})`)
+      .filter(Boolean)
+      .slice(0, 5)
+      .join(", ");
+    el.visionSummary.textContent = `Session ${state.vision.sessionId || "-"} · labels: ${labelsText || "none"} · events: ${
+      Number(summary.events_considered || 0)
+    }`;
+  }
+  renderVisionUiState();
+  return data;
+}
+
+async function captureVisionFrame() {
+  if (!state.vision.active) return;
+  if (!el.visionVideo || !el.visionCanvas) return;
+  const video = el.visionVideo;
+  if ((video.readyState || 0) < 2) return;
+  const canvas = el.visionCanvas;
+  const width = Number(video.videoWidth || 640);
+  const height = Number(video.videoHeight || 360);
+  if (!width || !height) return;
+  if (canvas.width !== width) canvas.width = width;
+  if (canvas.height !== height) canvas.height = height;
+  const ctx = canvas.getContext("2d", { alpha: false });
+  if (!ctx) return;
+  ctx.drawImage(video, 0, 0, width, height);
+  const frameBase64 = canvas.toDataURL("image/jpeg", 0.72);
+  state.vision.frameCounter += 1;
+  const payload = {
+    frame_base64: frameBase64,
+    timestamp_utc: new Date().toISOString(),
+    frame_id: `frame_${Date.now()}_${state.vision.frameCounter}`,
+  };
+  const result = await api("/api/vision/frame", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  renderVisionFrameResult(result);
+}
+
+function scheduleVisionCapture() {
+  clearVisionTimer();
+  if (!state.vision.active) return;
+  state.vision.timer = window.setTimeout(async () => {
+    try {
+      await captureVisionFrame();
+    } catch (err) {
+      setVisionStatusText(`Vision frame error: ${err?.message || "unknown error"}`);
+    } finally {
+      scheduleVisionCapture();
+    }
+  }, Math.max(200, Number(state.vision.sampleIntervalMs || 500)));
+}
+
+async function startVisionStream() {
+  if (state.vision.active || state.vision.streamPending) return;
+  if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== "function") {
+    throw new Error("Camera API unavailable in this browser.");
+  }
+  state.vision.streamPending = true;
+  renderVisionUiState();
+  setVisionStatusText("Requesting camera permission...");
+  try {
+    const intervalMs = Math.max(200, Math.min(3000, Number(el.visionSampleInterval?.value || 500)));
+    state.vision.sampleIntervalMs = intervalMs;
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false,
+    });
+    state.vision.stream = stream;
+    if (el.visionVideo) {
+      el.visionVideo.srcObject = stream;
+      await el.visionVideo.play().catch(() => {});
+    }
+    const startPayload = {
+      actor: "web_ui",
+      sample_interval_ms: intervalMs,
+      motion_enabled: !!el.visionMotionEnabled?.checked,
+      object_enabled: !!el.visionObjectEnabled?.checked,
+      detector_model: String(el.visionDetectorModel?.value || "").trim(),
+      window_seconds: 10,
+    };
+    const session = await api("/api/vision/start", { method: "POST", body: JSON.stringify(startPayload) });
+    state.vision.active = !!session?.active;
+    state.vision.sessionId = String(session?.session_id || "");
+    state.vision.frameCounter = 0;
+    setVisionStatusText(`Vision active. Session ${state.vision.sessionId || "-"}`);
+    renderVisionUiState();
+    scheduleVisionCapture();
+    await refreshVisionContext(10).catch(() => {});
+  } catch (err) {
+    stopVisionMediaTracks();
+    state.vision.active = false;
+    state.vision.sessionId = "";
+    setVisionStatusText(`Vision start failed: ${err?.message || "unknown error"}`);
+    throw err;
+  } finally {
+    state.vision.streamPending = false;
+    renderVisionUiState();
+  }
+}
+
+async function stopVisionStream({ silent = false } = {}) {
+  clearVisionTimer();
+  const hadSession = !!state.vision.sessionId;
+  state.vision.active = false;
+  renderVisionUiState();
+  if (hadSession) {
+    try {
+      await api("/api/vision/stop", {
+        method: "POST",
+        body: JSON.stringify({ actor: "web_ui" }),
+      });
+    } catch (err) {
+      if (!silent) {
+        setVisionStatusText(`Vision stop warning: ${err?.message || "unknown error"}`);
+      }
+    }
+  }
+  state.vision.sessionId = "";
+  stopVisionMediaTracks();
+  if (!silent) {
+    setVisionStatusText("Vision is idle.");
+  }
+}
+
 function kvList(target, entries) {
   if (!target) return;
   target.innerHTML = entries
@@ -1526,6 +1797,27 @@ function renderRunHealthSummary(summary, readOnly = false) {
   const models = [data.planner_model_used, data.coder_model_used, data.critic_model_used].filter(Boolean).join(" | ") || "-";
   const elapsed = Number(data.elapsed_sec);
   const elapsedLabel = Number.isFinite(elapsed) ? `${elapsed.toFixed(2)}s` : "-";
+  const hasPlanScore = Number.isFinite(Number(data.plan_quality_score));
+  const planScore = hasPlanScore ? Math.max(0, Math.min(100, Math.round(Number(data.plan_quality_score)))) : null;
+  const planThreshold = Number.isFinite(Number(data.plan_quality_threshold))
+    ? Math.max(0, Math.min(100, Math.round(Number(data.plan_quality_threshold))))
+    : 0;
+  const planPassed = hasPlanScore ? Boolean(data.plan_quality_passed) : null;
+  const planQualityLabel = hasPlanScore
+    ? `${planScore}/100 ${planThreshold > 0 ? `(threshold ${planThreshold})` : "(threshold disabled)"} · ${
+        planPassed ? "passed" : "failed"
+      }`
+    : "-";
+  const subscores = data.plan_quality_subscores && typeof data.plan_quality_subscores === "object" ? data.plan_quality_subscores : {};
+  const hasSubscores =
+    Number.isFinite(Number(subscores.clarity)) ||
+    Number.isFinite(Number(subscores.testability)) ||
+    Number.isFinite(Number(subscores.risk_coverage));
+  const subscoresLabel = hasSubscores
+    ? `clarity=${Number.isFinite(Number(subscores.clarity)) ? Math.round(Number(subscores.clarity)) : "-"} · testability=${
+        Number.isFinite(Number(subscores.testability)) ? Math.round(Number(subscores.testability)) : "-"
+      } · risk=${Number.isFinite(Number(subscores.risk_coverage)) ? Math.round(Number(subscores.risk_coverage)) : "-"}`
+    : "-";
   kvList(el.runHealthSummary, [
     ["Viewer mode", readOnly ? "Imported bundle (read-only)" : "Live run"],
     ["Iterations", data.iterations ?? "-"],
@@ -1533,6 +1825,8 @@ function renderRunHealthSummary(summary, readOnly = false) {
     ["Elapsed", elapsedLabel],
     ["Approvals", data.approvals_count ?? 0],
     ["Models used", models],
+    ["Plan quality", planQualityLabel],
+    ["Plan subscores", subscoresLabel],
     ["Top error category", data.top_error_category || "none"],
     ["Memory references", data.memory_items_referenced ?? 0],
   ]);
@@ -1593,6 +1887,13 @@ function renderStatus() {
     ["Project path", s.project_path || "-"],
     ["Active run", s.active_run_id || "-"],
     ["Iteration", `${s.iteration || 0} / ${s.max_iterations || 0}`],
+    ["Plan quality threshold", s.plan_quality_threshold ?? 0],
+    [
+      "Plan quality score",
+      s.plan_quality_score !== undefined && s.plan_quality_score !== null
+        ? `${s.plan_quality_score}/100 (${s.plan_quality_passed ? "passed" : "failed"})`
+        : "-",
+    ],
     ["Last command", s.last_command || "-"],
     ["Latest success", fmtBool(s.latest_success)],
     ["Pending approvals", s.pending_approvals || 0],
@@ -1612,18 +1913,34 @@ function renderStatus() {
 
 function renderArtifacts(details) {
   if (!details || !details.meta) {
-    kvList(el.artifactList, [["Artifacts", "-"], ["Workspace", "-"], ["Project", "-"], ["Open project folder", "-"]]);
+    kvList(el.artifactList, [["Artifacts", "-"], ["Workspace", "-"], ["Project", "-"], ["Plan quality", "-"], ["Open project folder", "-"]]);
     return;
   }
   const meta = details.meta || {};
   const readOnly = !!details.read_only || !!state.runReadOnlyView;
   const projectPath = meta.project_path || "-";
   const openProject = projectPath !== "-" ? `code "${projectPath}"` : "-";
+  const planScore =
+    meta.plan_quality_score ??
+    (details.plan_quality && typeof details.plan_quality === "object" ? details.plan_quality.score : null);
+  const planThreshold =
+    meta.plan_quality_threshold ??
+    (details.plan_quality && typeof details.plan_quality === "object" ? details.plan_quality.threshold : 0);
+  const planPassed =
+    meta.plan_quality_passed ??
+    (details.plan_quality && typeof details.plan_quality === "object" ? details.plan_quality.passed : null);
+  const planQualityLabel =
+    planScore === null || planScore === undefined
+      ? "-"
+      : `${planScore}/100 (${planThreshold > 0 ? `threshold ${planThreshold}` : "threshold disabled"} · ${
+          planPassed ? "passed" : "failed"
+        })`;
   kvList(el.artifactList, [
     ["Viewer mode", readOnly ? "Imported bundle (read-only)" : "Live workspace"],
     ["Artifacts", details.artifacts_dir || details.meta.artifacts_dir || "-"],
     ["Workspace", details.workspace_dir || details.meta.workspace_dir || "-"],
     ["Project", `${meta.project_slug || "-"} (${projectPath})`],
+    ["Plan quality", planQualityLabel],
     ["Open project folder", readOnly ? "-" : openProject],
   ]);
 }
@@ -3102,6 +3419,85 @@ function renderSelfImprovements(data) {
   });
 }
 
+function formatRate(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "-";
+  return `${(num * 100).toFixed(1)}%`;
+}
+
+function renderPlanQualityTelemetry(planQuality) {
+  const stats = planQuality && typeof planQuality === "object" ? planQuality : {};
+  const band = stats.recommended_threshold_band && typeof stats.recommended_threshold_band === "object" ? stats.recommended_threshold_band : {};
+  const scoreBandRows = Array.isArray(stats.score_bands) ? stats.score_bands : [];
+  const scoreBandLabel = scoreBandRows.length
+    ? scoreBandRows.map((row) => `${row.band}:${row.count}`).join(" | ")
+    : "-";
+
+  kvList(el.planQualitySummary, [
+    ["Scored goal runs", stats.scored_runs ?? 0],
+    ["Threshold-enabled runs", stats.threshold_enabled_runs ?? 0],
+    ["Reject rate", formatRate(stats.reject_rate ?? 0)],
+    ["Replan rate", formatRate(stats.replan_rate ?? 0)],
+    ["Recovered after replan", formatRate(stats.recovered_on_replan_rate ?? 0)],
+    ["Average score", stats.avg_score ?? "-"],
+    ["Median score", stats.median_score ?? "-"],
+    ["Average attempts", stats.avg_attempts ?? "-"],
+    [
+      "Recommended threshold band",
+      Number.isFinite(Number(band.low)) && Number.isFinite(Number(band.high))
+        ? `${Math.round(Number(band.low))}-${Math.round(Number(band.high))}`
+        : "-",
+    ],
+    ["Band source", band.source || "-"],
+    ["Score distribution", scoreBandLabel],
+  ]);
+
+  if (!el.planQualityTemplateBands) return;
+  const rows = Array.isArray(stats.by_template) ? stats.by_template : [];
+  if (!rows.length) {
+    el.planQualityTemplateBands.innerHTML = '<p class="muted">No goal-run plan quality data yet.</p>';
+    return;
+  }
+  el.planQualityTemplateBands.innerHTML = `
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Template</th>
+          <th>Runs</th>
+          <th>Avg Score</th>
+          <th>Reject</th>
+          <th>Replan</th>
+          <th>Recover</th>
+          <th>Recommended Band</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows
+          .slice(0, 24)
+          .map((row) => {
+            const rec = row.recommended_threshold_band && typeof row.recommended_threshold_band === "object" ? row.recommended_threshold_band : {};
+            const recLabel =
+              Number.isFinite(Number(rec.low)) && Number.isFinite(Number(rec.high))
+                ? `${Math.round(Number(rec.low))}-${Math.round(Number(rec.high))}`
+                : "-";
+            return `<tr>
+              <td><code>${escapeHtml(row.template_id || "ad_hoc_goal")}</code><div class="muted">${escapeHtml(
+              row.template_name || "Ad Hoc Goal"
+            )}</div></td>
+              <td>${escapeHtml(String(row.runs ?? 0))}</td>
+              <td>${escapeHtml(String(row.avg_score ?? "-"))}</td>
+              <td>${escapeHtml(formatRate(row.reject_rate ?? 0))}</td>
+              <td>${escapeHtml(formatRate(row.replan_rate ?? 0))}</td>
+              <td>${escapeHtml(formatRate(row.recovered_on_replan_rate ?? 0))}</td>
+              <td>${escapeHtml(recLabel)} <span class="muted">(${escapeHtml(String(rec.source || "-"))})</span></td>
+            </tr>`;
+          })
+          .join("")}
+      </tbody>
+    </table>
+  `;
+}
+
 function renderTelemetry(data) {
   state.telemetry = data;
   const summary = data.summary || {};
@@ -3112,6 +3508,7 @@ function renderTelemetry(data) {
     ["Average duration (s)", summary.avg_duration_sec ?? 0],
     ["Regression warnings", (data.regressions || []).length],
   ]);
+  renderPlanQualityTelemetry(data.plan_quality || {});
   drawDurationChart(data.metrics || []);
   renderActivityFeed(data.events || []);
 }
@@ -3157,6 +3554,9 @@ function renderSettings(data) {
   }
   if (el.settingMaxIterations) {
     el.settingMaxIterations.value = safeData.max_iterations_override ?? 0;
+  }
+  if (el.settingPlanQualityThreshold) {
+    el.settingPlanQualityThreshold.value = clampPercent(safeData.plan_quality_threshold, 0);
   }
   if (el.settingLargeEdit) {
     el.settingLargeEdit.value = safeData.risky_large_edit_bytes ?? 50000;
@@ -3362,6 +3762,13 @@ function renderSettings(data) {
       ? `OCR/Vision enrichment is enabled by default. Current model: ${modelText}.`
       : "OCR/Vision enrichment is off by default. You can still enable it per upload below.";
   }
+  if (el.visionDetectorModel && !String(el.visionDetectorModel.value || "").trim()) {
+    el.visionDetectorModel.value = String(safeData.upload_vision_model || "").trim();
+  }
+  if (el.visionIncludeGoalContext) {
+    el.visionIncludeGoalContext.checked = !!state.vision.includeGoalContext;
+  }
+  renderVisionUiState();
   renderTemplateSelects();
 
   if (el.goalTddMode) {
@@ -3409,6 +3816,7 @@ function renderSettings(data) {
     ["Allowed commands", (safeData.allowed_commands || []).join(", ")],
     ["Workspace", safeData.workspace_dir || "-"],
     ["Default max iterations", safeData.max_iterations_default || 0],
+    ["Plan quality threshold", String(safeData.plan_quality_threshold ?? 0)],
     ["Goal templates", (state.goalTemplates || []).length],
   ]);
   renderDemoBadge();
@@ -3494,7 +3902,22 @@ async function loadRun(runId) {
     renderDiffs(details);
     renderArtifacts(details);
     renderFileTree(files);
-    renderRunHealthSummary(details.health_summary, false);
+    const mergedHealthSummary = {
+      ...(details.health_summary && typeof details.health_summary === "object" ? details.health_summary : {}),
+      plan_quality_score:
+        details?.meta?.plan_quality_score ??
+        (details?.plan_quality && typeof details.plan_quality === "object" ? details.plan_quality.score : null),
+      plan_quality_threshold:
+        details?.meta?.plan_quality_threshold ??
+        (details?.plan_quality && typeof details.plan_quality === "object" ? details.plan_quality.threshold : 0),
+      plan_quality_passed:
+        details?.meta?.plan_quality_passed ??
+        (details?.plan_quality && typeof details.plan_quality === "object" ? details.plan_quality.passed : null),
+      plan_quality_subscores:
+        details?.meta?.plan_quality_subscores ??
+        (details?.plan_quality && typeof details.plan_quality === "object" ? details.plan_quality.subscores : {}),
+    };
+    renderRunHealthSummary(mergedHealthSummary, false);
     await loadReplay(runId, state.selectedIteration || 1, "live");
     await loadAudit(runId, "live");
 
@@ -3526,7 +3949,22 @@ async function loadImportedBundle(importId) {
     renderDiffs(details);
     renderArtifacts(details);
     renderFileTree(files);
-    renderRunHealthSummary(details.health_summary, true);
+    const mergedHealthSummary = {
+      ...(details.health_summary && typeof details.health_summary === "object" ? details.health_summary : {}),
+      plan_quality_score:
+        details?.meta?.plan_quality_score ??
+        (details?.plan_quality && typeof details.plan_quality === "object" ? details.plan_quality.score : null),
+      plan_quality_threshold:
+        details?.meta?.plan_quality_threshold ??
+        (details?.plan_quality && typeof details.plan_quality === "object" ? details.plan_quality.threshold : 0),
+      plan_quality_passed:
+        details?.meta?.plan_quality_passed ??
+        (details?.plan_quality && typeof details.plan_quality === "object" ? details.plan_quality.passed : null),
+      plan_quality_subscores:
+        details?.meta?.plan_quality_subscores ??
+        (details?.plan_quality && typeof details.plan_quality === "object" ? details.plan_quality.subscores : {}),
+    };
+    renderRunHealthSummary(mergedHealthSummary, true);
     await loadReplay(importId, state.selectedIteration || 1, "import");
     await loadAudit(importId, "import");
 
@@ -3649,7 +4087,25 @@ async function refreshMemory() {
 }
 
 async function refreshTelemetry() {
-  renderTelemetry(await api("/api/telemetry/tail?limit=250"));
+  const [tailResult, planResult] = await Promise.allSettled([
+    api("/api/telemetry/tail?limit=250"),
+    api("/api/telemetry/plan_quality?limit=400"),
+  ]);
+  if (tailResult.status !== "fulfilled" && planResult.status !== "fulfilled") {
+    throw tailResult.reason || planResult.reason || new Error("Failed to load telemetry.");
+  }
+  const tailData =
+    tailResult.status === "fulfilled" && tailResult.value && typeof tailResult.value === "object"
+      ? tailResult.value
+      : { events: [], metrics: [], summary: {}, regressions: [] };
+  const planData =
+    planResult.status === "fulfilled" && planResult.value && typeof planResult.value === "object"
+      ? planResult.value
+      : tailData.plan_quality || {};
+  renderTelemetry({
+    ...tailData,
+    plan_quality: planData,
+  });
 }
 
 async function refreshGrowth() {
@@ -3906,6 +4362,7 @@ async function handleGoalCommand(request) {
       planner_model: el.settingPlannerModel?.value || "",
       coder_model: el.settingCoderModel?.value || "",
       critic_model: el.settingCriticModel?.value || "",
+      include_vision_context: shouldIncludeVisionContext(),
     }),
   });
   state.lastCliRunId = result.run_id;
@@ -5364,6 +5821,7 @@ async function handleAdvancedChat(rawMessage) {
       parent_teaching_mode: (!!el.parentTeachingMode?.checked) || state.parentTeachingMode,
       session_id: state.selectedChatSessionId || "",
       actor: "web_ui",
+      include_vision_context: shouldIncludeVisionContext(),
     }),
   });
   await applyAdvancedChatResult(result, text);
@@ -5420,6 +5878,7 @@ async function handleVoiceChatStream(rawMessage, options = {}) {
         voice_style: state.voice.style,
         voice_rate: state.voice.rate,
         turn_id: turnId,
+        include_vision_context: shouldIncludeVisionContext(),
       },
       async ({ event, data }) => {
         if (turnId !== state.voice.activeTurnId) return;
@@ -5858,6 +6317,36 @@ function wireActions() {
     state.pendingGoalRunOptions.tddMode = !!el.goalTddMode.checked;
     refreshRunOptionSummary();
   });
+  el.visionIncludeGoalContext?.addEventListener("change", () => {
+    state.vision.includeGoalContext = !!el.visionIncludeGoalContext?.checked;
+  });
+  el.visionSampleInterval?.addEventListener("change", () => {
+    const nextInterval = Math.max(200, Math.min(3000, Number(el.visionSampleInterval?.value || 500)));
+    state.vision.sampleIntervalMs = nextInterval;
+  });
+  el.visionStartBtn?.addEventListener("click", async () => {
+    try {
+      await startVisionStream();
+      showToast("Vision stream started.");
+    } catch (err) {
+      setMessage(err?.message || "Unable to start vision stream.");
+    }
+  });
+  el.visionStopBtn?.addEventListener("click", async () => {
+    try {
+      await stopVisionStream();
+      showToast("Vision stream stopped.");
+    } catch (err) {
+      setMessage(err?.message || "Unable to stop vision stream.");
+    }
+  });
+  [el.visionMotionEnabled, el.visionObjectEnabled, el.visionDetectorModel].forEach((node) => {
+    node?.addEventListener("change", () => {
+      if (state.vision.active) {
+        setVisionStatusText("Vision settings changed. Stop and restart camera to apply.");
+      }
+    });
+  });
 
   el.startGoalBtn.addEventListener("click", async () => {
     const goal = el.goalInput.value.trim();
@@ -5877,6 +6366,7 @@ function wireActions() {
         planner_model: el.settingPlannerModel?.value || "",
         coder_model: el.settingCoderModel?.value || "",
         critic_model: el.settingCriticModel?.value || "",
+        include_vision_context: shouldIncludeVisionContext(),
       };
       const result = await api("/api/run", { method: "POST", body: JSON.stringify(payload) });
       state.runViewerMode = "live";
@@ -6043,6 +6533,7 @@ function wireActions() {
         safe_mode: el.settingSafeMode.value === "true",
         rate_limit_seconds: Number(el.settingRateLimit.value || 0),
         max_iterations_override: Number(el.settingMaxIterations.value || 0),
+        plan_quality_threshold: clampPercent(el.settingPlanQualityThreshold?.value, 0),
         risky_large_edit_bytes: Number(el.settingLargeEdit.value || 50000),
         risky_multi_file_threshold: Number(el.settingMultiFile.value || 4),
         run_preview_default: !!el.settingPreviewDefault.checked,
@@ -6607,6 +7098,8 @@ function wireActions() {
     abortVoiceTranscription();
     stopVoiceVad({ submit: false }).catch(() => {});
     stopVoiceListening({ submit: false }).catch(() => {});
+    stopVisionStream({ silent: true }).catch(() => {});
+    stopVisionMediaTracks();
     clearVoiceAudioQueue(true);
     cleanupVoiceAudioResources();
     stopVoiceWaveform();
@@ -6632,6 +7125,7 @@ async function bootstrap() {
   renderVoiceRateLabel();
   syncVoiceUiState();
   stopVoiceWaveform();
+  renderVisionUiState();
 
   if (window.matchMedia) {
     const motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -6664,6 +7158,7 @@ async function bootstrap() {
     safeRefresh("telemetry", refreshTelemetry),
     safeRefresh("logs", refreshLogs),
     safeRefresh("workspace", refreshWorkspaceTargets),
+    safeRefresh("vision", () => refreshVisionContext(10)),
   ]);
   await safeRefresh("settings", refreshSettings);
   renderWorkspaceTargetHint();
@@ -6693,6 +7188,7 @@ async function bootstrap() {
         safeRefresh("legacy archive", refreshLegacyArchive, { silent: true }),
         safeRefresh("self improvements", refreshSelfImprovements, { silent: true }),
         safeRefresh("logs", refreshLogs, { silent: true }),
+        safeRefresh("vision", () => refreshVisionContext(8), { silent: true }),
       ]);
       setupSSE();
     }
@@ -6704,6 +7200,7 @@ async function bootstrap() {
   setInterval(() => refreshLegacyArchive().catch(() => {}), 8000);
   setInterval(() => refreshSelfImprovements().catch(() => {}), 9000);
   setInterval(() => refreshTelemetry().catch(() => {}), 5000);
+  setInterval(() => refreshVisionContext(10).catch(() => {}), 7000);
 }
 
 bootstrap();

@@ -79,6 +79,7 @@ python -m web.server --host 127.0.0.1 --port 8787
 - Retry failed runs.
 - Download run bundle (`.zip`) for a selected run.
 - Explain Failure panel summarizes the first failing command/error.
+- Run Health Summary now includes plan quality score, pass/fail status, threshold, and subscores (`clarity`, `testability`, `risk`).
 
 ## Diff Viewer
 
@@ -95,6 +96,7 @@ python -m web.server --host 127.0.0.1 --port 8787
 - Summary: total iterations, success rate, error frequency, average duration.
 - Duration chart: recent iteration durations.
 - Regression detector warning count (tests fail after previously passing runs).
+- Plan Quality Analytics: reject/replan/recovery rates, score distribution, and recommended threshold bands by template.
 
 ## Logs
 
@@ -107,10 +109,17 @@ python -m web.server --host 127.0.0.1 --port 8787
 - `safe_mode`: read-only posture for risky operations.
 - `rate_limit_seconds`: blocks spam `/goal` starts.
 - `max_iterations_override`: overrides configured max iterations when > 0.
+- `plan_quality_threshold`: minimum plan score (`0-100`) required before coding/execution; `0` disables the gate.
 - `risky_large_edit_bytes`: threshold for approval gate.
 - `risky_multi_file_threshold`: threshold for approval gate.
 - `run_preview_default`: default preview behavior.
 - `companion_mode`: enables warm memory-first web ask/chat behavior with transparent AI identity.
+
+Plan quality tuning guidance:
+
+- Start at `60` for broad goals.
+- Raise to `70-75` after observing stable planner output.
+- Keep `0` in experimentation mode when you do not want plan gating.
 
 ## CLI Mirror
 
@@ -147,6 +156,7 @@ python -m web.server --host 127.0.0.1 --port 8787
 - `POST /api/uploads/<upload_id>/ask`
 - `GET /api/memory`
 - `GET /api/telemetry/tail`
+- `GET /api/telemetry/plan_quality`
 - `GET /api/logs/tail`
 - `GET /api/settings`
 - `POST /api/settings`
@@ -166,6 +176,7 @@ python -m web.server --host 127.0.0.1 --port 8787
 - No arbitrary shell execution endpoints.
 - Supported command inputs are only `/goal`, `/ask`, `/teach`.
 - File edits remain under `workspace/` via existing SafetyGuard rules.
+- Plan quality gate auto-requests one planner reattempt when score is low, then stops before coder/executor if still below `plan_quality_threshold`.
 - Risky edit operations require explicit approve/reject.
 - Memory conflict writes from `/teach` require explicit approve/reject.
 - Companion responses are deterministic overlays on top of memory retrieval; they do not bypass safety gates.
@@ -458,6 +469,11 @@ Expected:
   - open `Logs` tab and inspect `web_control_center.log`.
 - `Rate limit active` when starting runs:
   - lower `rate_limit_seconds` in Settings.
+- Run failed with `planning_quality`:
+  - planner was auto-retried once using score recommendations before failure.
+  - open Runs -> Run Health Summary and inspect plan subscores.
+  - reduce `plan_quality_threshold` (for example `75 -> 60`) if it is too strict.
+  - improve goal prompt clarity and objective checks, then retry.
 - `No active run` on stop:
   - expected when nothing is currently running.
 - Ollama connection errors:

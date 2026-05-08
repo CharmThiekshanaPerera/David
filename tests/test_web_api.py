@@ -21,6 +21,7 @@ class FakeCenter:
         self._self_improvements = []
         self._imported_bundles = {}
         self._uploads = {}
+        self.last_start_run_payload = {}
         self._settings = {
             "safe_mode": False,
             "rate_limit_seconds": 3,
@@ -124,6 +125,7 @@ class FakeCenter:
             rows.remove(q)
 
     def start_run(self, payload):
+        self.last_start_run_payload = dict(payload or {})
         command = str(payload.get("command", ""))
         if command.startswith("/goal ") or command.startswith("/ask ") or command.startswith("/teach "):
             return True, {"run_id": "run_test_1", "status": "queued"}
@@ -632,6 +634,9 @@ class FakeCenter:
         parent_teaching_mode=False,
         session_id="",
         actor="web_ui",
+        vision_context="",
+        vision_context_meta=None,
+        publish_events=True,
     ):
         text = str(message).strip()
         session = str(session_id or "session_test_1")
@@ -797,7 +802,65 @@ class FakeCenter:
         return True, stored
 
     def telemetry_tail(self, limit=100):
-        return {"events": [], "metrics": [], "summary": {}, "regressions": []}
+        return {
+            "events": [],
+            "metrics": [],
+            "summary": {},
+            "regressions": [],
+            "plan_quality": self.plan_quality_telemetry(limit_runs=max(120, int(limit) * 4)),
+        }
+
+    def plan_quality_telemetry(self, limit_runs=300):
+        return {
+            "generated_at": "2026-01-01T00:00:00+00:00",
+            "limit_runs": int(limit_runs),
+            "goal_runs_considered": 3,
+            "scored_runs": 3,
+            "threshold_enabled_runs": 3,
+            "rejected_runs": 1,
+            "reject_rate": 0.333,
+            "passed_runs": 2,
+            "pass_rate": 0.667,
+            "replanned_runs": 2,
+            "replan_rate": 0.667,
+            "recovered_on_replan_runs": 1,
+            "recovered_on_replan_rate": 0.5,
+            "avg_score": 76.0,
+            "median_score": 82.0,
+            "p25_score": 70.0,
+            "p75_score": 86.0,
+            "avg_threshold": 70.0,
+            "median_threshold": 70.0,
+            "avg_attempts": 1.67,
+            "max_attempts": 2,
+            "score_bands": [
+                {"band": "0-39", "count": 0},
+                {"band": "40-59", "count": 1},
+                {"band": "60-74", "count": 0},
+                {"band": "75-89", "count": 2},
+                {"band": "90-100", "count": 0},
+            ],
+            "recommended_threshold_band": {"low": 66, "high": 78, "source": "default_template_baseline", "sample_size": 2},
+            "by_template": [
+                {
+                    "template_id": "bug_fix_mode",
+                    "template_name": "Bug Fix Mode",
+                    "runs": 2,
+                    "avg_score": 85.0,
+                    "median_score": 85.0,
+                    "avg_threshold": 70.0,
+                    "reject_rate": 0.0,
+                    "replan_rate": 0.5,
+                    "recovered_on_replan_rate": 1.0,
+                    "recommended_threshold_band": {
+                        "low": 68,
+                        "high": 80,
+                        "source": "default_template_baseline",
+                        "sample_size": 2,
+                    },
+                }
+            ],
+        }
 
     def growth_timeline(self, limit=120):
         return {
@@ -1060,6 +1123,78 @@ def test_run_and_details_endpoints(client):
     details = client.get("/api/run/run_test_1")
     assert details.status_code == 200
     assert details.get_json()["data"]["meta"]["id"] == "run_test_1"
+
+
+def test_run_endpoint_can_include_vision_context(client):
+    run_response = client.post(
+        "/api/run",
+        json={
+            "command": "/goal build test with webcam context",
+            "include_vision_context": True,
+        },
+    )
+    assert run_response.status_code == 200
+    app = client.application
+    center = app.config["DAVID_CENTER"]
+    sent_payload = center.last_start_run_payload
+    assert bool(sent_payload.get("include_vision_context")) is True
+    assert "Real-world vision context" in str(sent_payload.get("vision_context", ""))
+    meta = sent_payload.get("vision_context_meta", {})
+    assert isinstance(meta, dict)
+    assert bool(meta.get("requested")) is True
+
+
+def test_vision_start_frame_context_stop_endpoints(client):
+    started = client.post(
+        "/api/vision/start",
+        json={
+            "sample_interval_ms": 500,
+            "motion_enabled": True,
+            "object_enabled": True,
+        },
+    )
+    assert started.status_code == 200
+    start_data = started.get_json()["data"]
+    assert bool(start_data.get("active")) is True
+    assert str(start_data.get("session_id", "")).startswith("vision_")
+
+    frame = client.post(
+        "/api/vision/frame",
+        json={
+            "frame_base64": base64.b64encode(b"abc").decode("ascii"),
+            "timestamp_utc": "2026-02-25T00:00:00Z",
+            "frame_id": "frame_test_1",
+        },
+    )
+    assert frame.status_code == 200
+    frame_data = frame.get_json()["data"]
+    assert str(frame_data.get("frame_id", "")) == "frame_test_1"
+    assert "summary" in frame_data
+    assert "planner_context" in frame_data
+
+    context = client.get("/api/vision/context?max_events=5")
+    assert context.status_code == 200
+    context_data = context.get_json()["data"]
+    assert isinstance(context_data.get("events"), list)
+    assert str(context_data.get("planner_context", "")).strip() != ""
+
+    stopped = client.post("/api/vision/stop", json={})
+    assert stopped.status_code == 200
+    stop_data = stopped.get_json()["data"]
+    assert bool(stop_data.get("active")) is False
+
+
+def test_vision_frame_requires_active_session(client):
+    response = client.post(
+        "/api/vision/frame",
+        json={
+            "frame_base64": base64.b64encode(b"abc").decode("ascii"),
+        },
+    )
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert payload["ok"] is False
+    assert "not active" in str(payload["error"]).lower()
 
 
 def test_memory_endpoint(client):
@@ -1596,3 +1731,13 @@ def test_memory_clear_conversations_endpoint(client):
 
     all_rows = client.get("/api/memory/conversations").get_json()["data"]
     assert int(all_rows["total"]) == 0
+
+
+def test_plan_quality_telemetry_endpoint(client):
+    response = client.get("/api/telemetry/plan_quality?limit=220")
+    assert response.status_code == 200
+    payload = response.get_json()["data"]
+    assert int(payload["limit_runs"]) == 220
+    assert int(payload["scored_runs"]) == 3
+    assert int(payload["replanned_runs"]) == 2
+    assert isinstance(payload.get("by_template"), list)

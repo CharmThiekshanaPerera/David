@@ -487,6 +487,22 @@ def test_api_settings_toggle_upload_vision_mode(memory_client) -> None:
     assert str(refreshed_data["upload_vision_model"]) == "qwen2.5-coder:1.5b"
 
 
+def test_api_settings_plan_quality_threshold_persists(memory_client) -> None:
+    client, _config = memory_client
+    settings = client.get("/api/settings")
+    assert settings.status_code == 200
+    assert int(settings.get_json()["data"]["plan_quality_threshold"]) == 0
+
+    updated = client.post("/api/settings", json={"plan_quality_threshold": 85})
+    assert updated.status_code == 200
+    data = updated.get_json()["data"]
+    assert int(data["plan_quality_threshold"]) == 85
+
+    refreshed = client.get("/api/settings")
+    assert refreshed.status_code == 200
+    assert int(refreshed.get_json()["data"]["plan_quality_threshold"]) == 85
+
+
 def test_api_settings_voice_defaults(memory_client) -> None:
     client, _config = memory_client
     settings = client.get("/api/settings")

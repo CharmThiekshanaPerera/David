@@ -61,3 +61,13 @@ def test_control_settings_voice_stop_phrases_defaults_when_missing_or_empty() ->
     empty = ControlSettings.from_dict({"voice_stop_phrases": " , ,, "})
     assert missing.voice_stop_phrases == ["stop listening", "end chat", "bye david"]
     assert empty.voice_stop_phrases == ["stop listening", "end chat", "bye david"]
+
+
+def test_control_settings_plan_quality_threshold_bounds() -> None:
+    default_settings = ControlSettings.from_dict({})
+    high = ControlSettings.from_dict({"plan_quality_threshold": 140})
+    low = ControlSettings.from_dict({"plan_quality_threshold": -10})
+
+    assert int(default_settings.plan_quality_threshold) == 0
+    assert int(high.plan_quality_threshold) == 100
+    assert int(low.plan_quality_threshold) == 0

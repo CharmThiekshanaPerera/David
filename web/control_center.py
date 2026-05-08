@@ -29,6 +29,7 @@ from agent.critic import Critic
 from agent.llm import OllamaClient
 from agent.main import parse_chat_command
 from agent.memory import LongTermMemory
+from agent.plan_quality import build_plan_quality_replan_context, score_plan_quality
 from agent.planner import Planner
 from agent.projects import ensure_workspace_layout, prepare_project_for_goal
 from agent.qa import MemoryTeacherQA
@@ -202,6 +203,7 @@ class ControlSettings:
     safe_mode: bool = False
     rate_limit_seconds: int = 3
     max_iterations_override: int = 0
+    plan_quality_threshold: int = 0
     risky_large_edit_bytes: int = 50_000
     risky_multi_file_threshold: int = 4
     run_preview_default: bool = False
@@ -327,6 +329,7 @@ class ControlSettings:
             safe_mode=bool(data.get("safe_mode", False)),
             rate_limit_seconds=max(0, int(data.get("rate_limit_seconds", 3))),
             max_iterations_override=max(0, int(data.get("max_iterations_override", 0))),
+            plan_quality_threshold=_pct("plan_quality_threshold", 0),
             risky_large_edit_bytes=max(1_000, int(data.get("risky_large_edit_bytes", 50_000))),
             risky_multi_file_threshold=max(2, int(data.get("risky_multi_file_threshold", 4))),
             run_preview_default=bool(data.get("run_preview_default", False)),
@@ -504,6 +507,13 @@ class DavidControlCenter:
             "stages": ["planner", "coder", "safety", "executor", "critic", "memory"],
             "iteration": current_meta.get("iteration", 0) if current_meta else 0,
             "max_iterations": current_meta.get("max_iterations", self.effective_max_iterations()) if current_meta else self.effective_max_iterations(),
+            "plan_quality_threshold": (
+                current_meta.get("plan_quality_threshold", self.settings.plan_quality_threshold)
+                if current_meta
+                else self.settings.plan_quality_threshold
+            ),
+            "plan_quality_score": current_meta.get("plan_quality_score") if current_meta else None,
+            "plan_quality_passed": current_meta.get("plan_quality_passed") if current_meta else None,
             "progress_percent": current_meta.get("progress_percent", 0) if current_meta else 0,
             "last_command": current_meta.get("last_command", "") if current_meta else "",
             "latest_success": current_meta.get("success") if current_meta else (latest.get("success") if latest else None),
@@ -739,6 +749,16 @@ class DavidControlCenter:
         if mode != "goal":
             tdd_mode = False
 
+        raw_vision_context = str(payload.get("vision_context", "")).replace("\x00", "").strip()
+        vision_context = raw_vision_context[:12_000] if raw_vision_context else ""
+        include_vision_context = bool(payload.get("include_vision_context", False))
+        try:
+            vision_context_meta = self._sanitize_json_metadata(payload.get("vision_context_meta", {}), max_chars=8_000)
+        except ValueError as exc:
+            return False, {"error": str(exc)}
+        if vision_context and include_vision_context:
+            vision_context_meta.setdefault("source", "live_vision_stream")
+
         project_slug = ""
         project_path = ""
         project_created_new: bool | None = None
@@ -812,8 +832,14 @@ class DavidControlCenter:
                 "project_created_new": project_created_new,
                 "workspace_target_path": workspace_target_path,
                 "workspace_target_type": workspace_target_type,
+                "vision_context": vision_context,
+                "vision_context_included": bool(vision_context),
+                "vision_context_meta": vision_context_meta,
                 "iteration": 0,
                 "max_iterations": self.effective_max_iterations(),
+                "plan_quality_threshold": int(self.settings.plan_quality_threshold),
+                "plan_quality_score": None,
+                "plan_quality_passed": None,
                 "progress_percent": 0,
                 "last_command": "",
                 "success": None,
@@ -839,6 +865,8 @@ class DavidControlCenter:
                 "project_created_new": project_created_new,
                 "workspace_target_path": workspace_target_path,
                 "workspace_target_type": workspace_target_type,
+                "vision_context": vision_context,
+                "vision_context_meta": vision_context_meta,
             }
             cancel_event = threading.Event()
             worker = threading.Thread(
@@ -861,12 +889,15 @@ class DavidControlCenter:
             "coder_model_used": coder_model_used,
             "critic_model_used": critic_model_used,
             "tdd_mode": tdd_mode,
+            "plan_quality_threshold": int(self.settings.plan_quality_threshold),
             "template_id": template.get("id") if template else "",
             "project_slug": project_slug,
             "project_path": project_path,
             "project_created_new": project_created_new,
             "workspace_target_path": workspace_target_path,
             "workspace_target_type": workspace_target_type,
+            "vision_context_included": bool(vision_context),
+            "vision_context_meta": vision_context_meta,
         }
 
     def stop_active_run(self) -> dict[str, Any]:
@@ -993,6 +1024,8 @@ class DavidControlCenter:
         parent_teaching_mode: bool = False,
         session_id: str = "",
         actor: str = "web_ui",
+        vision_context: str = "",
+        vision_context_meta: dict[str, Any] | None = None,
         publish_events: bool = True,
     ) -> dict[str, Any]:
         if self._demo_mode_enabled():
@@ -1013,6 +1046,8 @@ class DavidControlCenter:
         detected = self.classify_chat_intent(clean_message)
         selected_intent = self._normalize_intent(intent) or str(detected.get("intent", "chat"))
         active_session_id = self._resolve_chat_session_id(session_id=session_id, actor=actor_value)
+        vision_context_value = str(vision_context or "").strip()[:12_000]
+        vision_meta_value = dict(vision_context_meta or {})
         parent_mode_active = bool(parent_teaching_mode or self.settings.parent_teaching_mode)
         if (
             parent_mode_active
@@ -1098,12 +1133,17 @@ class DavidControlCenter:
                     "mode": "goal",
                     "payload": clean_message,
                     "preview": False,
+                    "vision_context": vision_context_value,
+                    "vision_context_meta": vision_meta_value,
+                    "include_vision_context": bool(vision_context_value),
                 }
             )
             response = {
                 "mode": "goal",
                 "status": "queued" if started else "error",
                 "run": run_result,
+                "vision_context_included": bool(vision_context_value),
+                "vision_context_meta": vision_meta_value,
                 "message": clean_message,
                 "actor": actor_value,
                 "session_id": active_session_id,
@@ -2419,6 +2459,7 @@ class DavidControlCenter:
             return None
 
         plan = self._read_json(run_dir / "plan.json", default={})
+        plan_quality = self._read_json(run_dir / "plan_quality.json", default={})
         result = self._read_json(run_dir / "result.json", default={})
         timeline = self._read_jsonl(run_dir / "timeline.jsonl", limit=1_000)
         if not timeline:
@@ -2455,6 +2496,7 @@ class DavidControlCenter:
         return {
             "meta": meta,
             "plan": plan,
+            "plan_quality": plan_quality,
             "result": result,
             "timeline": timeline,
             "iterations": iteration_rows,
@@ -2732,6 +2774,10 @@ class DavidControlCenter:
             "iterations_until_green": iterations_until_green,
             "elapsed_sec": elapsed_sec,
             "approvals_count": approval_count,
+            "plan_quality_score": meta.get("plan_quality_score"),
+            "plan_quality_threshold": int(meta.get("plan_quality_threshold", self.settings.plan_quality_threshold) or 0),
+            "plan_quality_passed": meta.get("plan_quality_passed"),
+            "plan_quality_subscores": meta.get("plan_quality_subscores", {}),
             "planner_model_used": str(meta.get("planner_model_used", "")).strip(),
             "coder_model_used": str(meta.get("coder_model_used", "")).strip(),
             "critic_model_used": str(meta.get("critic_model_used", "")).strip(),
@@ -4063,7 +4109,7 @@ class DavidControlCenter:
             },
         }
 
-    def telemetry_tail(self, limit: int = 100) -> dict[str, Any]:
+    def telemetry_tail(self, limit: int = 100, *, include_plan_quality: bool = True) -> dict[str, Any]:
         if self._demo_mode_enabled():
             events = self._read_demo_jsonl("mock_telemetry.jsonl", limit=max(1, min(limit, 1000)))
             metrics = self._read_demo_json("mock_metrics.json", default={"iterations": []})
@@ -4102,11 +4148,320 @@ class DavidControlCenter:
             "avg_duration_sec": avg_duration,
         }
 
-        return {
+        payload = {
             "events": events,
             "metrics": rows[-500:],
             "summary": summary,
             "regressions": self.regression_warnings(self.get_runs(limit=200)),
+        }
+        if include_plan_quality:
+            payload["plan_quality"] = self.plan_quality_telemetry(limit_runs=max(120, min(1000, int(limit) * 4)))
+        return payload
+
+    @staticmethod
+    def _int_or_none(value: Any) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return int(value)
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return int(float(text))
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _percentile(values: list[int], q: float) -> float | None:
+        if not values:
+            return None
+        rows = sorted(values)
+        if len(rows) == 1:
+            return float(rows[0])
+        ratio = max(0.0, min(1.0, float(q)))
+        position = (len(rows) - 1) * ratio
+        lower = int(position)
+        upper = min(len(rows) - 1, lower + 1)
+        if lower == upper:
+            return float(rows[lower])
+        fraction = position - lower
+        return (rows[lower] * (1.0 - fraction)) + (rows[upper] * fraction)
+
+    @classmethod
+    def _recommended_plan_quality_band(
+        cls,
+        success_scores: list[int],
+        *,
+        fallback_low: int,
+        fallback_high: int,
+        min_observations: int = 4,
+    ) -> dict[str, Any]:
+        if len(success_scores) >= max(1, int(min_observations)):
+            low_raw = cls._percentile(success_scores, 0.35)
+            high_raw = cls._percentile(success_scores, 0.65)
+            if low_raw is not None and high_raw is not None:
+                low = int(round(low_raw))
+                high = int(round(high_raw))
+                if high < low:
+                    low, high = high, low
+                if high - low < 8:
+                    pad = (8 - (high - low)) // 2 + 1
+                    low -= pad
+                    high += pad
+                return {
+                    "low": max(0, min(100, low)),
+                    "high": max(0, min(100, high)),
+                    "source": "observed_success_scores",
+                    "sample_size": len(success_scores),
+                }
+
+        return {
+            "low": max(0, min(100, int(fallback_low))),
+            "high": max(0, min(100, int(fallback_high))),
+            "source": "default_template_baseline",
+            "sample_size": len(success_scores),
+        }
+
+    def plan_quality_telemetry(self, limit_runs: int = 300) -> dict[str, Any]:
+        limit = max(20, min(1000, int(limit_runs)))
+        runs = self.get_runs(limit=limit)
+        run_root = self._demo_runs_root() if self._demo_mode_enabled() else None
+
+        template_name_map = {str(item.get("id", "")).strip(): str(item.get("name", "")).strip() for item in GOAL_TEMPLATES}
+        template_name_map["ad_hoc_goal"] = "Ad Hoc Goal"
+        template_band_defaults: dict[str, tuple[int, int]] = {
+            "build_cli_tool": (60, 72),
+            "bug_fix_mode": (68, 80),
+            "refactor_mode": (64, 76),
+            "strict_tdd_mode": (72, 86),
+            "ad_hoc_goal": (60, 75),
+        }
+
+        entries: list[dict[str, Any]] = []
+        score_bands = {
+            "0-39": 0,
+            "40-59": 0,
+            "60-74": 0,
+            "75-89": 0,
+            "90-100": 0,
+        }
+
+        for row in runs:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("mode", "")).strip().casefold() != "goal":
+                continue
+
+            run_id = str(row.get("id", "")).strip()
+            template_id = str(row.get("template_id", "")).strip() or "ad_hoc_goal"
+            template_name = (
+                template_name_map.get(template_id)
+                or template_id.replace("_", " ").strip().title()
+                or "Ad Hoc Goal"
+            )
+
+            score = self._int_or_none(row.get("plan_quality_score"))
+            threshold = self._int_or_none(row.get("plan_quality_threshold"))
+            passed_raw = row.get("plan_quality_passed")
+            passed = bool(passed_raw) if isinstance(passed_raw, bool) else None
+
+            attempts_count = 1
+            replanned = False
+            recovered_on_replan = False
+
+            plan_payload: dict[str, Any] = {}
+            if run_id and self._is_safe_run_id(run_id):
+                loaded = self._read_json(self._run_dir(run_id, runs_root=run_root) / "plan_quality.json", default={})
+                if isinstance(loaded, dict):
+                    plan_payload = loaded
+
+            attempts_raw = plan_payload.get("attempts")
+            attempts = [item for item in attempts_raw if isinstance(item, dict)] if isinstance(attempts_raw, list) else []
+            if attempts:
+                attempts_count = len(attempts)
+                replanned = attempts_count > 1
+                final = attempts[-1]
+                if score is None:
+                    score = self._int_or_none(final.get("score"))
+                if threshold is None:
+                    threshold = self._int_or_none(final.get("threshold"))
+                if passed is None and isinstance(final.get("passed"), bool):
+                    passed = bool(final.get("passed"))
+                failed_before = any(
+                    isinstance(item.get("passed"), bool) and item.get("passed") is False for item in attempts[:-1]
+                )
+                recovered_on_replan = replanned and failed_before and passed is True
+            elif plan_payload:
+                attempt = self._int_or_none(plan_payload.get("attempt")) or 1
+                max_attempts = self._int_or_none(plan_payload.get("max_attempts")) or attempt
+                attempts_count = max(1, attempt, max_attempts)
+                replanned = attempts_count > 1
+                if score is None:
+                    score = self._int_or_none(plan_payload.get("score"))
+                if threshold is None:
+                    threshold = self._int_or_none(plan_payload.get("threshold"))
+                if passed is None and isinstance(plan_payload.get("passed"), bool):
+                    passed = bool(plan_payload.get("passed"))
+                recovered_on_replan = replanned and passed is True and attempt > 1
+
+            if score is None and threshold is None and passed is None:
+                continue
+
+            if score is not None:
+                score = max(0, min(100, int(score)))
+                if score < 40:
+                    score_bands["0-39"] += 1
+                elif score < 60:
+                    score_bands["40-59"] += 1
+                elif score < 75:
+                    score_bands["60-74"] += 1
+                elif score < 90:
+                    score_bands["75-89"] += 1
+                else:
+                    score_bands["90-100"] += 1
+
+            threshold = max(0, min(100, int(threshold or 0)))
+            rejected = False
+            if threshold > 0:
+                if score is not None:
+                    rejected = score < threshold
+                elif isinstance(passed, bool):
+                    rejected = not passed
+
+            entries.append(
+                {
+                    "run_id": run_id,
+                    "template_id": template_id,
+                    "template_name": template_name,
+                    "score": score,
+                    "threshold": threshold,
+                    "passed": passed,
+                    "rejected": rejected,
+                    "replanned": replanned,
+                    "attempts": attempts_count,
+                    "recovered_on_replan": recovered_on_replan,
+                }
+            )
+
+        scored_runs = len(entries)
+        threshold_enabled_runs = sum(1 for item in entries if int(item.get("threshold", 0)) > 0)
+        rejected_runs = sum(1 for item in entries if bool(item.get("rejected")))
+        passed_runs = sum(1 for item in entries if item.get("passed") is True)
+        replanned_runs = sum(1 for item in entries if bool(item.get("replanned")))
+        recovered_runs = sum(1 for item in entries if bool(item.get("recovered_on_replan")))
+
+        scores = [int(item["score"]) for item in entries if item.get("score") is not None]
+        thresholds = [int(item["threshold"]) for item in entries if int(item.get("threshold", 0)) > 0]
+        attempts = [int(item.get("attempts", 1)) for item in entries]
+        success_scores = [int(item["score"]) for item in entries if item.get("score") is not None and item.get("passed") is True]
+
+        global_band = self._recommended_plan_quality_band(
+            success_scores,
+            fallback_low=template_band_defaults["ad_hoc_goal"][0],
+            fallback_high=template_band_defaults["ad_hoc_goal"][1],
+        )
+
+        by_template_raw: dict[str, dict[str, Any]] = {}
+        for item in entries:
+            template_id = str(item.get("template_id", "")).strip() or "ad_hoc_goal"
+            bucket = by_template_raw.setdefault(
+                template_id,
+                {
+                    "template_id": template_id,
+                    "template_name": str(item.get("template_name", "")).strip() or "Ad Hoc Goal",
+                    "scores": [],
+                    "success_scores": [],
+                    "thresholds": [],
+                    "runs": 0,
+                    "rejected_runs": 0,
+                    "replanned_runs": 0,
+                    "recovered_runs": 0,
+                },
+            )
+            bucket["runs"] += 1
+            score_value = item.get("score")
+            if score_value is not None:
+                bucket["scores"].append(int(score_value))
+            if score_value is not None and item.get("passed") is True:
+                bucket["success_scores"].append(int(score_value))
+            threshold_value = int(item.get("threshold", 0))
+            if threshold_value > 0:
+                bucket["thresholds"].append(threshold_value)
+            if bool(item.get("rejected")):
+                bucket["rejected_runs"] += 1
+            if bool(item.get("replanned")):
+                bucket["replanned_runs"] += 1
+            if bool(item.get("recovered_on_replan")):
+                bucket["recovered_runs"] += 1
+
+        by_template: list[dict[str, Any]] = []
+        for template_id, bucket in by_template_raw.items():
+            runs_count = max(1, int(bucket.get("runs", 0)))
+            defaults = template_band_defaults.get(template_id, template_band_defaults["ad_hoc_goal"])
+            band = self._recommended_plan_quality_band(
+                [int(v) for v in bucket.get("success_scores", [])],
+                fallback_low=defaults[0],
+                fallback_high=defaults[1],
+            )
+            template_scores = [int(v) for v in bucket.get("scores", [])]
+            template_thresholds = [int(v) for v in bucket.get("thresholds", [])]
+            by_template.append(
+                {
+                    "template_id": template_id,
+                    "template_name": str(bucket.get("template_name", "")).strip() or "Ad Hoc Goal",
+                    "runs": int(bucket.get("runs", 0)),
+                    "avg_score": round(sum(template_scores) / len(template_scores), 2) if template_scores else None,
+                    "median_score": (
+                        round(float(self._percentile(template_scores, 0.5) or 0.0), 2) if template_scores else None
+                    ),
+                    "avg_threshold": (
+                        round(sum(template_thresholds) / len(template_thresholds), 2) if template_thresholds else None
+                    ),
+                    "reject_rate": round(int(bucket.get("rejected_runs", 0)) / runs_count, 3),
+                    "replan_rate": round(int(bucket.get("replanned_runs", 0)) / runs_count, 3),
+                    "recovered_on_replan_rate": (
+                        round(int(bucket.get("recovered_runs", 0)) / int(bucket.get("replanned_runs", 1)), 3)
+                        if int(bucket.get("replanned_runs", 0)) > 0
+                        else 0.0
+                    ),
+                    "recommended_threshold_band": band,
+                }
+            )
+
+        by_template.sort(key=lambda item: (-int(item.get("runs", 0)), str(item.get("template_name", ""))))
+
+        return {
+            "generated_at": self._now_iso(),
+            "limit_runs": limit,
+            "goal_runs_considered": len(
+                [item for item in runs if isinstance(item, dict) and str(item.get("mode", "")).strip().casefold() == "goal"]
+            ),
+            "scored_runs": scored_runs,
+            "threshold_enabled_runs": threshold_enabled_runs,
+            "rejected_runs": rejected_runs,
+            "reject_rate": round(rejected_runs / max(1, threshold_enabled_runs), 3),
+            "passed_runs": passed_runs,
+            "pass_rate": round(passed_runs / max(1, scored_runs), 3),
+            "replanned_runs": replanned_runs,
+            "replan_rate": round(replanned_runs / max(1, scored_runs), 3),
+            "recovered_on_replan_runs": recovered_runs,
+            "recovered_on_replan_rate": (
+                round(recovered_runs / max(1, replanned_runs), 3) if replanned_runs > 0 else 0.0
+            ),
+            "avg_score": round(sum(scores) / len(scores), 2) if scores else None,
+            "median_score": round(float(self._percentile(scores, 0.5) or 0.0), 2) if scores else None,
+            "p25_score": round(float(self._percentile(scores, 0.25) or 0.0), 2) if scores else None,
+            "p75_score": round(float(self._percentile(scores, 0.75) or 0.0), 2) if scores else None,
+            "avg_threshold": round(sum(thresholds) / len(thresholds), 2) if thresholds else None,
+            "median_threshold": (
+                round(float(self._percentile(thresholds, 0.5) or 0.0), 2) if thresholds else None
+            ),
+            "avg_attempts": round(sum(attempts) / len(attempts), 2) if attempts else 0.0,
+            "max_attempts": max(attempts) if attempts else 0,
+            "score_bands": [{"band": band, "count": count} for band, count in score_bands.items()],
+            "recommended_threshold_band": global_band,
+            "by_template": by_template,
         }
 
     def logs_tail(self, limit: int = 200) -> dict[str, Any]:
@@ -4152,7 +4507,7 @@ class DavidControlCenter:
         return payload
 
     def metrics_summary(self) -> dict[str, Any]:
-        telemetry = self.telemetry_tail(limit=50)
+        telemetry = self.telemetry_tail(limit=50, include_plan_quality=False)
         summary = telemetry.get("summary", {})
         summary["recent_durations"] = [
             item.get("duration_sec", 0.0)
@@ -5049,13 +5404,17 @@ class DavidControlCenter:
         reflection_context: str = "",
         values_context: str = "",
         project_brain_context: str = "",
+        vision_context: str = "",
     ) -> str:
         base = str(memory_context or "").strip() or "No prior lessons available."
         logs = str(log_context or "").strip()
         reflections = str(reflection_context or "").strip()
         values = str(values_context or "").strip()
         project_brain = str(project_brain_context or "").strip()
+        vision = str(vision_context or "").strip()
         sections = [base]
+        if vision:
+            sections.append(f"Live vision context:\n{vision}")
         if project_brain:
             sections.append(project_brain)
         if values:
@@ -6575,6 +6934,8 @@ class DavidControlCenter:
                     "project_created_new": run_options.get("project_created_new"),
                     "workspace_target_path": run_options.get("workspace_target_path", ""),
                     "workspace_target_type": run_options.get("workspace_target_type", ""),
+                    "vision_context_included": bool(str(run_options.get("vision_context", "")).strip()),
+                    "vision_context_meta": run_options.get("vision_context_meta", {}),
                 },
             )
 
@@ -6721,6 +7082,10 @@ class DavidControlCenter:
         project_created_new = options.get("project_created_new")
         workspace_target_path = str(options.get("workspace_target_path", "")).strip()
         workspace_target_type = str(options.get("workspace_target_type", "")).strip().lower()
+        vision_context = str(options.get("vision_context", "")).strip()
+        vision_context_meta = options.get("vision_context_meta", {})
+        if not isinstance(vision_context_meta, dict):
+            vision_context_meta = {}
         if not project_path_raw:
             if workspace_target_path:
                 target_path, normalized_target, target_type = self._resolve_existing_goal_target(workspace_target_path)
@@ -6765,6 +7130,8 @@ class DavidControlCenter:
             "project_created_new": project_created_new,
             "workspace_target_path": workspace_target_path,
             "workspace_target_type": workspace_target_type,
+            "vision_context_included": bool(vision_context),
+            "vision_context_meta": vision_context_meta,
         }
 
         iteration_limit = self.effective_max_iterations()
@@ -6783,6 +7150,8 @@ class DavidControlCenter:
             project_created_new=project_created_new,
             workspace_target_path=workspace_target_path,
             workspace_target_type=workspace_target_type,
+            vision_context_included=bool(vision_context),
+            vision_context_meta=vision_context_meta,
         )
         initial_snapshot = workspace.snapshot()
         base_memory_context = memory.render_context(effective_goal)
@@ -6800,40 +7169,237 @@ class DavidControlCenter:
             reflection_context,
             values_context,
             project_brain_context,
+            vision_context,
         )
-        plan = planner.create_plan(
-            goal=effective_goal,
-            workspace_snapshot=initial_snapshot,
-            memory_context=memory_context,
-            tdd_mode=tdd_mode,
-        )
-        self._write_json(self._run_dir(run_id) / "plan.json", plan.to_dict())
-        self._append_timeline(
-            run_id,
-            "plan_created",
-            {
-                "plan": plan.to_dict(),
-                "planner_model_used": planner_model_used,
-                "coder_model_used": coder_model_used,
-                "critic_model_used": critic_model_used,
-                "tdd_mode": tdd_mode,
-                "logs_context_included": bool(log_context.strip()),
-                **project_meta,
-            },
-        )
-        telemetry.event(
-            "plan_created",
-            {
-                "run_id": run_id,
-                "goal": effective_goal,
-                "plan": plan.to_dict(),
-                "planner_model_used": planner_model_used,
-                "coder_model_used": coder_model_used,
-                "critic_model_used": critic_model_used,
-                "tdd_mode": tdd_mode,
-                **project_meta,
-            },
-        )
+        threshold = max(0, min(100, int(self.settings.plan_quality_threshold)))
+        max_plan_attempts = 2 if threshold > 0 else 1
+        plan_payload: dict[str, Any] = {}
+        plan_quality: dict[str, Any] = {}
+        plan_quality_attempts: list[dict[str, Any]] = []
+        plan_quality_passed = False
+
+        for plan_attempt in range(1, max_plan_attempts + 1):
+            plan_memory_context = memory_context
+            if plan_attempt > 1:
+                plan_memory_context = build_plan_quality_replan_context(
+                    memory_context,
+                    plan_quality,
+                    threshold=threshold,
+                    tdd_mode=tdd_mode,
+                    attempt=plan_attempt - 1,
+                    max_attempts=max_plan_attempts,
+                )
+                self._append_timeline(
+                    run_id,
+                    "plan_quality_replan_requested",
+                    {
+                        "plan_attempt": plan_attempt,
+                        "plan_quality_previous": plan_quality,
+                        "planner_model_used": planner_model_used,
+                        "coder_model_used": coder_model_used,
+                        "critic_model_used": critic_model_used,
+                        "tdd_mode": tdd_mode,
+                        **project_meta,
+                    },
+                )
+                telemetry.event(
+                    "plan_quality_replan_requested",
+                    {
+                        "run_id": run_id,
+                        "goal": effective_goal,
+                        "plan_attempt": plan_attempt,
+                        "plan_quality_previous": plan_quality,
+                        "planner_model_used": planner_model_used,
+                        "coder_model_used": coder_model_used,
+                        "critic_model_used": critic_model_used,
+                        "tdd_mode": tdd_mode,
+                        **project_meta,
+                    },
+                )
+
+            plan = planner.create_plan(
+                goal=effective_goal,
+                workspace_snapshot=initial_snapshot,
+                memory_context=plan_memory_context,
+                tdd_mode=tdd_mode,
+            )
+            plan_payload = plan.to_dict()
+            self._write_json(self._run_dir(run_id) / "plan.json", plan_payload)
+            self._append_timeline(
+                run_id,
+                "plan_created",
+                {
+                    "plan": plan_payload,
+                    "plan_attempt": plan_attempt,
+                    "auto_replan": plan_attempt > 1,
+                    "planner_model_used": planner_model_used,
+                    "coder_model_used": coder_model_used,
+                    "critic_model_used": critic_model_used,
+                    "tdd_mode": tdd_mode,
+                    "logs_context_included": bool(log_context.strip()),
+                    **project_meta,
+                },
+            )
+            telemetry.event(
+                "plan_created",
+                {
+                    "run_id": run_id,
+                    "goal": effective_goal,
+                    "plan": plan_payload,
+                    "plan_attempt": plan_attempt,
+                    "auto_replan": plan_attempt > 1,
+                    "planner_model_used": planner_model_used,
+                    "coder_model_used": coder_model_used,
+                    "critic_model_used": critic_model_used,
+                    "tdd_mode": tdd_mode,
+                    **project_meta,
+                },
+            )
+
+            plan_quality = score_plan_quality(plan_payload, tdd_mode=tdd_mode)
+            plan_quality_passed = plan_quality.get("score", 0) >= threshold if threshold > 0 else True
+            plan_quality["threshold"] = threshold
+            plan_quality["passed"] = plan_quality_passed
+            plan_quality["attempt"] = plan_attempt
+            plan_quality["max_attempts"] = max_plan_attempts
+            plan_quality_attempts.append(dict(plan_quality))
+
+            plan_quality_payload = {**plan_quality, "attempts": plan_quality_attempts}
+            self._write_json(self._run_dir(run_id) / "plan_quality.json", plan_quality_payload)
+            self._update_run_meta(
+                run_id,
+                plan_quality_threshold=threshold,
+                plan_quality_score=int(plan_quality.get("score", 0)),
+                plan_quality_passed=bool(plan_quality_passed),
+                plan_quality_subscores=plan_quality.get("subscores", {}),
+            )
+            self._append_timeline(
+                run_id,
+                "plan_quality_scored",
+                {
+                    "plan_quality": plan_quality_payload,
+                    "plan_attempt": plan_attempt,
+                    "planner_model_used": planner_model_used,
+                    "coder_model_used": coder_model_used,
+                    "critic_model_used": critic_model_used,
+                    "tdd_mode": tdd_mode,
+                    **project_meta,
+                },
+            )
+            telemetry.event(
+                "plan_quality_scored",
+                {
+                    "run_id": run_id,
+                    "goal": effective_goal,
+                    "plan_quality": plan_quality_payload,
+                    "plan_attempt": plan_attempt,
+                    "planner_model_used": planner_model_used,
+                    "coder_model_used": coder_model_used,
+                    "critic_model_used": critic_model_used,
+                    "tdd_mode": tdd_mode,
+                    **project_meta,
+                },
+            )
+            if plan_quality_passed:
+                break
+
+        if not plan_quality_passed:
+            attempts_used = int(plan_quality.get("attempt", max_plan_attempts))
+            reason = (
+                f"Plan quality score {int(plan_quality.get('score', 0))} below threshold {threshold} "
+                f"after {attempts_used} planning attempt(s). Refine planning before execution."
+            )
+            plan_quality_payload = {**plan_quality, "attempts": plan_quality_attempts}
+            self._append_timeline(
+                run_id,
+                "plan_quality_rejected",
+                {
+                    "message": reason,
+                    "plan_quality": plan_quality_payload,
+                    "planner_model_used": planner_model_used,
+                    "coder_model_used": coder_model_used,
+                    "critic_model_used": critic_model_used,
+                    "tdd_mode": tdd_mode,
+                    **project_meta,
+                },
+            )
+            telemetry.event(
+                "plan_quality_rejected",
+                {
+                    "run_id": run_id,
+                    "goal": effective_goal,
+                    "message": reason,
+                    "plan_quality": plan_quality_payload,
+                    "planner_model_used": planner_model_used,
+                    "coder_model_used": coder_model_used,
+                    "critic_model_used": critic_model_used,
+                    "tdd_mode": tdd_mode,
+                    **project_meta,
+                },
+            )
+            telemetry.event(
+                "run_complete",
+                {
+                    "run_id": run_id,
+                    "goal": effective_goal,
+                    "success": False,
+                    "iterations_used": 0,
+                    "planner_model_used": planner_model_used,
+                    "coder_model_used": coder_model_used,
+                    "critic_model_used": critic_model_used,
+                    "tdd_mode": tdd_mode,
+                    "iterations_until_green": iterations_until_green,
+                    "plan_quality": plan_quality_payload,
+                    **project_meta,
+                },
+            )
+            self._write_json(
+                self._run_dir(run_id) / "result.json",
+                {
+                    "status": "failed",
+                    "analysis": reason,
+                    "iteration": 0,
+                    "explain_failure": reason,
+                    "failure_details": {
+                        "category": "planning_quality",
+                        "summary": reason,
+                        "top_errors": [reason],
+                        "related_files": [],
+                        "suggested_actions": [
+                            "Improve plan step clarity and objective verification checks.",
+                            "Add explicit risk/safety coverage in plan steps.",
+                            "Retry run after refining planning prompt/context.",
+                        ],
+                    },
+                    "plan_quality": plan_quality_payload,
+                },
+            )
+            self._update_run_meta(
+                run_id,
+                status="failed",
+                success=False,
+                message=reason,
+                failure_explanation=reason,
+                ended_at=self._now_iso(),
+                iteration=0,
+                progress_percent=100,
+                tests_ran=False,
+                tests_passed=None,
+                iterations_until_green=iterations_until_green,
+                current_stage="planner",
+            )
+            self._record_goal_reflection(
+                run_id=run_id,
+                goal=effective_goal,
+                status="failed",
+                message=reason,
+                iterations_used=0,
+                tests_ran=False,
+                tests_passed=None,
+                tdd_mode=tdd_mode,
+                iterations_until_green=iterations_until_green,
+            )
+            return
 
         critic_feedback = "No critic feedback yet."
         tests_ran = False
@@ -6906,10 +7472,11 @@ class DavidControlCenter:
                 reflection_context,
                 values_context,
                 project_brain_context,
+                vision_context,
             )
             coder_output = coder.propose(
                 goal=effective_goal,
-                plan_json=plan.to_dict(),
+                plan_json=plan_payload,
                 workspace_snapshot=workspace_snapshot,
                 memory_context=memory_context,
                 critic_feedback=critic_feedback,
@@ -7262,7 +7829,7 @@ class DavidControlCenter:
             self._update_run_meta(run_id, current_stage="critic")
             critic_output = critic.review(
                 goal=effective_goal,
-                plan_json=plan.to_dict(),
+                plan_json=plan_payload,
                 coder_json=coder_output.to_dict(),
                 execution_results=execution_results,
                 tdd_mode=tdd_mode,

@@ -10,6 +10,7 @@ from agent.critic import Critic
 from agent.executor import RestrictedExecutor
 from agent.llm import OllamaClient
 from agent.memory import LongTermMemory
+from agent.plan_quality import build_plan_quality_replan_context, score_plan_quality
 from agent.planner import Planner
 from agent.projects import ensure_workspace_layout, prepare_project_for_goal
 from agent.safety import SafetyError, SafetyGuard, ValidatedEdit
@@ -79,26 +80,134 @@ class DavidAgent:
         base_memory_context = self._memory.render_context(goal)
         log_context = self._build_goal_log_context()
         memory_context = self._compose_goal_context(base_memory_context, log_context)
-        plan = self._planner.create_plan(
-            goal=goal,
-            workspace_snapshot=initial_snapshot,
-            memory_context=memory_context,
-            tdd_mode=tdd_mode,
-        )
+        threshold = max(0, min(100, int(self._config.plan_quality_threshold)))
+        max_plan_attempts = 2 if threshold > 0 else 1
+        plan_payload: dict = {}
+        plan_quality: dict = {}
+        plan_quality_passed = False
 
-        self._telemetry.event(
-            "plan_created",
-            {
-                "goal": goal,
-                "plan": plan.to_dict(),
-                "planner_model_used": self._config.planner_model,
-                "coder_model_used": self._config.coder_model,
-                "critic_model_used": self._config.critic_model,
-                "tdd_mode": tdd_mode,
-                "logs_context_included": bool(log_context.strip()),
-                **project_meta,
-            },
-        )
+        for plan_attempt in range(1, max_plan_attempts + 1):
+            plan_memory_context = memory_context
+            if plan_attempt > 1:
+                plan_memory_context = build_plan_quality_replan_context(
+                    memory_context,
+                    plan_quality,
+                    threshold=threshold,
+                    tdd_mode=tdd_mode,
+                    attempt=plan_attempt - 1,
+                    max_attempts=max_plan_attempts,
+                )
+                self._telemetry.event(
+                    "plan_quality_replan_requested",
+                    {
+                        "goal": goal,
+                        "plan_attempt": plan_attempt,
+                        "plan_quality_previous": plan_quality,
+                        "planner_model_used": self._config.planner_model,
+                        "coder_model_used": self._config.coder_model,
+                        "critic_model_used": self._config.critic_model,
+                        "tdd_mode": tdd_mode,
+                        **project_meta,
+                    },
+                )
+
+            plan = self._planner.create_plan(
+                goal=goal,
+                workspace_snapshot=initial_snapshot,
+                memory_context=plan_memory_context,
+                tdd_mode=tdd_mode,
+            )
+            plan_payload = plan.to_dict()
+
+            self._telemetry.event(
+                "plan_created",
+                {
+                    "goal": goal,
+                    "plan": plan_payload,
+                    "plan_attempt": plan_attempt,
+                    "auto_replan": plan_attempt > 1,
+                    "planner_model_used": self._config.planner_model,
+                    "coder_model_used": self._config.coder_model,
+                    "critic_model_used": self._config.critic_model,
+                    "tdd_mode": tdd_mode,
+                    "logs_context_included": bool(log_context.strip()),
+                    **project_meta,
+                },
+            )
+
+            plan_quality = score_plan_quality(plan_payload, tdd_mode=tdd_mode)
+            plan_quality_passed = plan_quality.get("score", 0) >= threshold if threshold > 0 else True
+            plan_quality["threshold"] = threshold
+            plan_quality["passed"] = plan_quality_passed
+            plan_quality["attempt"] = plan_attempt
+            plan_quality["max_attempts"] = max_plan_attempts
+            self._telemetry.event(
+                "plan_quality_scored",
+                {
+                    "goal": goal,
+                    "plan_quality": plan_quality,
+                    "plan_attempt": plan_attempt,
+                    "planner_model_used": self._config.planner_model,
+                    "coder_model_used": self._config.coder_model,
+                    "critic_model_used": self._config.critic_model,
+                    "tdd_mode": tdd_mode,
+                    **project_meta,
+                },
+            )
+            if plan_quality_passed:
+                break
+
+        if not plan_quality_passed:
+            attempts_used = int(plan_quality.get("attempt", max_plan_attempts))
+            message = (
+                f"Plan quality score {int(plan_quality.get('score', 0))} "
+                f"below threshold {threshold} after {attempts_used} planning attempt(s). "
+                "Refine planning before execution."
+            )
+            self._telemetry.event(
+                "plan_quality_rejected",
+                {
+                    "goal": goal,
+                    "message": message,
+                    "plan_quality": plan_quality,
+                    "planner_model_used": self._config.planner_model,
+                    "coder_model_used": self._config.coder_model,
+                    "critic_model_used": self._config.critic_model,
+                    "tdd_mode": tdd_mode,
+                    **project_meta,
+                },
+            )
+            self._memory.append_lessons(
+                goal=goal,
+                lessons=[
+                    LessonProposal(
+                        lesson="Plan quality gate blocked execution; strengthen objective checks and risk coverage before coding.",
+                        tags=["planning", "quality", "safety"],
+                    )
+                ],
+                context=message,
+            )
+            self._telemetry.event(
+                "run_complete",
+                {
+                    "goal": goal,
+                    "success": False,
+                    "iterations_used": 0,
+                    "planner_model_used": self._config.planner_model,
+                    "coder_model_used": self._config.coder_model,
+                    "critic_model_used": self._config.critic_model,
+                    "tdd_mode": tdd_mode,
+                    "iterations_until_green": iterations_until_green,
+                    "plan_quality": plan_quality,
+                    **project_meta,
+                },
+            )
+            return RunSummary(
+                goal=goal,
+                success=False,
+                iterations_used=0,
+                message=message,
+            )
 
         critic_feedback = "No critic feedback yet."
         for iteration in range(1, iteration_limit + 1):
@@ -111,7 +220,7 @@ class DavidAgent:
 
             coder_output = self._coder.propose(
                 goal=goal,
-                plan_json=plan.to_dict(),
+                plan_json=plan_payload,
                 workspace_snapshot=workspace_snapshot,
                 memory_context=memory_context,
                 critic_feedback=critic_feedback,
@@ -308,7 +417,7 @@ class DavidAgent:
 
             critic_output = self._critic.review(
                 goal=goal,
-                plan_json=plan.to_dict(),
+                plan_json=plan_payload,
                 coder_json=coder_output.to_dict(),
                 execution_results=execution_results,
                 tdd_mode=tdd_mode,

@@ -59,6 +59,7 @@
     <nav class="tabs" id="tabs">
       <button data-tab="dashboard" class="active">Dashboard</button>
       <button data-tab="cli">Memory & Chat</button>
+      <button data-tab="vision">Vision Stream</button>
       <button data-tab="runs">Runs</button>
       <button data-tab="approvals">Approvals</button>
       <button data-tab="diff">Diff Viewer</button>
@@ -314,6 +315,11 @@
           <ul class="kv" id="telemetrySummary"></ul>
           <canvas id="durationChart" width="1000" height="240"></canvas>
         </article>
+        <article class="card">
+          <h2>Plan Quality Analytics</h2>
+          <ul class="kv" id="planQualitySummary"></ul>
+          <div id="planQualityTemplateBands"></div>
+        </article>
       </section>
 
       <section id="tab-logs" class="tab-panel">
@@ -511,6 +517,10 @@
             <label class="field">
               Max iterations override (0 = default)
               <input id="settingMaxIterations" type="number" min="0" step="1" />
+            </label>
+            <label class="field">
+              Plan quality threshold (0 = disabled)
+              <input id="settingPlanQualityThreshold" type="number" min="0" max="100" step="1" />
             </label>
             <label class="field">
               Risky large edit bytes
@@ -718,6 +728,50 @@
               <div id="cliExecPanel" class="stack"></div>
             </aside>
           </div>
+        </article>
+      </section>
+
+      <section id="tab-vision" class="tab-panel">
+        <article class="card">
+          <h2>Vision Stream</h2>
+          <p class="muted">
+            Local webcam frame analysis for motion + object signals. Frames are sampled and processed on this machine only.
+          </p>
+          <div class="row">
+            <button id="visionStartBtn" type="button">Start Camera</button>
+            <button id="visionStopBtn" type="button" class="ghost" disabled>Stop Camera</button>
+            <label class="field">
+              Sample interval (ms)
+              <select id="visionSampleInterval">
+                <option value="300">300</option>
+                <option value="500" selected>500</option>
+                <option value="750">750</option>
+                <option value="1000">1000</option>
+              </select>
+            </label>
+            <label class="field">
+              Detector model (optional)
+              <input id="visionDetectorModel" type="text" placeholder="models/yolo11n.pt" />
+            </label>
+          </div>
+          <div class="row">
+            <label class="check"><input id="visionMotionEnabled" type="checkbox" checked /> Motion detection</label>
+            <label class="check"><input id="visionObjectEnabled" type="checkbox" checked /> Object detection</label>
+            <label class="check"><input id="visionIncludeGoalContext" type="checkbox" checked /> Include in next goal run</label>
+          </div>
+          <div id="visionStatusText" class="muted">Vision is idle.</div>
+          <div class="vision-preview-grid">
+            <video id="visionVideo" class="vision-video" autoplay playsinline muted></video>
+            <canvas id="visionCanvas" class="vision-canvas" width="640" height="360" aria-hidden="true"></canvas>
+          </div>
+          <h3>Live Summary</h3>
+          <div id="visionSummary" class="muted">No vision events yet.</div>
+          <h3>Detections</h3>
+          <pre id="visionDetections" class="code">No detections yet.</pre>
+          <h3>Motion</h3>
+          <pre id="visionMotion" class="code">No motion events yet.</pre>
+          <h3>Planner Context Preview</h3>
+          <pre id="visionContextPreview" class="code">Vision planner context will appear here.</pre>
         </article>
       </section>
     </main>

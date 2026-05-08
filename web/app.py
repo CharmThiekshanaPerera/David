@@ -12,6 +12,7 @@ from flask import Flask, Response, jsonify, request, send_file, send_from_direct
 
 from agent.config import AgentConfig, load_config
 from web.control_center import DavidControlCenter, create_control_center
+from web.vision_service import VisionService, VisionServiceError
 from web.voice_service import (
     split_response_text,
     synthesize_text_chunk,
@@ -39,7 +40,9 @@ def create_app(
     if cfg is None:
         cfg = load_config()
     center = control_center or create_control_center(config=cfg, data_root=data_root)
+    vision = VisionService()
     app.config["DAVID_CENTER"] = center
+    app.config["DAVID_VISION"] = vision
     app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024
     state_change_hits: dict[str, float] = {}
 
@@ -71,6 +74,9 @@ def create_app(
                 "/api/demo/reset",
                 "/api/bundles/import",
                 "/api/uploads/analyze",
+                "/api/vision/start",
+                "/api/vision/stop",
+                "/api/vision/frame",
             }
             if request.path.startswith("/api/approval/") or request.path.startswith("/api/run/"):
                 protected.add(request.path)
@@ -81,6 +87,8 @@ def create_app(
             if request.path.startswith("/api/legacy_archive/"):
                 protected.add(request.path)
             if request.path.startswith("/api/uploads/"):
+                protected.add(request.path)
+            if request.path.startswith("/api/vision/"):
                 protected.add(request.path)
             if request.path in protected or request.path.startswith("/api/approval/") or request.path.startswith("/api/workspace/"):
                 token = request.headers.get("X-CSRF-Token", "").strip()
@@ -108,6 +116,20 @@ def create_app(
         if lowered in {"0", "false", "no", "off"}:
             return False
         return None
+
+    def _vision_context_bundle(*, max_events: int = 10) -> tuple[str, dict[str, Any]]:
+        snapshot = vision.context_snapshot(max_events=max_events)
+        summary = snapshot.get("summary", {}) if isinstance(snapshot.get("summary"), dict) else {}
+        planner_context = str(snapshot.get("planner_context", "")).strip()
+        meta = {
+            "session_id": str(snapshot.get("session_id", "")).strip(),
+            "active": bool(snapshot.get("active", False)),
+            "events_considered": int(summary.get("events_considered", 0) or 0),
+            "detector_source": str(summary.get("detector_source", "")).strip(),
+            "motion_event_rate": float(summary.get("motion_event_rate", 0.0) or 0.0),
+            "sustained_motion_recent": bool(summary.get("sustained_motion_recent", False)),
+        }
+        return planner_context, meta
 
     def _sse(event_name: str, payload: dict[str, Any]) -> str:
         return f"event: {event_name}\ndata: {json.dumps(payload)}\n\n"
@@ -144,12 +166,66 @@ def create_app(
         payload = request.get_json(silent=True) or {}
         if not isinstance(payload, dict):
             return _json_error("JSON body must be an object.")
+        include_vision_context = bool(_parse_optional_bool(payload.get("include_vision_context")) or False)
+        if include_vision_context:
+            planner_context, vision_meta = _vision_context_bundle(max_events=10)
+            payload = dict(payload)
+            if planner_context:
+                payload["vision_context"] = planner_context
+            payload["vision_context_meta"] = {
+                **vision_meta,
+                "requested": True,
+            }
         try:
             ok, data = center.start_run(payload)
         except ValueError as exc:
             return _json_error(str(exc), status=400)
         if not ok:
             return _json_error(str(data.get("error", "Failed to start run.")), status=409)
+        return jsonify({"ok": True, "data": data})
+
+    @app.post("/api/vision/start")
+    def api_vision_start():
+        payload = request.get_json(silent=True) or {}
+        if payload is None:
+            payload = {}
+        if not isinstance(payload, dict):
+            return _json_error("JSON body must be an object.")
+        data = vision.start_session(payload)
+        return jsonify({"ok": True, "data": data})
+
+    @app.post("/api/vision/stop")
+    def api_vision_stop():
+        payload = request.get_json(silent=True) or {}
+        if payload is None:
+            payload = {}
+        if not isinstance(payload, dict):
+            return _json_error("JSON body must be an object.")
+        data = vision.stop_session(payload)
+        return jsonify({"ok": True, "data": data})
+
+    @app.get("/api/vision/status")
+    def api_vision_status():
+        return jsonify({"ok": True, "data": vision.status()})
+
+    @app.get("/api/vision/context")
+    def api_vision_context():
+        try:
+            max_events = int(request.args.get("max_events", "20"))
+        except ValueError:
+            max_events = 20
+        max_events = max(1, min(max_events, 120))
+        return jsonify({"ok": True, "data": vision.context_snapshot(max_events=max_events)})
+
+    @app.post("/api/vision/frame")
+    def api_vision_frame():
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return _json_error("JSON body must be an object.")
+        try:
+            data = vision.process_frame(payload)
+        except VisionServiceError as exc:
+            return _json_error(str(exc), status=400)
         return jsonify({"ok": True, "data": data})
 
     @app.post("/api/ask")
@@ -176,15 +252,32 @@ def create_app(
         session_id = str(payload.get("session_id", "")).strip()
         confirm_save = bool(payload.get("confirm_save", False))
         parent_teaching_mode = bool(payload.get("parent_teaching_mode", False))
+        include_vision_context = bool(_parse_optional_bool(payload.get("include_vision_context")) or False)
+        vision_context = ""
+        vision_meta: dict[str, Any] = {}
+        if include_vision_context:
+            vision_context, vision_meta = _vision_context_bundle(max_events=10)
         try:
-            data = center.chat_message(
-                message,
-                intent=intent,
-                confirm_save=confirm_save,
-                parent_teaching_mode=parent_teaching_mode,
-                session_id=session_id,
-                actor=actor,
-            )
+            try:
+                data = center.chat_message(
+                    message,
+                    intent=intent,
+                    confirm_save=confirm_save,
+                    parent_teaching_mode=parent_teaching_mode,
+                    session_id=session_id,
+                    actor=actor,
+                    vision_context=vision_context,
+                    vision_context_meta={**vision_meta, "requested": include_vision_context},
+                )
+            except TypeError:
+                data = center.chat_message(
+                    message,
+                    intent=intent,
+                    confirm_save=confirm_save,
+                    parent_teaching_mode=parent_teaching_mode,
+                    session_id=session_id,
+                    actor=actor,
+                )
         except ValueError as exc:
             return _json_error(str(exc), status=400)
         return jsonify({"ok": True, "data": data})
@@ -288,6 +381,7 @@ def create_app(
         confirm_sensitive = bool(payload.get("confirm_sensitive", False))
         mute = bool(payload.get("mute", False))
         turn_id = str(payload.get("turn_id", "")).strip()
+        include_vision_context = bool(_parse_optional_bool(payload.get("include_vision_context")) or False)
         if not message:
             return _json_error("message cannot be empty.", status=400)
         if len(message) > MAX_VOICE_TEXT_CHARS:
@@ -310,6 +404,10 @@ def create_app(
         except (TypeError, ValueError):
             chunk_chars = voice_config.chunk_chars
         chunk_chars = max(80, min(400, chunk_chars))
+        vision_context = ""
+        vision_meta: dict[str, Any] = {}
+        if include_vision_context:
+            vision_context, vision_meta = _vision_context_bundle(max_events=10)
 
         def _selected_intent() -> str:
             normalized = intent if intent in {"ask", "teach", "goal", "chat"} else ""
@@ -335,6 +433,8 @@ def create_app(
                     parent_teaching_mode=parent_teaching_mode,
                     session_id=session_id,
                     actor=actor,
+                    vision_context=vision_context,
+                    vision_context_meta={**vision_meta, "requested": include_vision_context},
                     publish_events=False,
                 )
             except TypeError:
@@ -889,6 +989,14 @@ def create_app(
         except ValueError:
             limit = 100
         return jsonify({"ok": True, "data": center.telemetry_tail(limit=limit)})
+
+    @app.get("/api/telemetry/plan_quality")
+    def api_telemetry_plan_quality():
+        try:
+            limit = int(request.args.get("limit", "300"))
+        except ValueError:
+            limit = 300
+        return jsonify({"ok": True, "data": center.plan_quality_telemetry(limit_runs=limit)})
 
     @app.get("/api/growth_timeline")
     def api_growth_timeline():
