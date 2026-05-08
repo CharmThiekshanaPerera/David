@@ -7096,6 +7096,87 @@ function wireActions() {
     node?.addEventListener("change", () => refreshRunOptionSummary());
   });
 
+  const browserSearchInput = document.getElementById("browserSearchInput");
+  const browserSearchBtn = document.getElementById("browserSearchBtn");
+  const browserResultsStatus = document.getElementById("browserResultsStatus");
+  const browserResultsView = document.getElementById("browserResultsView");
+
+  if (browserSearchBtn) {
+    browserSearchBtn.addEventListener("click", async () => {
+      const query = (browserSearchInput?.value || "").trim();
+      if (!query) return;
+      browserResultsStatus.textContent = "Searching...";
+      browserResultsView.innerHTML = "";
+      try {
+        const res = await api("/api/browser/search", {
+          method: "POST",
+          body: JSON.stringify({ query: query, max_results: 10 })
+        });
+        const results = res.data || [];
+        if (results.length === 0) {
+          browserResultsStatus.textContent = "No results found.";
+        } else {
+          browserResultsStatus.textContent = `Found ${results.length} results.`;
+          browserResultsView.innerHTML = results.map(r => `
+            <div class="result-card card" style="margin-bottom: 1rem;">
+              <h3 style="margin: 0 0 0.5rem 0;"><a href="${escapeHtml(r.href || r.link || '#')}" target="_blank" rel="noopener noreferrer">${escapeHtml(r.title || 'No title')}</a></h3>
+              <p style="margin: 0; font-size: 0.9em;" class="muted">${escapeHtml(r.body || r.snippet || '')}</p>
+            </div>
+          `).join("");
+        }
+      } catch (err) {
+        browserResultsStatus.textContent = `Error: ${err.message}`;
+      }
+    });
+  }
+
+  if (browserSearchInput) {
+    browserSearchInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        browserSearchBtn?.click();
+      }
+    });
+  }
+
+  const browserDeepSearchBtn = document.getElementById("browserDeepSearchBtn");
+  if (browserDeepSearchBtn) {
+    browserDeepSearchBtn.addEventListener("click", async () => {
+      const query = (browserSearchInput?.value || "").trim();
+      if (!query) return;
+      
+      browserResultsStatus.textContent = "David is researching and reading pages (this may take a few moments)...";
+      browserResultsView.innerHTML = `<div class="progress-wrap"><div class="progress-bar" style="width: 100%; animation: indeterminate 2s infinite linear;"></div></div>`;
+      
+      try {
+        const res = await api("/api/browser/deep_search", {
+          method: "POST",
+          body: JSON.stringify({ query: query })
+        });
+        
+        const report = res?.data?.report || "No report generated.";
+        const sources = res?.data?.sources || [];
+        
+        browserResultsStatus.textContent = "Research complete.";
+        
+        let htmlContent = `<div class="result-card card markdown-body" style="padding: 1.5rem; white-space: pre-wrap; font-family: inherit;">${escapeHtml(report)}</div>`;
+        if (sources.length > 0) {
+          htmlContent += `<div class="result-card card" style="margin-top: 1rem;"><h4>Sources Consulted</h4><ul>`;
+          sources.forEach(src => {
+            htmlContent += `<li><a href="${escapeHtml(src)}" target="_blank" rel="noopener noreferrer">${escapeHtml(src)}</a></li>`;
+          });
+          htmlContent += `</ul></div>`;
+        }
+        
+        browserResultsView.innerHTML = htmlContent;
+        
+      } catch (err) {
+        browserResultsStatus.textContent = `Deep Search Error: ${err.message}`;
+        browserResultsView.innerHTML = "";
+      }
+    });
+  }
+
   window.addEventListener("beforeunload", () => {
     abortVoiceStream();
     abortVoiceTranscription();
