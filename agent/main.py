@@ -4,6 +4,8 @@ import argparse
 import json
 import sys
 
+import json as _json
+
 from agent.config import AgentConfig, load_config
 from agent.loop import DavidAgent
 from agent.llm import OllamaClient
@@ -39,6 +41,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--self-diagnostics",
         action="store_true",
         help="Run local safety/config diagnostics and exit",
+    )
+    parser.add_argument(
+        "--propose-improvement",
+        action="store_true",
+        help=(
+            "Analyze David's telemetry, generate a self-improvement proposal, "
+            "and stage it for Web UI review. Requires Ollama to be running."
+        ),
     )
     return parser
 
@@ -196,6 +206,95 @@ def run_chat(config: AgentConfig) -> int:
             print(f"David: goal failed: {exc}")
 
 
+def run_propose_improvement(config: AgentConfig) -> int:
+    """
+    Analyze telemetry, generate a self-improvement proposal via the local LLM,
+    validate it, and write it to data/self_improvements.json for Web UI review.
+    """
+    from agent.self_improvement.analyzer import PerformanceAnalyzer
+    from agent.self_improvement.proposer import ImprovementProposer
+    from agent.self_improvement.stager import ProposalStager, build_proposal_record
+    from agent.self_improvement.version_manager import VersionManager
+
+    print("=== David Self-Improvement Cycle ===")
+
+    # Step 1 — Analyze telemetry for weakness signals
+    print("Step 1/4  Analyzing telemetry and metrics...")
+    analyzer = PerformanceAnalyzer(config.logs_dir)
+    signals = analyzer.analyze()
+
+    if not signals:
+        print("No actionable weakness signals found in telemetry.")
+        print("Run more goals first so David has enough data to self-improve.")
+        return 0
+
+    top = signals[0]
+    print(f"          Top signal: [{top.signal_code}] severity={top.severity}/100")
+    print(f"          Module:     {top.module_path}")
+    print(f"          Evidence:   {top.evidence}")
+
+    # Step 2 — Generate improvement proposal with local LLM
+    print("Step 2/4  Generating improvement proposal (calling Ollama)...")
+    llm = OllamaClient(config)
+    proposer = ImprovementProposer(llm, config.project_root)
+    proposal = proposer.propose(top)
+
+    if proposal is None:
+        print("Could not generate a proposal.")
+        print("Possible reasons: target file is blocked, LLM returned no change, or Ollama is unreachable.")
+        return 1
+
+    print(f"          Reasoning:  {proposal.reasoning[:120]}...")
+
+    # Step 3 — Stage and validate
+    sandbox_root = (config.workspace_dir / "agent_sandbox").resolve()
+    sandbox_root.mkdir(parents=True, exist_ok=True)
+    print("Step 3/4  Validating (syntax check + test suite)...")
+    stager = ProposalStager(config.project_root, sandbox_root)
+    staging = stager.stage(proposal)
+
+    if not staging.success:
+        print(f"Staging failed: {staging.error}")
+        return 1
+
+    syntax_label = "✅ OK" if staging.syntax_ok else "❌ FAILED"
+    tests_label = "✅ passed" if staging.tests_passed else "⚠️  failed (review carefully)"
+    print(f"          Syntax:     {syntax_label}")
+    print(f"          Tests:      {tests_label}")
+
+    # Step 4 — Write proposal record to data/self_improvements.json
+    print("Step 4/4  Writing proposal for Web UI review...")
+    data_dir = (config.project_root / "data").resolve()
+    data_dir.mkdir(parents=True, exist_ok=True)
+    si_file = data_dir / "self_improvements.json"
+
+    try:
+        existing = _json.loads(si_file.read_text(encoding="utf-8")) if si_file.exists() else {}
+    except (_json.JSONDecodeError, OSError):
+        existing = {}
+    if not isinstance(existing, dict):
+        existing = {}
+    proposals = existing.get("proposals", [])
+    if not isinstance(proposals, list):
+        proposals = []
+
+    record = build_proposal_record(staging, proposal)
+    proposals.append(record)
+    si_file.write_text(_json.dumps({"proposals": proposals}, indent=2) + "\n", encoding="utf-8")
+
+    vm = VersionManager(config.project_root)
+    print()
+    print("=== Proposal Created ===")
+    print(f"  ID:          {staging.proposal_id}")
+    print(f"  Target:      {proposal.target_path}")
+    print(f"  Sandbox:     {staging.sandbox_dir}")
+    print(f"  Current ver: {vm.current_version()}")
+    print()
+    print("Open the Web UI → Dashboard → Proposed Improvements to review and approve.")
+    print("Approving will apply the change and bump the VERSION to the next patch release.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -208,6 +307,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.self_diagnostics:
         return run_diagnostics(config)
+
+    if args.propose_improvement:
+        try:
+            return run_propose_improvement(config)
+        except Exception as exc:
+            print(f"Self-improvement cycle failed: {exc}", file=sys.stderr)
+            return 1
 
     chosen_modes = sum(
         1

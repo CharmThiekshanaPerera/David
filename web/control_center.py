@@ -10445,6 +10445,25 @@ class DavidControlCenter:
                 raise ValueError(f"Unable to merge '{normalized}': {exc}") from exc
             merged_paths.append(normalized)
 
+        # Bump VERSION and append to SELF_IMPROVEMENT_LOG after all files are written
+        new_version = ""
+        try:
+            from agent.self_improvement.version_manager import VersionManager
+            vm = VersionManager(self.project_root)
+            new_version = vm.bump_patch()
+            metadata = proposal.get("metadata") or {}
+            vm.append_log(
+                version=new_version,
+                title=str(proposal.get("title", "Self-Improvement")).strip(),
+                target_file=", ".join(merged_paths),
+                reasoning=str(proposal.get("rationale", "")).strip()[:500],
+                actor=actor.strip() or "web_ui",
+                signal_code=str(metadata.get("signal_code", "")).strip(),
+                signal_severity=int(metadata.get("signal_severity", 0) or 0),
+            )
+        except Exception:  # pragma: no cover — version bump failure must not block merge
+            self._logger.exception("version bump failed after self-improvement merge")
+
         merged_at = self._now_iso()
         updated = dict(proposal)
         updated["status"] = "merged"
@@ -10454,6 +10473,7 @@ class DavidControlCenter:
             "actor": actor.strip() or "web_ui",
             "file_count": len(merged_paths),
             "paths": merged_paths,
+            "new_version": new_version,
         }
         return updated
 
