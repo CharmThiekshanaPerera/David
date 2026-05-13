@@ -145,7 +145,7 @@ class ImprovementProposer:
         if not isinstance(data, dict):
             return None
         reasoning = str(data.get("reasoning", "")).strip()
-        content = str(data.get("content", "")).strip()
-        if not content:
+        content = str(data.get("content", ""))
+        if not content.strip():
             return None
         return reasoning, content

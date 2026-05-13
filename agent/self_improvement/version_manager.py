@@ -26,7 +26,7 @@ class VersionManager:
         if not self._version_file.exists():
             return _DEFAULT_VERSION
         try:
-            raw = self._version_file.read_text(encoding="utf-8").strip()
+            raw = self._version_file.read_text(encoding="utf-8", errors="replace").strip()
             return raw if raw else _DEFAULT_VERSION
         except OSError:
             return _DEFAULT_VERSION
