@@ -240,6 +240,84 @@ def create_app(
         except ValueError as exc:
             return _json_error(str(exc), status=400)
         return jsonify({"ok": True, "data": data})
+    @app.post("/api/browser/search")
+    def api_browser_search():
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return _json_error("JSON body must be an object.")
+        query = str(payload.get("query", "")).strip()
+        if not query:
+            return _json_error("Query cannot be empty.", status=400)
+            
+        try:
+            from agent.web_search import search_internet
+            # We can use max_results from payload if provided
+            try:
+                max_results = int(payload.get("max_results", 10))
+            except ValueError:
+                max_results = 10
+            
+            results = search_internet(query, max_results=max_results)
+            return jsonify({"ok": True, "data": results})
+        except Exception as exc:
+            return _json_error(f"Search failed: {exc}", status=500)
+
+    @app.post("/api/browser/deep_search")
+    def api_browser_deep_search():
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return _json_error("JSON body must be an object.")
+        query = str(payload.get("query", "")).strip()
+        if not query:
+            return _json_error("Query cannot be empty.", status=400)
+            
+        try:
+            from agent.web_search import search_internet, fetch_page_content
+            from agent.llm import OllamaClient
+            from agent.prompts import DEEP_SEARCH_PROMPT
+            from agent.json_utils import parse_json_object
+            
+            # 1. Search internet
+            results = search_internet(query, max_results=3)
+            if not results:
+                return jsonify({"ok": True, "data": {"report": "No search results found.", "sources": []}})
+                
+            # 2. Fetch pages
+            fetched_data = []
+            for res in results:
+                url = res.get("href", "")
+                if url:
+                    content = fetch_page_content(url, timeout=8)
+                    if content:
+                        fetched_data.append({
+                            "url": url,
+                            "title": res.get("title", ""),
+                            "content": content[:15000] # Cap length to avoid massive context
+                        })
+            
+            if not fetched_data:
+                return jsonify({"ok": True, "data": {"report": "Could not fetch any page contents.", "sources": []}})
+            
+            # 3. Create prompt
+            user_prompt = json.dumps({
+                "query": query,
+                "pages": fetched_data
+            }, indent=2)
+            
+            # 4. Use LLM
+            llm = OllamaClient(center.config)
+            raw = llm.chat(DEEP_SEARCH_PROMPT, user_prompt)
+            
+            # 5. Parse and return
+            try:
+                parsed = parse_json_object(raw)
+                return jsonify({"ok": True, "data": parsed})
+            except Exception as e:
+                # If JSON parsing fails, just return the raw string inside report
+                return jsonify({"ok": True, "data": {"report": raw, "sources": []}})
+                
+        except Exception as exc:
+            return _json_error(f"Deep Search failed: {exc}", status=500)
 
     @app.post("/api/chat")
     def api_chat():
@@ -258,26 +336,16 @@ def create_app(
         if include_vision_context:
             vision_context, vision_meta = _vision_context_bundle(max_events=10)
         try:
-            try:
-                data = center.chat_message(
-                    message,
-                    intent=intent,
-                    confirm_save=confirm_save,
-                    parent_teaching_mode=parent_teaching_mode,
-                    session_id=session_id,
-                    actor=actor,
-                    vision_context=vision_context,
-                    vision_context_meta={**vision_meta, "requested": include_vision_context},
-                )
-            except TypeError:
-                data = center.chat_message(
-                    message,
-                    intent=intent,
-                    confirm_save=confirm_save,
-                    parent_teaching_mode=parent_teaching_mode,
-                    session_id=session_id,
-                    actor=actor,
-                )
+            data = center.chat_message(
+                message,
+                intent=intent,
+                confirm_save=confirm_save,
+                parent_teaching_mode=parent_teaching_mode,
+                session_id=session_id,
+                actor=actor,
+                vision_context=vision_context,
+                vision_context_meta={**vision_meta, "requested": include_vision_context},
+            )
         except ValueError as exc:
             return _json_error(str(exc), status=400)
         return jsonify({"ok": True, "data": data})
@@ -425,27 +493,17 @@ def create_app(
             return "chat"
 
         def _call_chat_message() -> dict[str, Any]:
-            try:
-                return center.chat_message(
-                    message,
-                    intent=selected_intent,
-                    confirm_save=confirm_save,
-                    parent_teaching_mode=parent_teaching_mode,
-                    session_id=session_id,
-                    actor=actor,
-                    vision_context=vision_context,
-                    vision_context_meta={**vision_meta, "requested": include_vision_context},
-                    publish_events=False,
-                )
-            except TypeError:
-                return center.chat_message(
-                    message,
-                    intent=selected_intent,
-                    confirm_save=confirm_save,
-                    parent_teaching_mode=parent_teaching_mode,
-                    session_id=session_id,
-                    actor=actor,
-                )
+            return center.chat_message(
+                message,
+                intent=selected_intent,
+                confirm_save=confirm_save,
+                parent_teaching_mode=parent_teaching_mode,
+                session_id=session_id,
+                actor=actor,
+                vision_context=vision_context,
+                vision_context_meta={**vision_meta, "requested": include_vision_context},
+                publish_events=False,
+            )
 
         selected_intent = _selected_intent()
 
@@ -1170,6 +1228,39 @@ def create_app(
         if not ok:
             return _json_error(str(data.get("error", "Approval update failed.")), status=409)
         return jsonify({"ok": True, "data": data})
+
+    @app.get("/api/approval/policy")
+    def api_approval_policy_get():
+        return jsonify({"ok": True, "data": center.get_approval_policy()})
+
+    @app.post("/api/approval/policy")
+    def api_approval_policy_set():
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return _json_error("JSON body must be an object.")
+        preset = str(payload.get("policy", "")).strip()
+        result = center.set_approval_policy(preset)
+        if not result.get("updated"):
+            return _json_error(str(result.get("error", "Unknown preset.")), status=400)
+        return jsonify({"ok": True, "data": result})
+
+    @app.get("/api/queue")
+    def api_queue_list():
+        return jsonify({"ok": True, "data": center.list_queue()})
+
+    @app.post("/api/queue/<run_id>/cancel")
+    def api_queue_cancel(run_id: str):
+        result = center.cancel_queued_run(run_id)
+        if not result.get("cancelled"):
+            return _json_error(str(result.get("error", "Cancel failed.")), status=409)
+        return jsonify({"ok": True, "data": result})
+
+    @app.get("/api/run/<run_id>/scorecard")
+    def api_run_scorecard(run_id: str):
+        scorecard = center.get_run_scorecard(run_id)
+        if scorecard is None:
+            return _json_error("Run not found.", status=404)
+        return jsonify({"ok": True, "data": scorecard})
 
     @app.get("/api/stream/status")
     def api_stream_status():

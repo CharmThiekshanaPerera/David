@@ -244,6 +244,8 @@ class ControlSettings:
     voice_tts_command: str = "piper"
     voice_tts_model_path: str = ""
     voice_chunk_chars: int = 180
+    approval_policy: str = "balanced"   # "strict" | "balanced" | "fast"
+    queue_max_size: int = 10            # max pending runs in queue (1–50)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ControlSettings":
@@ -383,7 +385,36 @@ class ControlSettings:
             voice_tts_command=_safe_command("voice_tts_command", "piper"),
             voice_tts_model_path=str(data.get("voice_tts_model_path", "")).strip(),
             voice_chunk_chars=_bounded("voice_chunk_chars", 180, 80, 400),
+            approval_policy=str(data.get("approval_policy", "balanced")).strip().lower()
+            if str(data.get("approval_policy", "balanced")).strip().lower() in APPROVAL_PRESETS
+            else "balanced",
+            queue_max_size=max(1, min(50, int(data.get("queue_max_size", 10)))),
         )
+
+
+APPROVAL_PRESETS: dict[str, dict[str, Any]] = {
+    "strict": {
+        "risky_large_edit_bytes": 10_000,
+        "risky_multi_file_threshold": 2,
+        "approval_timeout_sec": 3600,
+        "auto_approve_low_risk": False,
+        "require_typed_confirmation": True,
+    },
+    "balanced": {
+        "risky_large_edit_bytes": 50_000,
+        "risky_multi_file_threshold": 4,
+        "approval_timeout_sec": 1800,
+        "auto_approve_low_risk": False,
+        "require_typed_confirmation": True,
+    },
+    "fast": {
+        "risky_large_edit_bytes": 200_000,
+        "risky_multi_file_threshold": 10,
+        "approval_timeout_sec": 300,
+        "auto_approve_low_risk": True,
+        "require_typed_confirmation": False,
+    },
+}
 
 
 @dataclass
@@ -421,6 +452,7 @@ class DavidControlCenter:
         self._active_thread: threading.Thread | None = None
         self._active_run_id: str | None = None
         self._active_cancel: threading.Event | None = None
+        self._run_queue: list[dict[str, Any]] = []
         self._pending_approvals: dict[str, dict[str, Any]] = {}
         self._last_run_started_at: float = 0.0
         self._subscribers: dict[str, list[queue.Queue[dict[str, Any]]]] = {"status": [], "logs": []}
@@ -766,8 +798,7 @@ class DavidControlCenter:
         workspace_target_type = ""
 
         with self._lock:
-            if self._active_thread and self._active_thread.is_alive():
-                return False, {"error": "Another run is already active."}
+            is_busy = bool(self._active_thread and self._active_thread.is_alive())
 
             now = time.monotonic()
             if mode == "goal" and self.settings.rate_limit_seconds > 0:
@@ -868,23 +899,46 @@ class DavidControlCenter:
                 "vision_context": vision_context,
                 "vision_context_meta": vision_context_meta,
             }
-            cancel_event = threading.Event()
-            worker = threading.Thread(
-                target=self._execute_run,
-                args=(run_id, mode, content, preview, cancel_event, run_options),
-                daemon=True,
-                name=f"david-run-{run_id}",
-            )
+            priority_str = str(payload.get("priority", "normal")).strip().lower()
+            priority = {"high": 0, "normal": 1, "low": 2}.get(priority_str, 1)
 
-            self._active_thread = worker
-            self._active_run_id = run_id
-            self._active_cancel = cancel_event
-            self._last_run_started_at = now
-            worker.start()
+            if is_busy:
+                active_queue = [e for e in self._run_queue if not e.get("cancelled")]
+                if len(active_queue) >= max(1, self.settings.queue_max_size):
+                    return False, {
+                        "error": f"Run queue is full ({self.settings.queue_max_size} pending). Cancel a run or wait."
+                    }
+                self._run_queue.append({
+                    "run_id": run_id,
+                    "mode": mode,
+                    "content": content,
+                    "preview": preview,
+                    "run_options": run_options,
+                    "priority": priority,
+                    "queued_at": self._now_iso(),
+                    "cancelled": False,
+                })
+                queue_position = len([e for e in self._run_queue if not e.get("cancelled")])
+                self._update_run_meta(run_id, status="queued", queue_position=queue_position)
+            else:
+                cancel_event = threading.Event()
+                worker = threading.Thread(
+                    target=self._execute_run,
+                    args=(run_id, mode, content, preview, cancel_event, run_options),
+                    daemon=True,
+                    name=f"david-run-{run_id}",
+                )
+                self._active_thread = worker
+                self._active_run_id = run_id
+                self._active_cancel = cancel_event
+                self._last_run_started_at = now
+                worker.start()
+                queue_position = 0
 
         return True, {
             "run_id": run_id,
-            "status": "queued",
+            "status": "queued" if queue_position > 0 else "running",
+            "queue_position": queue_position,
             "planner_model_used": planner_model_used,
             "coder_model_used": coder_model_used,
             "critic_model_used": critic_model_used,
@@ -919,6 +973,63 @@ class DavidControlCenter:
 
         self._update_run_meta(run_id, status="stopping", message="Stop requested by user.", current_stage="executor")
         return {"stopped": True, "run_id": run_id}
+
+    def list_queue(self) -> list[dict[str, Any]]:
+        """Return current queue entries (non-cancelled), sorted by priority then queued_at."""
+        with self._lock:
+            entries = [e for e in self._run_queue if not e.get("cancelled")]
+        entries.sort(key=lambda e: (e["priority"], e["queued_at"]))
+        priority_names = {0: "high", 1: "normal", 2: "low"}
+        return [
+            {
+                "run_id": e["run_id"],
+                "mode": e["mode"],
+                "preview": e["preview"],
+                "priority": priority_names.get(e["priority"], "normal"),
+                "queued_at": e["queued_at"],
+                "position": idx + 1,
+            }
+            for idx, e in enumerate(entries)
+        ]
+
+    def cancel_queued_run(self, run_id: str) -> dict[str, Any]:
+        """Cancel a run that is waiting in the queue (not yet executing)."""
+        with self._lock:
+            if self._active_run_id == run_id:
+                return {"cancelled": False, "error": "Run is already executing. Use /api/stop to stop it."}
+            for entry in self._run_queue:
+                if entry["run_id"] == run_id and not entry.get("cancelled"):
+                    entry["cancelled"] = True
+                    self._logger.info("queue cancel run_id=%s", run_id)
+                    break
+            else:
+                return {"cancelled": False, "error": "Run not found in queue."}
+        self._update_run_meta(run_id, status="cancelled", message="Cancelled from queue.", ended_at=self._now_iso())
+        self.publish_event("status", {"type": "run_cancelled", "run_id": run_id})
+        return {"cancelled": True, "run_id": run_id}
+
+    def get_approval_policy(self) -> dict[str, Any]:
+        """Return the current approval policy preset name and its effective config."""
+        name = self.settings.approval_policy
+        cfg = dict(APPROVAL_PRESETS.get(name, APPROVAL_PRESETS["balanced"]))
+        return {"policy": name, "config": cfg, "available_presets": list(APPROVAL_PRESETS.keys())}
+
+    def set_approval_policy(self, preset: str) -> dict[str, Any]:
+        """Switch the active approval policy preset and persist to settings."""
+        preset = str(preset).strip().lower()
+        if preset not in APPROVAL_PRESETS:
+            return {"updated": False, "error": f"Unknown preset '{preset}'. Valid options: {list(APPROVAL_PRESETS.keys())}"}
+        current_data = {}
+        if self.settings_file.exists():
+            try:
+                current_data = json.loads(self.settings_file.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                current_data = {}
+        current_data["approval_policy"] = preset
+        self.settings_file.write_text(json.dumps(current_data, indent=2) + "\n", encoding="utf-8")
+        self.settings = self._load_settings()
+        self._logger.info("approval_policy changed to %s", preset)
+        return {"updated": True, "policy": preset, "config": dict(APPROVAL_PRESETS[preset])}
 
     def classify_chat_intent(self, message: str) -> dict[str, Any]:
         text = self._sanitize_user_text(message, field_name="message")
@@ -6983,6 +7094,11 @@ class DavidControlCenter:
                 except Exception:  # pragma: no cover - defensive boundary
                     self._logger.exception("project brain update failed run_id=%s", run_id)
                 try:
+                    scorecard = self._compute_health_scorecard(run_id)
+                    self._write_json(self._run_dir(run_id) / "health_scorecard.json", scorecard)
+                except Exception:  # pragma: no cover - defensive boundary
+                    self._logger.exception("health scorecard failed run_id=%s", run_id)
+                try:
                     self.autonomous_self_improvement_cycle(
                         trigger="goal",
                         trigger_id=run_id,
@@ -6995,6 +7111,40 @@ class DavidControlCenter:
                     self._active_run_id = None
                     self._active_cancel = None
                     self._active_thread = None
+            self._dequeue_next()
+
+    def _dequeue_next(self) -> None:
+        """Start the next non-cancelled queued run if no run is active."""
+        with self._lock:
+            if self._active_thread and self._active_thread.is_alive():
+                return
+            while self._run_queue:
+                self._run_queue.sort(key=lambda e: (e["priority"], e["queued_at"]))
+                entry = self._run_queue.pop(0)
+                if entry.get("cancelled"):
+                    continue
+                run_id = entry["run_id"]
+                cancel_event = threading.Event()
+                worker = threading.Thread(
+                    target=self._execute_run,
+                    args=(
+                        run_id,
+                        entry["mode"],
+                        entry["content"],
+                        entry["preview"],
+                        cancel_event,
+                        entry["run_options"],
+                    ),
+                    daemon=True,
+                    name=f"david-run-{run_id}",
+                )
+                self._active_thread = worker
+                self._active_run_id = run_id
+                self._active_cancel = cancel_event
+                self._last_run_started_at = time.monotonic()
+                self._update_run_meta(run_id, status="running", queue_position=0)
+                worker.start()
+                return
 
     def _execute_ask(self, run_id: str, question: str) -> None:
         self._update_run_meta(run_id, current_stage="memory")
@@ -7122,6 +7272,8 @@ class DavidControlCenter:
             max_output_chars=self.config.max_command_output_chars,
         )
         memory = LongTermMemory(self.config.memory_file)
+        run_started_at = self._now_iso()
+        memory.clear_session_hints()
         workspace = WorkspaceInspector(project_path)
         telemetry = TelemetryLogger(self.config.logs_dir)
         project_meta = {
@@ -7154,7 +7306,17 @@ class DavidControlCenter:
             vision_context_meta=vision_context_meta,
         )
         initial_snapshot = workspace.snapshot()
-        base_memory_context = memory.render_context(effective_goal)
+        base_memory_context, memory_meta = memory.render_context_and_meta(effective_goal)
+        telemetry.event(
+            "memory_context_injected",
+            {
+                "run_id": run_id,
+                "goal": effective_goal,
+                "lessons_count": len(memory_meta),
+                "lessons_used": memory_meta,
+                **project_meta,
+            },
+        )
         log_context = self._build_goal_log_context()
         reflection_context = self._build_reflection_context_for_goal(effective_goal)
         values_context = self._build_values_context_for_goal(effective_goal)
@@ -7457,7 +7619,19 @@ class DavidControlCenter:
             )
 
             workspace_snapshot = workspace.snapshot()
-            base_memory_context = memory.render_context(effective_goal)
+            base_memory_context, memory_meta = memory.render_context_and_meta(effective_goal)
+            if memory_meta:
+                telemetry.event(
+                    "memory_context_injected",
+                    {
+                        "run_id": run_id,
+                        "goal": effective_goal,
+                        "iteration": iteration,
+                        "lessons_count": len(memory_meta),
+                        "lessons_used": memory_meta,
+                        **project_meta,
+                    },
+                )
             log_context = self._build_goal_log_context()
             reflection_context = self._build_reflection_context_for_goal(effective_goal)
             values_context = self._build_values_context_for_goal(effective_goal)
@@ -7487,6 +7661,17 @@ class DavidControlCenter:
 
             iter_dir = self._run_dir(run_id) / "iterations" / f"{iteration:03d}"
             iter_dir.mkdir(parents=True, exist_ok=True)
+            self._write_json(
+                iter_dir / "snapshot_pre.json",
+                {
+                    "iteration": iteration,
+                    "timestamp": self._now_iso(),
+                    "workspace_snapshot_chars": len(workspace_snapshot),
+                    "tdd_phase": tdd_phase,
+                    "tdd_red_phase_complete": tdd_red_phase_complete,
+                    "memory_lessons_count": len(memory_meta),
+                },
+            )
             self._write_json(iter_dir / "coder.json", coder_output.to_dict())
             self._append_timeline(
                 run_id,
@@ -7548,15 +7733,10 @@ class DavidControlCenter:
                             },
                         )
                         self._record_iteration_metric(telemetry, iteration, "retry", 0, 0, started)
-                        memory.append_lessons(
-                            goal=effective_goal,
-                            lessons=[
-                                LessonProposal(
-                                    lesson="In TDD mode, write tests under tests/ before implementation edits.",
-                                    tags=["tdd", "testing", "discipline"],
-                                )
-                            ],
-                            context=reason,
+                        memory.append_session_hint(
+                            effective_goal,
+                            "TDD: write tests under tests/ before any implementation edits.",
+                            tags=["tdd", "testing"],
                         )
                         critic_feedback = reason
                         continue
@@ -7574,15 +7754,10 @@ class DavidControlCenter:
                     {"iteration": iteration, "error": str(exc), **project_meta},
                 )
                 self._record_iteration_metric(telemetry, iteration, "retry", 0, 0, started)
-                memory.append_lessons(
-                    goal=effective_goal,
-                    lessons=[
-                        LessonProposal(
-                            lesson="Safety validation must pass before any file write.",
-                            tags=["safety", "files"],
-                        )
-                    ],
-                    context=reason,
+                memory.append_session_hint(
+                    effective_goal,
+                    f"Safety rejected edits: {str(exc)[:120]}",
+                    tags=["safety", "files"],
                 )
                 critic_feedback = reason
                 continue
@@ -7731,15 +7906,10 @@ class DavidControlCenter:
                     {"iteration": iteration, "error": str(exc), **project_meta},
                 )
                 self._record_iteration_metric(telemetry, iteration, "retry", 0, 0, started)
-                memory.append_lessons(
-                    goal=effective_goal,
-                    lessons=[
-                        LessonProposal(
-                            lesson="Command execution must stay inside the allow-list.",
-                            tags=["safety", "execution"],
-                        )
-                    ],
-                    context=reason,
+                memory.append_session_hint(
+                    effective_goal,
+                    f"Safety rejected commands: {str(exc)[:120]}",
+                    tags=["safety", "execution"],
                 )
                 critic_feedback = reason
                 continue
@@ -7756,15 +7926,10 @@ class DavidControlCenter:
                     {"iteration": iteration, "error": reason, **project_meta},
                 )
                 self._record_iteration_metric(telemetry, iteration, "retry", 0, 0, started)
-                memory.append_lessons(
-                    goal=effective_goal,
-                    lessons=[
-                        LessonProposal(
-                            lesson="Every iteration must include at least one validation command.",
-                            tags=["testing", "discipline"],
-                        )
-                    ],
-                    context=reason,
+                memory.append_session_hint(
+                    effective_goal,
+                    "No validation commands proposed — include at least one pytest command.",
+                    tags=["testing", "discipline"],
                 )
                 critic_feedback = reason
                 continue
@@ -7773,6 +7938,17 @@ class DavidControlCenter:
             self._update_run_meta(run_id, last_command=command_values[-1], iteration=iteration, current_stage="executor")
             execution_results = executor.run(command_specs)
             self._write_json(iter_dir / "execution.json", [item.to_dict() for item in execution_results])
+            self._write_json(
+                iter_dir / "snapshot_post.json",
+                {
+                    "iteration": iteration,
+                    "timestamp": self._now_iso(),
+                    "commands_run": len(execution_results),
+                    "all_passed": all(r.returncode == 0 and not r.timed_out for r in execution_results) if execution_results else None,
+                    "failed_count": sum(1 for r in execution_results if r.returncode != 0 and not r.timed_out),
+                    "timed_out_count": sum(1 for r in execution_results if r.timed_out),
+                },
+            )
             self.publish_event(
                 f"run:{run_id}",
                 {
@@ -7813,15 +7989,10 @@ class DavidControlCenter:
                     self._count_passed_commands(execution_results),
                     started,
                 )
-                memory.append_lessons(
-                    goal=effective_goal,
-                    lessons=[
-                        LessonProposal(
-                            lesson="TDD loops must run pytest to observe red/green feedback each iteration.",
-                            tags=["tdd", "testing"],
-                        )
-                    ],
-                    context=reason,
+                memory.append_session_hint(
+                    effective_goal,
+                    "TDD: every iteration must run pytest to observe red/green feedback.",
+                    tags=["tdd", "testing"],
                 )
                 critic_feedback = reason
                 continue
@@ -7949,6 +8120,7 @@ class DavidControlCenter:
                         **project_meta,
                     },
                 )
+                memory.reinforce_lessons(effective_goal, "success", since_iso=run_started_at)
                 self._finalize_success(
                     run_id,
                     critic_output.analysis,
@@ -7997,6 +8169,7 @@ class DavidControlCenter:
                         **project_meta,
                     },
                 )
+                memory.reinforce_lessons(effective_goal, "failure", since_iso=run_started_at)
                 self._finalize_failure(
                     run_id,
                     critic_output.analysis,
@@ -8037,6 +8210,7 @@ class DavidControlCenter:
                 **project_meta,
             },
         )
+        memory.reinforce_lessons(effective_goal, "failure", since_iso=run_started_at)
         self._finalize_failure(
             run_id,
             "Iteration limit reached before meeting success criteria.",
@@ -8088,18 +8262,25 @@ class DavidControlCenter:
                 )
         return conflicts
 
+    def _effective_approval_config(self) -> dict[str, Any]:
+        """Return approval config for the current policy preset."""
+        return dict(APPROVAL_PRESETS.get(self.settings.approval_policy, APPROVAL_PRESETS["balanced"]))
+
     def _detect_risky_edit_reasons(self, edits: list[ValidatedEdit]) -> list[str]:
+        cfg = self._effective_approval_config()
+        large_bytes = cfg.get("risky_large_edit_bytes", self.settings.risky_large_edit_bytes)
+        multi_threshold = cfg.get("risky_multi_file_threshold", self.settings.risky_multi_file_threshold)
         reasons: list[str] = []
         total_bytes = sum(len(item.content.encode("utf-8")) for item in edits)
 
-        if total_bytes >= self.settings.risky_large_edit_bytes:
+        if total_bytes >= large_bytes:
             reasons.append(
-                f"Large edit set: {total_bytes} bytes exceeds threshold {self.settings.risky_large_edit_bytes}."
+                f"Large edit set: {total_bytes} bytes exceeds threshold {large_bytes}."
             )
 
-        if len(edits) >= self.settings.risky_multi_file_threshold:
+        if len(edits) >= multi_threshold:
             reasons.append(
-                f"Multi-file rewrite: {len(edits)} files meets threshold {self.settings.risky_multi_file_threshold}."
+                f"Multi-file rewrite: {len(edits)} files meets threshold {multi_threshold}."
             )
 
         for edit in edits:
@@ -8159,6 +8340,7 @@ class DavidControlCenter:
         reasons: list[str],
         payload: dict[str, Any],
     ) -> str:
+        cfg = self._effective_approval_config()
         approval_id = f"{run_id}-{iteration}-{uuid.uuid4().hex[:6]}"
         diff_count = 0
         file_count = 0
@@ -8171,7 +8353,9 @@ class DavidControlCenter:
                     if isinstance(item, dict) and str(item.get("path", "")).strip()
                 }
             )
-        high_risk = approval_type == "risky_edit"
+        auto_approve = cfg.get("auto_approve_low_risk", False) and approval_type != "risky_edit"
+        initial_status = "approved" if auto_approve else "pending"
+        initial_decision = "approve" if auto_approve else None
         record = {
             "id": approval_id,
             "run_id": run_id,
@@ -8181,10 +8365,11 @@ class DavidControlCenter:
             "payload": payload,
             "diff_count": diff_count,
             "file_count": file_count,
-            "requires_typed_confirmation": high_risk,
-            "status": "pending",
-            "decision": None,
-            "decision_note": "",
+            "requires_typed_confirmation": cfg.get("require_typed_confirmation", True),
+            "approval_policy": self.settings.approval_policy,
+            "status": initial_status,
+            "decision": initial_decision,
+            "decision_note": f"Auto-approved by {self.settings.approval_policy} policy" if auto_approve else "",
             "created_at": self._now_iso(),
         }
         with self._lock:
@@ -8193,15 +8378,18 @@ class DavidControlCenter:
         self._append_audit(
             run_id=run_id,
             action="approval_requested",
-            payload={"approval_id": approval_id, "type": approval_type, "reasons": reasons, "file_count": file_count},
+            payload={"approval_id": approval_id, "type": approval_type, "reasons": reasons, "file_count": file_count, "auto_approved": auto_approve},
         )
-        self.publish_event("status", {"type": "approval_needed", "run_id": run_id, "approval": record})
-        self.publish_event(f"run:{run_id}", {"type": "approval_needed", "run_id": run_id, "approval": record})
+        if not auto_approve:
+            self.publish_event("status", {"type": "approval_needed", "run_id": run_id, "approval": record})
+            self.publish_event(f"run:{run_id}", {"type": "approval_needed", "run_id": run_id, "approval": record})
         return approval_id
 
-    def _wait_for_approval(self, approval_id: str, timeout_sec: int = 1800) -> str:
+    def _wait_for_approval(self, approval_id: str, timeout_sec: int | None = None) -> str:
+        cfg = self._effective_approval_config()
+        effective_timeout = timeout_sec if timeout_sec is not None else cfg.get("approval_timeout_sec", 1800)
         started = time.monotonic()
-        while time.monotonic() - started < timeout_sec:
+        while time.monotonic() - started < effective_timeout:
             with self._lock:
                 approval = self._pending_approvals.get(approval_id)
                 if not approval:
@@ -8218,6 +8406,83 @@ class DavidControlCenter:
                 approval["decision_note"] = "Approval timed out"
                 approval["decided_at"] = self._now_iso()
         return "reject"
+
+    def _compute_health_scorecard(self, run_id: str) -> dict[str, Any]:
+        run_dir = self._run_dir(run_id)
+        meta = self._read_json(run_dir / "meta.json", default={})
+        iterations_dir = run_dir / "iterations"
+        per_iteration: list[dict[str, Any]] = []
+        total_commands = 0
+        total_failed = 0
+        total_timed_out = 0
+
+        if iterations_dir.exists():
+            for iter_dir in sorted(iterations_dir.iterdir()):
+                if not iter_dir.is_dir():
+                    continue
+                post = self._read_json(iter_dir / "snapshot_post.json", default={})
+                if post:
+                    cmds = int(post.get("commands_run", 0))
+                    failed = int(post.get("failed_count", 0))
+                    timed = int(post.get("timed_out_count", 0))
+                    per_iteration.append({
+                        "iteration": post.get("iteration"),
+                        "all_passed": post.get("all_passed"),
+                        "commands_run": cmds,
+                        "failed_count": failed,
+                        "timed_out_count": timed,
+                    })
+                    total_commands += cmds
+                    total_failed += failed
+                    total_timed_out += timed
+
+        timeline = self._read_jsonl(run_dir / "timeline.jsonl", limit=5000)
+        approvals_requested = sum(1 for e in timeline if e.get("event_type") == "approval_requested")
+
+        started_at = str(meta.get("started_at", ""))
+        ended_at = str(meta.get("ended_at", ""))
+        duration_sec: float | None = None
+        if started_at and ended_at:
+            try:
+                t_start = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+                t_end = datetime.fromisoformat(ended_at.replace("Z", "+00:00"))
+                duration_sec = round((t_end - t_start).total_seconds(), 2)
+            except (ValueError, TypeError):
+                pass
+
+        total_iters = len(per_iteration)
+        passed_iters = sum(1 for p in per_iteration if p.get("all_passed") is True)
+        iteration_pass_rate = round(passed_iters / total_iters, 3) if total_iters > 0 else None
+
+        return {
+            "run_id": run_id,
+            "status": str(meta.get("status", "unknown")),
+            "iterations_used": int(meta.get("iteration", 0)),
+            "iterations_until_green": meta.get("iterations_until_green"),
+            "tests_ran": bool(meta.get("tests_ran", False)),
+            "tests_passed": meta.get("tests_passed"),
+            "duration_sec": duration_sec,
+            "approvals_requested": approvals_requested,
+            "total_commands_run": total_commands,
+            "total_commands_failed": total_failed,
+            "total_timed_out": total_timed_out,
+            "iteration_pass_rate": iteration_pass_rate,
+            "per_iteration": per_iteration,
+            "computed_at": self._now_iso(),
+        }
+
+    def get_run_scorecard(self, run_id: str) -> dict[str, Any] | None:
+        """Return the health scorecard for a completed run, or None if run not found."""
+        run_id = str(run_id).strip()
+        if not RUN_ID_PATTERN.match(run_id):
+            return None
+        run_dir = self._run_dir(run_id)
+        if not run_dir.exists():
+            return None
+        cached = self._read_json(run_dir / "health_scorecard.json", default=None)
+        if cached:
+            return cached
+        return self._compute_health_scorecard(run_id)
 
     def _finalize_success(
         self,

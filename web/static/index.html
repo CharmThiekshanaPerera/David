@@ -60,6 +60,7 @@
       <button data-tab="dashboard" class="active">Dashboard</button>
       <button data-tab="cli">Memory & Chat</button>
       <button data-tab="vision">Vision Stream</button>
+      <button data-tab="browser">Internet Browser</button>
       <button data-tab="runs">Runs</button>
       <button data-tab="approvals">Approvals</button>
       <button data-tab="diff">Diff Viewer</button>
@@ -200,6 +201,20 @@
           </p>
           <ul class="kv" id="selfImproveSummary"></ul>
           <div id="selfImprovePanel" class="stack"></div>
+        </article>
+      </section>
+
+      <section id="tab-browser" class="tab-panel">
+        <article class="card">
+          <h2>Internet Browser</h2>
+          <p class="muted">Search the web directly from David's Control Center.</p>
+          <div class="row">
+            <input id="browserSearchInput" type="text" placeholder="Type your search query..." />
+            <button id="browserSearchBtn">Search</button>
+            <button id="browserDeepSearchBtn" class="ghost">Deep Search (David)</button>
+          </div>
+          <div id="browserResultsStatus" class="muted" style="margin-top: 1rem;"></div>
+          <div id="browserResultsView" class="stack" style="margin-top: 1rem;"></div>
         </article>
       </section>
 
