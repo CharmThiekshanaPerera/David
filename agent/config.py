@@ -36,6 +36,7 @@ class AgentConfig:
     temperature: float
     allowed_commands: tuple[str, ...]
     plan_quality_threshold: int = 0
+    git_auto_commit: bool = False
 
 
 def sanitize_model_name(value: str, field_name: str) -> str:
@@ -162,4 +163,5 @@ def load_config() -> AgentConfig:
         temperature=_parse_float("DAVID_TEMPERATURE", default=0.2, minimum=0.0, maximum=1.0),
         allowed_commands=_parse_allowed_commands(),
         plan_quality_threshold=_parse_int("DAVID_PLAN_QUALITY_THRESHOLD", default=0, minimum=0, maximum=100),
+        git_auto_commit=_parse_bool("DAVID_GIT_AUTO_COMMIT", default=False),
     )
