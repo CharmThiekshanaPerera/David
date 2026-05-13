@@ -48,10 +48,17 @@ class SafetyGuard:
         return self._workspace_dir
 
     def validate_edits(self, edits: list[CodeEdit]) -> list[ValidatedEdit]:
+        # Deduplicate by path: keep the last edit per path so the model's
+        # "create empty then fill" two-step pattern resolves to the filled version.
+        seen: dict[str, CodeEdit] = {}
+        for edit in edits:
+            seen[edit.path] = edit
+        deduped = [seen[e.path] for e in edits if e.path in seen and seen[e.path] is e]
+
         validated: list[ValidatedEdit] = []
         total_bytes = 0
 
-        for edit in edits:
+        for edit in deduped:
             relative = self._normalize_relative_path(edit.path)
             absolute = (self._workspace_dir / relative).resolve()
             self._assert_inside_workspace(absolute)

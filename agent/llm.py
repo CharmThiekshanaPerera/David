@@ -34,7 +34,7 @@ class OllamaClient:
             response = requests.post(
                 self.config.ollama_url,
                 json=payload,
-                timeout=(10, 120),
+                timeout=(10, 300),
             )
         except requests.RequestException as exc:
             raise LLMError(

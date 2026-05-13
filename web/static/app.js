@@ -262,6 +262,8 @@ const el = {
   settingParentTeachingMode: document.getElementById("settingParentTeachingMode"),
   settingAutonomousSelfImproveMode: document.getElementById("settingAutonomousSelfImproveMode"),
   settingDemoMode: document.getElementById("settingDemoMode"),
+  quickActionsDemoWarning: document.getElementById("quickActionsDemoWarning"),
+  disableDemoBtn: document.getElementById("disableDemoBtn"),
   settingUploadVisionMode: document.getElementById("settingUploadVisionMode"),
   settingUploadVisionModel: document.getElementById("settingUploadVisionModel"),
   settingVoiceModeEnabled: document.getElementById("settingVoiceModeEnabled"),
@@ -1748,6 +1750,7 @@ function renderDemoBadge() {
     const label = String(state.settings?.demo_badge_text || state.demoBadgeText || "DEMO").trim() || "DEMO";
     el.demoBadge.textContent = label;
   }
+  el.quickActionsDemoWarning?.classList.toggle("hidden", !enabled);
 }
 
 function renderVersionStamp() {
@@ -2004,6 +2007,7 @@ function renderRuns() {
   }
 
   const hasActive = !!state.status?.active_run_id;
+  const selectedId = state.selectedRunId;
   el.runTableWrap.innerHTML = `
     <table class="table">
       <thead>
@@ -2019,10 +2023,10 @@ function renderRuns() {
       <tbody>
       ${rows
         .map(
-          (row) => `<tr>
+          (row) => `<tr${row.id === selectedId ? ' class="run-row-selected"' : ""}>
             <td><code>${escapeHtml(row.id)}</code></td>
             <td>${escapeHtml(row.mode)}</td>
-            <td>${escapeHtml(row.status)}</td>
+            <td><span class="run-status-badge run-status-${escapeHtml(row.status)}">${escapeHtml(row.status)}</span></td>
             <td>${escapeHtml(fmtDate(row.started_at))}</td>
             <td>${escapeHtml(row.regression_warning || row.message || "-")}</td>
             <td>
@@ -6351,6 +6355,10 @@ function wireActions() {
     });
   });
 
+  el.goalInput?.addEventListener("keydown", (evt) => {
+    if (evt.key === "Enter" && !el.startGoalBtn?.disabled) el.startGoalBtn?.click();
+  });
+
   el.startGoalBtn.addEventListener("click", async () => {
     const goal = el.goalInput.value.trim();
     if (!goal) return setMessage("Enter a goal first.");
@@ -6359,11 +6367,14 @@ function wireActions() {
       return setMessage("Select a workspace folder or file for targeted goal mode.");
     }
     const workspaceTargetPath = state.goalRunScope === "target" ? selectedTarget : "";
+    const originalText = el.startGoalBtn.textContent;
+    el.startGoalBtn.disabled = true;
+    el.startGoalBtn.textContent = "Starting…";
     try {
       const payload = {
         mode: "goal",
         payload: goal,
-        preview: el.previewMode.checked,
+        preview: el.previewMode?.checked || false,
         workspace_target_path: workspaceTargetPath,
         tdd_mode: !!el.goalTddMode?.checked,
         planner_model: el.settingPlannerModel?.value || "",
@@ -6379,20 +6390,35 @@ function wireActions() {
       localStorage.setItem("dcc_selected_run", result.run_id);
       setupRunStream(result.run_id);
       showToast(`Run started: ${result.run_id}`);
+      setMessage(`Run started (${result.run_id}). Viewing live progress in Runs tab.`);
+      el.goalInput.value = "";
       await refreshRuns();
       await refreshStatus();
+      activateTab("runs");
     } catch (err) {
       setMessage(err.message);
+      showToast(`Start failed: ${err.message}`);
+    } finally {
+      el.startGoalBtn.textContent = originalText;
+      updateButtonState();
     }
   });
 
   el.stopRunBtn.addEventListener("click", async () => {
+    const originalText = el.stopRunBtn.textContent;
+    el.stopRunBtn.disabled = true;
+    el.stopRunBtn.textContent = "Stopping…";
     try {
       const result = await api("/api/stop", { method: "POST", body: "{}" });
       showToast(result.run_id ? `Stop requested: ${result.run_id}` : "No active run");
+      setMessage(result.run_id ? `Stop requested for ${result.run_id}.` : "No active run to stop.");
       await refreshStatus();
     } catch (err) {
       setMessage(err.message);
+      showToast(`Stop failed: ${err.message}`);
+    } finally {
+      el.stopRunBtn.textContent = originalText;
+      updateButtonState();
     }
   });
 
@@ -6466,6 +6492,27 @@ function wireActions() {
   el.selfImproveRefreshBtn?.addEventListener("click", () => refreshSelfImprovements().catch((e) => setMessage(e.message)));
   el.logsSearch.addEventListener("input", () => renderLogs(state.logs || {}));
   el.logsLevelFilter.addEventListener("change", () => renderLogs(state.logs || {}));
+
+  el.disableDemoBtn?.addEventListener("click", async () => {
+    el.disableDemoBtn.disabled = true;
+    el.disableDemoBtn.textContent = "Disabling…";
+    try {
+      await api("/api/settings", {
+        method: "POST",
+        body: JSON.stringify({ demo_mode: false }),
+      });
+      showToast("Demo mode disabled. You can now start runs.");
+      await refreshSettings();
+      await refreshStatus();
+    } catch (err) {
+      showToast(`Could not disable demo mode: ${err.message}`);
+    } finally {
+      if (el.disableDemoBtn) {
+        el.disableDemoBtn.disabled = false;
+        el.disableDemoBtn.textContent = "Disable Demo Mode";
+      }
+    }
+  });
 
   el.loadDemoDataBtn?.addEventListener("click", async () => {
     try {
@@ -7144,21 +7191,21 @@ function wireActions() {
     browserDeepSearchBtn.addEventListener("click", async () => {
       const query = (browserSearchInput?.value || "").trim();
       if (!query) return;
-      
+
       browserResultsStatus.textContent = "David is researching and reading pages (this may take a few moments)...";
       browserResultsView.innerHTML = `<div class="progress-wrap"><div class="progress-bar" style="width: 100%; animation: indeterminate 2s infinite linear;"></div></div>`;
-      
+
       try {
         const res = await api("/api/browser/deep_search", {
           method: "POST",
           body: JSON.stringify({ query: query })
         });
-        
+
         const report = res?.data?.report || "No report generated.";
         const sources = res?.data?.sources || [];
-        
+
         browserResultsStatus.textContent = "Research complete.";
-        
+
         let htmlContent = `<div class="result-card card markdown-body" style="padding: 1.5rem; white-space: pre-wrap; font-family: inherit;">${escapeHtml(report)}</div>`;
         if (sources.length > 0) {
           htmlContent += `<div class="result-card card" style="margin-top: 1rem;"><h4>Sources Consulted</h4><ul>`;
@@ -7167,15 +7214,145 @@ function wireActions() {
           });
           htmlContent += `</ul></div>`;
         }
-        
+
         browserResultsView.innerHTML = htmlContent;
-        
+        // Refresh audit log after deep search
+        refreshBrowserAudit();
       } catch (err) {
         browserResultsStatus.textContent = `Deep Search Error: ${err.message}`;
         browserResultsView.innerHTML = "";
       }
     });
   }
+
+  // Audit log
+  const browserAuditRefreshBtn = document.getElementById("browserAuditRefreshBtn");
+  const browserAuditStatus = document.getElementById("browserAuditStatus");
+  const browserAuditView = document.getElementById("browserAuditView");
+
+  async function refreshBrowserAudit() {
+    if (!browserAuditView) return;
+    try {
+      const res = await api("/api/browser/audit?limit=50");
+      const entries = res?.data || [];
+      browserAuditStatus.textContent = `${entries.length} recent entries`;
+      if (entries.length === 0) {
+        browserAuditView.innerHTML = `<p class="muted">No audit entries yet.</p>`;
+        return;
+      }
+      browserAuditView.innerHTML = entries.map(e => {
+        const action = escapeHtml(e.action || "");
+        const url = escapeHtml(e.url || e.query || "");
+        const ts = escapeHtml((e.timestamp || "").replace("T", " ").slice(0, 19));
+        const status = escapeHtml(e.status || "");
+        const chars = e.char_count != null ? ` · ${e.char_count} chars` : "";
+        const hostname = (() => { try { return new URL(e.url || "").hostname; } catch(_) { return ""; } })();
+        const blockBtn = (hostname && action === "read_page")
+          ? `<button class="ghost" style="font-size:0.75rem;padding:0.2rem 0.5rem;" data-block-domain="${escapeHtml(hostname)}" type="button">Block</button>`
+          : "";
+        return `<div class="card" style="padding:0.6rem 1rem;display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap;">
+          <span class="status-pill" style="font-size:0.7rem;">${action}</span>
+          <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${url}">${url}</span>
+          <span class="muted" style="font-size:0.75rem;white-space:nowrap;">${status}${chars}</span>
+          <span class="muted" style="font-size:0.75rem;white-space:nowrap;">${ts}</span>
+          ${blockBtn}
+        </div>`;
+      }).join("");
+      // Wire block buttons
+      browserAuditView.querySelectorAll("[data-block-domain]").forEach(btn => {
+        btn.addEventListener("click", async () => {
+          const domain = btn.getAttribute("data-block-domain");
+          if (!domain) return;
+          try {
+            await api("/api/browser/policy/block", { method: "POST", body: JSON.stringify({ domain }) });
+            showToast(`Blocked: ${domain}`);
+            refreshBrowserPolicy();
+            refreshBrowserAudit();
+          } catch (err) {
+            showToast(`Block failed: ${err.message}`);
+          }
+        });
+      });
+    } catch (err) {
+      if (browserAuditStatus) browserAuditStatus.textContent = `Error: ${err.message}`;
+    }
+  }
+
+  if (browserAuditRefreshBtn) {
+    browserAuditRefreshBtn.addEventListener("click", refreshBrowserAudit);
+  }
+
+  // Policy management
+  const browserBlockDomainInput = document.getElementById("browserBlockDomainInput");
+  const browserBlockDomainBtn = document.getElementById("browserBlockDomainBtn");
+  const browserPolicyStatus = document.getElementById("browserPolicyStatus");
+  const browserPolicyView = document.getElementById("browserPolicyView");
+
+  async function refreshBrowserPolicy() {
+    if (!browserPolicyView) return;
+    try {
+      const res = await api("/api/browser/policy");
+      const policy = res?.data || {};
+      const blocked = policy.blocked_domains || [];
+      const allowed = policy.allowed_domains || [];
+      let html = "";
+      if (blocked.length === 0 && allowed.length === 0) {
+        html = `<p class="muted">No domain rules — all domains are permitted.</p>`;
+      }
+      if (blocked.length > 0) {
+        html += `<h4 style="margin:0 0 0.4rem;">Blocked Domains</h4>`;
+        html += blocked.map(d => `<div class="card" style="padding:0.5rem 1rem;display:flex;align-items:center;gap:0.75rem;">
+          <span style="flex:1;">${escapeHtml(d)}</span>
+          <button class="ghost" style="font-size:0.75rem;padding:0.2rem 0.5rem;" data-unblock-domain="${escapeHtml(d)}" type="button">Unblock</button>
+        </div>`).join("");
+      }
+      if (allowed.length > 0) {
+        html += `<h4 style="margin:0.75rem 0 0.4rem;">Allowed Domains (allowlist mode)</h4>`;
+        html += allowed.map(d => `<div class="card" style="padding:0.5rem 1rem;">${escapeHtml(d)}</div>`).join("");
+      }
+      browserPolicyView.innerHTML = html;
+      // Wire unblock buttons
+      browserPolicyView.querySelectorAll("[data-unblock-domain]").forEach(btn => {
+        btn.addEventListener("click", async () => {
+          const domain = btn.getAttribute("data-unblock-domain");
+          if (!domain) return;
+          try {
+            await api("/api/browser/policy/unblock", { method: "POST", body: JSON.stringify({ domain }) });
+            showToast(`Unblocked: ${domain}`);
+            refreshBrowserPolicy();
+          } catch (err) {
+            showToast(`Unblock failed: ${err.message}`);
+          }
+        });
+      });
+    } catch (err) {
+      if (browserPolicyStatus) browserPolicyStatus.textContent = `Error: ${err.message}`;
+    }
+  }
+
+  if (browserBlockDomainBtn) {
+    browserBlockDomainBtn.addEventListener("click", async () => {
+      const domain = (browserBlockDomainInput?.value || "").trim();
+      if (!domain) return;
+      try {
+        await api("/api/browser/policy/block", { method: "POST", body: JSON.stringify({ domain }) });
+        if (browserBlockDomainInput) browserBlockDomainInput.value = "";
+        if (browserPolicyStatus) browserPolicyStatus.textContent = `Blocked: ${domain}`;
+        showToast(`Blocked: ${domain}`);
+        refreshBrowserPolicy();
+      } catch (err) {
+        if (browserPolicyStatus) browserPolicyStatus.textContent = `Error: ${err.message}`;
+      }
+    });
+  }
+
+  // Load audit + policy when browser tab is activated
+  document.querySelectorAll("[data-tab='browser']").forEach(btn => {
+    btn.addEventListener("click", () => {
+      refreshBrowserAudit();
+      refreshBrowserPolicy();
+    });
+  });
 
   window.addEventListener("beforeunload", () => {
     abortVoiceStream();

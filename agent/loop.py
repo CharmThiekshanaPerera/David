@@ -4,9 +4,10 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from agent.browser_tool import BrowserTool
 from agent.coder import Coder
 from agent.config import AgentConfig
-from agent.contracts import CriticOutput, ExecutionResult, LessonProposal
+from agent.contracts import CriticOutput, ExecutionResult, LessonProposal, PlanOutput
 from agent.critic import Critic
 from agent.executor import RestrictedExecutor
 from agent.llm import OllamaClient
@@ -33,6 +34,7 @@ class DavidAgent:
     def __init__(self, config: AgentConfig) -> None:
         self._config = config
         llm = OllamaClient(config)
+        self._llm = llm
 
         self._planner = Planner(llm, model_name=config.planner_model)
         self._coder = Coder(llm, model_name=config.coder_model)
@@ -220,6 +222,13 @@ class DavidAgent:
                 iterations_used=0,
                 message=message,
             )
+
+        # Pre-research phase: run research steps before coding iterations begin
+        research_summary = self._run_research_phase(plan, goal, project_meta)
+        if research_summary:
+            memory_context = (
+                f"{memory_context}\n\nWeb research gathered before this run:\n{research_summary}"
+            ).strip()
 
         critic_feedback = "No critic feedback yet."
         for iteration in range(1, iteration_limit + 1):
@@ -552,6 +561,83 @@ class DavidAgent:
             iterations_used=iteration_limit,
             message="Iteration limit reached before meeting success criteria.",
         )
+
+    def _run_research_phase(
+        self, plan: PlanOutput, goal: str, project_meta: dict
+    ) -> str:
+        """Execute research-type plan steps via BrowserTool before coding begins.
+
+        Returns a multi-line summary string to be injected into memory_context,
+        or empty string if no research steps exist.
+        """
+        research_steps = [s for s in plan.steps if s.step_type == "research"]
+        if not research_steps:
+            return ""
+
+        browser = BrowserTool(self._config)
+        summaries: list[str] = []
+        try:
+            for step in research_steps:
+                query = step.research_query or step.title
+                self._telemetry.event(
+                    "research_step_started",
+                    {"goal": goal, "step_id": step.id, "query": query, **project_meta},
+                )
+
+                results = browser.search(query, max_results=3)
+                if not results:
+                    self._telemetry.event(
+                        "research_step_no_results",
+                        {"goal": goal, "step_id": step.id, "query": query, **project_meta},
+                    )
+                    continue
+
+                top = results[0]
+                page = browser.read_page(top.url)
+
+                if page.status != "ok" or not page.text:
+                    # Fall back to snippet from search result
+                    summary = top.snippet or f"No content available from {top.url}"
+                else:
+                    # Summarize via LLM
+                    sys_prompt = (
+                        "You are a research assistant. In 3-5 concise sentences, summarize "
+                        "the following web page content as it relates to the given query. "
+                        "Be factual and directly useful to a developer."
+                    )
+                    user_prompt = (
+                        f"Query: {query}\n\nURL: {top.url}\n\nContent:\n{page.text[:8000]}"
+                    )
+                    try:
+                        summary = self._llm.chat(
+                            sys_prompt, user_prompt, model=self._config.critic_model
+                        )
+                    except Exception:
+                        summary = page.text[:500]
+
+                self._memory.add_web_research(url=top.url, summary=summary, goal=goal)
+                self._memory.append_session_hint(
+                    goal,
+                    f"Web research [{query}] ({top.url}): {summary[:300]}",
+                    tags=["web_research"],
+                )
+                summaries.append(f"[{query}] {top.url}\n{summary}")
+
+                self._telemetry.event(
+                    "research_step_complete",
+                    {
+                        "goal": goal,
+                        "step_id": step.id,
+                        "query": query,
+                        "url": top.url,
+                        "char_count": page.char_count,
+                        **project_meta,
+                    },
+                )
+        finally:
+            browser.close()
+
+        return "\n\n".join(summaries)
 
     @staticmethod
     def _is_test_path(relative_path: str) -> bool:

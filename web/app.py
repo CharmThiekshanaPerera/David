@@ -90,6 +90,8 @@ def create_app(
                 protected.add(request.path)
             if request.path.startswith("/api/vision/"):
                 protected.add(request.path)
+            if request.path.startswith("/api/browser/"):
+                protected.add(request.path)
             if request.path in protected or request.path.startswith("/api/approval/") or request.path.startswith("/api/workspace/"):
                 token = request.headers.get("X-CSRF-Token", "").strip()
                 if token != center.get_csrf_token():
@@ -248,19 +250,25 @@ def create_app(
         query = str(payload.get("query", "")).strip()
         if not query:
             return _json_error("Query cannot be empty.", status=400)
-            
         try:
-            from agent.web_search import search_internet
-            # We can use max_results from payload if provided
-            try:
-                max_results = int(payload.get("max_results", 10))
-            except ValueError:
-                max_results = 10
-            
-            results = search_internet(query, max_results=max_results)
-            return jsonify({"ok": True, "data": results})
+            max_results = int(payload.get("max_results", 10))
+        except (TypeError, ValueError):
+            max_results = 10
+
+        from agent.browser_tool import BrowserTool
+
+        browser = BrowserTool(cfg)
+        try:
+            results = browser.search(query, max_results=max_results)
         except Exception as exc:
             return _json_error(f"Search failed: {exc}", status=500)
+        finally:
+            browser.close()
+
+        return jsonify({
+            "ok": True,
+            "data": [{"title": r.title, "href": r.url, "body": r.snippet} for r in results],
+        })
 
     @app.post("/api/browser/deep_search")
     def api_browser_deep_search():
@@ -270,54 +278,95 @@ def create_app(
         query = str(payload.get("query", "")).strip()
         if not query:
             return _json_error("Query cannot be empty.", status=400)
-            
+
+        from agent.browser_tool import BrowserTool
+        from agent.llm import OllamaClient
+        from agent.prompts import DEEP_SEARCH_PROMPT
+        from agent.json_utils import parse_json_object
+
+        browser = BrowserTool(cfg)
         try:
-            from agent.web_search import search_internet, fetch_page_content
-            from agent.llm import OllamaClient
-            from agent.prompts import DEEP_SEARCH_PROMPT
-            from agent.json_utils import parse_json_object
-            
-            # 1. Search internet
-            results = search_internet(query, max_results=3)
+            results = browser.search(query, max_results=3)
             if not results:
                 return jsonify({"ok": True, "data": {"report": "No search results found.", "sources": []}})
-                
-            # 2. Fetch pages
+
             fetched_data = []
             for res in results:
-                url = res.get("href", "")
-                if url:
-                    content = fetch_page_content(url, timeout=8)
-                    if content:
-                        fetched_data.append({
-                            "url": url,
-                            "title": res.get("title", ""),
-                            "content": content[:15000] # Cap length to avoid massive context
-                        })
-            
+                page = browser.read_page(res.url)
+                if page.status == "ok" and page.text:
+                    fetched_data.append({
+                        "url": res.url,
+                        "title": res.title,
+                        "content": page.text[:15_000],
+                    })
+
             if not fetched_data:
                 return jsonify({"ok": True, "data": {"report": "Could not fetch any page contents.", "sources": []}})
-            
-            # 3. Create prompt
-            user_prompt = json.dumps({
-                "query": query,
-                "pages": fetched_data
-            }, indent=2)
-            
-            # 4. Use LLM
-            llm = OllamaClient(center.config)
+
+            user_prompt = json.dumps({"query": query, "pages": fetched_data}, indent=2)
+            llm = OllamaClient(cfg)
             raw = llm.chat(DEEP_SEARCH_PROMPT, user_prompt)
-            
-            # 5. Parse and return
             try:
                 parsed = parse_json_object(raw)
                 return jsonify({"ok": True, "data": parsed})
-            except Exception as e:
-                # If JSON parsing fails, just return the raw string inside report
+            except Exception:
                 return jsonify({"ok": True, "data": {"report": raw, "sources": []}})
-                
         except Exception as exc:
             return _json_error(f"Deep Search failed: {exc}", status=500)
+        finally:
+            browser.close()
+
+    @app.get("/api/browser/audit")
+    def api_browser_audit():
+        try:
+            limit = int(request.args.get("limit", "100"))
+        except (TypeError, ValueError):
+            limit = 100
+        limit = max(1, min(limit, 500))
+
+        from agent.browser_tool import BrowserTool
+
+        browser = BrowserTool(cfg)
+        entries = browser.read_audit_log(limit=limit)
+        return jsonify({"ok": True, "data": entries})
+
+    @app.get("/api/browser/policy")
+    def api_browser_policy():
+        from agent.browser_tool import BrowserPolicy
+
+        policy_path = cfg.project_root / "config" / "browser_policy.json"
+        policy = BrowserPolicy.load(policy_path)
+        return jsonify({"ok": True, "data": policy.to_dict()})
+
+    @app.post("/api/browser/policy/block")
+    def api_browser_policy_block():
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return _json_error("JSON body must be an object.")
+        domain = str(payload.get("domain", "")).strip()
+        if not domain:
+            return _json_error("domain cannot be empty.", status=400)
+
+        from agent.browser_tool import BrowserTool
+
+        browser = BrowserTool(cfg)
+        browser.block_domain(domain)
+        return jsonify({"ok": True, "data": {"blocked": domain}})
+
+    @app.post("/api/browser/policy/unblock")
+    def api_browser_policy_unblock():
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return _json_error("JSON body must be an object.")
+        domain = str(payload.get("domain", "")).strip()
+        if not domain:
+            return _json_error("domain cannot be empty.", status=400)
+
+        from agent.browser_tool import BrowserTool
+
+        browser = BrowserTool(cfg)
+        browser.unblock_domain(domain)
+        return jsonify({"ok": True, "data": {"unblocked": domain}})
 
     @app.post("/api/chat")
     def api_chat():

@@ -490,6 +490,7 @@ class DavidControlCenter:
         self.settings = self._load_settings()
         self._validate_role_models()
         ensure_workspace_layout(self.config.workspace_dir)
+        self._recover_orphaned_runs()
 
     def get_status(self) -> dict[str, Any]:
         demo_mode = self._demo_mode_enabled()
@@ -8951,6 +8952,23 @@ class DavidControlCenter:
         path = self._run_dir(run_id) / "audit.jsonl"
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record) + "\n")
+
+    def _recover_orphaned_runs(self) -> None:
+        """Mark any run still showing 'running' or 'queued' as failed on startup."""
+        if not self.runs_root.exists():
+            return
+        import datetime as _dt
+        for meta_path in self.runs_root.glob("*/meta.json"):
+            try:
+                raw = json.loads(meta_path.read_text(encoding="utf-8"))
+                if raw.get("status") in ("running", "queued"):
+                    raw["status"] = "failed"
+                    raw["message"] = "Run was interrupted by a server restart."
+                    raw["ended_at"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
+                    meta_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+                    self._logger.warning("Recovered orphaned run %s → failed", raw.get("id", meta_path.parent.name))
+            except Exception:
+                pass
 
     def _save_settings(self) -> None:
         self._write_json(self.settings_file, asdict(self.settings))

@@ -93,33 +93,6 @@ class MemoryTeacherQA:
             except JsonParseError:
                 pass
 
-        try:
-            from agent.web_search import search_internet
-            web_results = search_internet(clean_question, max_results=5)
-            if web_results:
-                web_prompt = json.dumps(
-                    {
-                        "question": clean_question,
-                        "search_results": web_results,
-                    },
-                    indent=2,
-                )
-                try:
-                    from agent.prompts import WEB_QA_PROMPT
-                    raw = self._llm.chat(WEB_QA_PROMPT, web_prompt)
-                    parsed = parse_json_object(raw)
-                    answer = parsed.get("answer")
-                    sources = parsed.get("sources", [])
-                    if isinstance(answer, str) and answer.strip() and "I could not find a reliable answer" not in answer:
-                        final_answer = answer.strip()
-                        if sources and isinstance(sources, list):
-                            final_answer += "\n\nSources:\n" + "\n".join(f"- {src}" for src in sources if isinstance(src, str))
-                        return final_answer
-                except JsonParseError:
-                    pass
-        except Exception:
-            pass
-
         if facts:
             return self._fallback_answer(clean_question, facts)
 

@@ -128,6 +128,10 @@
                 <span class="run-config-pill">TDD: false</span>
               </div>
             </div>
+            <div id="quickActionsDemoWarning" class="demo-mode-warning hidden">
+              <span>Demo mode is active — live runs are disabled.</span>
+              <button id="disableDemoBtn" type="button" class="ghost">Disable Demo Mode</button>
+            </div>
             <div class="row quick-actions-actions">
               <button id="startGoalBtn">Start Goal</button>
               <button id="stopRunBtn" class="danger">Stop Active</button>
@@ -207,14 +211,35 @@
       <section id="tab-browser" class="tab-panel">
         <article class="card">
           <h2>Internet Browser</h2>
-          <p class="muted">Search the web directly from David's Control Center.</p>
+          <p class="muted">All internet access is routed through this controlled channel — policy-checked and audit-logged.</p>
           <div class="row">
-            <input id="browserSearchInput" type="text" placeholder="Type your search query..." />
+            <input id="browserSearchInput" type="text" placeholder="Type your search query..." style="flex:1;" />
             <button id="browserSearchBtn">Search</button>
             <button id="browserDeepSearchBtn" class="ghost">Deep Search (David)</button>
           </div>
           <div id="browserResultsStatus" class="muted" style="margin-top: 1rem;"></div>
           <div id="browserResultsView" class="stack" style="margin-top: 1rem;"></div>
+        </article>
+
+        <article class="card">
+          <div class="row">
+            <h2>Access Audit Log</h2>
+            <button id="browserAuditRefreshBtn" class="ghost" type="button">Refresh</button>
+          </div>
+          <p class="muted">Every URL David accesses is logged here. Block any domain with one click.</p>
+          <div id="browserAuditStatus" class="muted" style="margin-bottom: 0.5rem;"></div>
+          <div id="browserAuditView" class="stack"></div>
+        </article>
+
+        <article class="card">
+          <h2>Domain Policy</h2>
+          <p class="muted">Blocked domains are always denied. Leave allowed_domains empty to permit everything except blocked ones.</p>
+          <div class="row" style="margin-bottom: 1rem;">
+            <input id="browserBlockDomainInput" type="text" placeholder="domain to block (e.g. ads.example.com)" style="flex:1;" />
+            <button id="browserBlockDomainBtn" type="button">Block Domain</button>
+          </div>
+          <div id="browserPolicyStatus" class="muted"></div>
+          <div id="browserPolicyView" class="stack" style="margin-top: 0.75rem;"></div>
         </article>
       </section>
 

@@ -20,7 +20,9 @@ Return ONLY a valid JSON object with this schema:
       "id": "S1",
       "title": "short step title",
       "details": "what to do",
-      "success_check": "how to verify"
+      "success_check": "how to verify",
+      "step_type": "code",
+      "research_query": ""
     }}
   ],
   "success_criteria": ["concrete, testable checks"]
@@ -31,6 +33,9 @@ Rules:
 - Success criteria must be objective (tests/exit code/output).
 - Plan must keep all file operations inside the active project directory (never workspace root).
 - Prefer project layout: `src/`, `tests/`, `docs/`, `data/`, `config/`, and `README.md`.
+- step_type is "code" by default. Use "research" only when the goal requires external information not available in memory or the workspace (e.g. a third-party API, library docs, or a current fact).
+- Research steps must come before any coding steps. Set research_query to the specific search query to run.
+- Never add research steps for information already available in the workspace or memory context.
 - No markdown.
 - No code fences.
 - No explanations outside JSON.
@@ -61,6 +66,9 @@ Rules:
 - Commands must start with python or pytest only.
 - Keep edits focused; do not rewrite unrelated files.
 - If goal is complete, set done=true and include minimal verification commands.
+- For `python -c` commands use only single-expression calls (e.g. `python -c "print(open('src/f.txt').read())"`).\
+  Never combine multiple statements with semicolons in `python -c`; compound statements (`with`, `for`, `if`, `try`) cannot follow a semicolon in a single-line `-c` string.
+- When writing a file via an edit, do NOT also write it again via a `python -c` command; use commands only to read/verify.
 - No markdown.
 - No code fences.
 - No explanations outside JSON.

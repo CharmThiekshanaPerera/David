@@ -52,15 +52,22 @@ class PlanStep:
     title: str
     details: str
     success_check: str
+    step_type: str = "code"       # "code" | "research"
+    research_query: str = ""      # populated when step_type == "research"
 
     @staticmethod
     def from_dict(data: dict[str, Any]) -> "PlanStep":
         src = _require_dict(data, "plan_step")
+        raw_type = str(src.get("step_type", "code")).strip().lower()
+        step_type = raw_type if raw_type in ("code", "research") else "code"
+        research_query = str(src.get("research_query", "")).strip()
         return PlanStep(
             id=_require_str(src.get("id"), "plan_step.id"),
             title=_require_str(src.get("title"), "plan_step.title"),
             details=_require_str(src.get("details"), "plan_step.details"),
             success_check=_require_str(src.get("success_check"), "plan_step.success_check"),
+            step_type=step_type,
+            research_query=research_query,
         )
 
 
@@ -87,9 +94,17 @@ class PlanOutput:
         return PlanOutput(goal=goal, steps=steps, success_criteria=success_criteria)
 
     def to_dict(self) -> dict[str, Any]:
+        steps_out = []
+        for step in self.steps:
+            d = asdict(step)
+            # Only include research fields when relevant to keep plan JSON clean
+            if d.get("step_type") == "code" and not d.get("research_query"):
+                d.pop("step_type", None)
+                d.pop("research_query", None)
+            steps_out.append(d)
         return {
             "goal": self.goal,
-            "steps": [asdict(step) for step in self.steps],
+            "steps": steps_out,
             "success_criteria": list(self.success_criteria),
         }
 
