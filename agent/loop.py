@@ -9,6 +9,7 @@ from agent.config import AgentConfig
 from agent.contracts import CriticOutput, ExecutionResult, LessonProposal
 from agent.critic import Critic
 from agent.executor import RestrictedExecutor
+from agent.git_committer import GitCommitter, build_commit_message
 from agent.llm import OllamaClient
 from agent.memory import LongTermMemory
 from agent.plan_quality import build_plan_quality_replan_context, score_plan_quality
@@ -47,6 +48,7 @@ class DavidAgent:
         tdd_red_phase_complete = False
         iterations_until_green: int | None = None
         project = prepare_project_for_goal(self._config.workspace_dir, goal)
+        git_committer = GitCommitter(project.project_path) if self._config.git_auto_commit else None
         safety = SafetyGuard(
             workspace_dir=project.project_path,
             max_file_write_bytes=self._config.max_file_write_bytes,
@@ -483,6 +485,21 @@ class DavidAgent:
             ):
                 if tdd_mode and iterations_until_green is None:
                     iterations_until_green = iteration
+                git_result = None
+                if git_committer is not None:
+                    commit_msg = build_commit_message(goal, iteration, coder_output.summary)
+                    git_result = git_committer.commit(commit_msg)
+                    self._telemetry.event(
+                        "git_auto_commit",
+                        {
+                            "iteration": iteration,
+                            "success": git_result.success,
+                            "skipped": git_result.skipped,
+                            "sha": git_result.sha,
+                            "message": git_result.message,
+                            **project_meta,
+                        },
+                    )
                 self._telemetry.event(
                     "run_complete",
                     {
@@ -494,6 +511,7 @@ class DavidAgent:
                         "critic_model_used": self._config.critic_model,
                         "tdd_mode": tdd_mode,
                         "iterations_until_green": iterations_until_green,
+                        "git_commit_sha": git_result.sha if git_result else None,
                         **project_meta,
                     },
                 )
