@@ -247,7 +247,7 @@
         <article class="card">
           <div class="row">
             <h2>Bundle Viewer (Read-only)</h2>
-            <input id="bundleImportFile" type="file" accept=".zip,application/zip" />
+            <input id="bundleImportFile" type="file" accept=".zip,application/zip" aria-label="Bundle import file" title="Select a bundle ZIP file to import" />
             <button id="importBundleBtn" class="ghost" type="button">Import Bundle</button>
           </div>
           <p class="muted">Import a portable run bundle to inspect timeline, diff/replay, and audit in read-only mode without mutating live state.</p>
@@ -258,7 +258,7 @@
           <h2>Run History</h2>
           <div class="row">
             <input id="runSearch" type="text" placeholder="Search by run id / command / message" />
-            <select id="runStatusFilter">
+            <select id="runStatusFilter" aria-label="Filter runs by status">
               <option value="">All statuses</option>
               <option value="queued">queued</option>
               <option value="running">running</option>
@@ -367,7 +367,7 @@
           <h2>Tail Logs</h2>
           <div class="row">
             <button id="refreshLogsBtn">Refresh logs</button>
-            <select id="logsLevelFilter">
+            <select id="logsLevelFilter" aria-label="Log level filter">
               <option value="all">all levels</option>
               <option value="info">info</option>
               <option value="warn">warn</option>
