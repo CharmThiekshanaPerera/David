@@ -399,6 +399,76 @@ def create_app(
             return _json_error(str(exc), status=400)
         return jsonify({"ok": True, "data": data})
 
+    @app.post("/api/chat/stream")
+    def api_chat_stream():
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return _json_error("JSON body must be an object.")
+        message = str(payload.get("message", payload.get("text", ""))).strip()
+        intent = str(payload.get("intent", "")).strip().lower()
+        actor = str(payload.get("actor", "web_ui")).strip() or "web_ui"
+        session_id = str(payload.get("session_id", "")).strip()
+        confirm_save = bool(payload.get("confirm_save", False))
+        parent_teaching_mode = bool(payload.get("parent_teaching_mode", False))
+        include_vision_context = bool(_parse_optional_bool(payload.get("include_vision_context")) or False)
+        if not message:
+            return _json_error("message cannot be empty.", status=400)
+
+        vision_context = ""
+        vision_meta: dict[str, Any] = {}
+        if include_vision_context:
+            vision_context, vision_meta = _vision_context_bundle(max_events=10)
+
+        def _selected_intent() -> str:
+            normalized = intent if intent in {"ask", "teach", "goal", "chat"} else ""
+            if normalized:
+                return normalized
+            classify = getattr(center, "classify_chat_intent", None)
+            if callable(classify):
+                try:
+                    detected = classify(message)
+                    selected = str((detected or {}).get("intent", "")).strip().lower()
+                    if selected in {"ask", "teach", "goal", "chat"}:
+                        return selected
+                except Exception:
+                    return "chat"
+            return "chat"
+
+        selected_intent = _selected_intent()
+
+        def generate():
+            yield _sse("thinking", {"selected_intent": selected_intent, "session_id": session_id})
+            try:
+                result = center.chat_message(
+                    message,
+                    intent=selected_intent,
+                    confirm_save=confirm_save,
+                    parent_teaching_mode=parent_teaching_mode,
+                    session_id=session_id,
+                    actor=actor,
+                    vision_context=vision_context,
+                    vision_context_meta={**vision_meta, "requested": include_vision_context},
+                )
+                assistant_text = _assistant_text_from_chat_payload(result)
+                chunks = split_response_text(assistant_text, max_chars=220)
+                for idx, chunk in enumerate(chunks):
+                    yield _sse("chunk", {"text": chunk, "index": idx})
+                    time.sleep(0.04)
+                yield _sse("done", {"result": result, "selected_intent": selected_intent})
+            except ValueError as exc:
+                yield _sse("error", {"error": str(exc)})
+            except Exception as exc:  # pragma: no cover
+                yield _sse("error", {"error": f"Chat stream failed: {exc}"})
+
+        return Response(
+            stream_with_context(generate()),
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     @app.post("/api/voice/transcribe")
     def api_voice_transcribe():
         actor = str(request.form.get("actor", "web_voice")).strip() or "web_voice"
@@ -1080,6 +1150,11 @@ def create_app(
         if not ok:
             return _json_error(str(data.get("error", "Failed to clear conversations.")), status=409)
         return jsonify({"ok": True, "data": data})
+
+    @app.get("/api/memory/context_preview")
+    def api_memory_context_preview():
+        q = str(request.args.get("q", "")).strip()
+        return jsonify({"ok": True, "data": center.memory_context_preview(q)})
 
     @app.get("/api/chat/sessions")
     def api_chat_sessions():

@@ -351,6 +351,7 @@ const el = {
   chatSessionSummary: document.getElementById("chatSessionSummary"),
   chatSessionsList: document.getElementById("chatSessionsList"),
   memoryChatInput: document.getElementById("memoryChatInput"),
+  contextPreviewBar: document.getElementById("contextPreviewBar"),
   cliTemplateSelect: document.getElementById("cliTemplateSelect"),
   cliTddMode: document.getElementById("cliTddMode"),
   cliSendBtn: document.getElementById("cliSendBtn"),
@@ -699,6 +700,143 @@ function updateIntentPreview() {
   if (state.advancedChatMode) {
     setAdvancedIntent(detected.intent);
   }
+}
+
+// ── Live memory highlighting (Feature 2) ─────────────────────────────────────
+
+const _CHAT_STOPWORDS = new Set([
+  "the","a","an","and","or","is","are","was","were","be","been","being",
+  "have","has","had","do","does","did","will","would","shall","should",
+  "may","might","can","could","what","who","when","where","why","how",
+  "this","that","these","those","my","your","his","her","its","our","their",
+  "of","in","on","at","to","for","with","by","from","about","into","out",
+  "up","down","as","if","not","no","so","but","just","also","then","than",
+  "me","him","them","us","it","i","you","he","she","we","they",
+]);
+
+let _liveHighlightTimer = null;
+let _contextPreviewTimer = null;
+
+function _liveMemoryTokenize(rawText) {
+  return new Set(
+    rawText.toLowerCase().split(/\W+/).filter(t => t.length > 2 && !_CHAT_STOPWORDS.has(t))
+  );
+}
+
+function _scoreFact(tokens, fact) {
+  const predRaw = String(fact.predicate || "");
+  const predSpaced = predRaw.replace(/_/g, " ");
+  const text = `${fact.subject || ""} ${predRaw} ${predSpaced} ${fact.object || ""}`;
+  const factTokens = new Set(text.toLowerCase().split(/\W+/).filter(Boolean));
+  let score = 0;
+  tokens.forEach(t => { if (factTokens.has(t)) score++; });
+  if (
+    (tokens.has("father") || tokens.has("dad")) &&
+    (factTokens.has("father") || factTokens.has("dad"))
+  ) score += 2;
+  if (
+    (tokens.has("mother") || tokens.has("mom")) &&
+    (factTokens.has("mother") || factTokens.has("mom"))
+  ) score += 2;
+  if ((tokens.has("father") || tokens.has("dad")) && predRaw.includes("father_name")) score += 4;
+  if ((tokens.has("mother") || tokens.has("mom")) && predRaw.includes("mother_name")) score += 4;
+  return score;
+}
+
+state._liveHighlightScores = {};
+
+function liveMemoryHighlight(rawText) {
+  const tokens = _liveMemoryTokenize(rawText);
+  if (tokens.size === 0) {
+    state._liveHighlightScores = {};
+    renderMemoryChatFacts();
+    return;
+  }
+  const facts = Array.isArray(state.memoryFactsData?.facts) ? state.memoryFactsData.facts : [];
+  const scores = {};
+  let maxScore = 0;
+  facts.forEach(fact => {
+    const key = `${fact.subject || ""}::${fact.predicate || ""}`;
+    const score = _scoreFact(tokens, fact);
+    scores[key] = score;
+    if (score > maxScore) maxScore = score;
+  });
+  state._liveHighlightScores = maxScore > 0 ? scores : {};
+  // Auto-switch to Facts tab when we have relevant matches
+  if (maxScore > 0 && state.memoryPanelTab !== "facts") {
+    setMemoryPanelTab("facts");
+  } else {
+    renderMemoryChatFacts();
+  }
+}
+
+function clearMemoryHighlight() {
+  state._liveHighlightScores = {};
+  renderMemoryChatFacts();
+}
+
+// ── Context preview bar (Feature 3) ──────────────────────────────────────────
+
+function clearContextPreviewBar() {
+  if (el.contextPreviewBar) {
+    el.contextPreviewBar.innerHTML = "";
+    el.contextPreviewBar.classList.add("hidden");
+  }
+}
+
+async function fetchContextPreview(question) {
+  if (!question || question.length < 4) { clearContextPreviewBar(); return; }
+  const detected = classifyAdvancedIntent(question);
+  if (detected.intent !== "ask") { clearContextPreviewBar(); return; }
+  try {
+    const data = await api(`/api/memory/context_preview?q=${encodeURIComponent(question)}`);
+    const facts = Array.isArray(data?.facts) ? data.facts : [];
+    const lessons = Array.isArray(data?.lessons) ? data.lessons : [];
+    if (!facts.length && !lessons.length) { clearContextPreviewBar(); return; }
+    if (!el.contextPreviewBar) return;
+    const chips = [
+      ...facts.map(f => `<span class="context-chip context-chip-fact" title="${escapeHtml(f.subject + '.' + f.predicate + ' = ' + f.object)}">📌 ${escapeHtml(f.subject + '.' + f.predicate)}</span>`),
+      ...lessons.map(l => `<span class="context-chip context-chip-lesson" title="${escapeHtml(l.lesson)}">📚 ${escapeHtml((l.lesson || "").slice(0, 40))}${(l.lesson || "").length > 40 ? "…" : ""}</span>`),
+    ];
+    el.contextPreviewBar.innerHTML = `<span class="context-preview-label">David will check:</span>${chips.join("")}`;
+    el.contextPreviewBar.classList.remove("hidden");
+  } catch {
+    clearContextPreviewBar();
+  }
+}
+
+// ── Teach extraction preview (Feature 4) ─────────────────────────────────────
+
+function previewTeachExtraction(text) {
+  if (!el.contextPreviewBar) return;
+  const patterns = [
+    { re: /my name is (.+)/i, subj: "User", pred: "name", obj: m => m[1] },
+    { re: /call me (.+)/i, subj: "User", pred: "name", obj: m => m[1] },
+    { re: /i(?:'m| am) (.+?)(?:\.|$)/i, subj: "User", pred: "identity", obj: m => m[1] },
+    { re: /my (father|dad)(?:'s name| is| was)? (?:is|was|named)? ?(.+)/i, subj: "User", pred: "father_name", obj: m => m[2] },
+    { re: /my (mother|mom)(?:'s name| is| was)? (?:is|was|named)? ?(.+)/i, subj: "User", pred: "mother_name", obj: m => m[2] },
+    { re: /my (sister|brother|wife|husband|son|daughter|spouse|partner)(?:'s name| is)? (?:is|was|named)? ?(.+)/i,
+      subj: "User", pred: m => `${m[1].toLowerCase()}_name`, obj: m => m[2] },
+    { re: /my (birthday|birth date|date of birth) is (.+)/i, subj: "User", pred: "birthday", obj: m => m[2] },
+    { re: /my (email|phone|address|job|profession|occupation) is (.+)/i, subj: "User", pred: m => m[1].toLowerCase().replace(/\s+/g, "_"), obj: m => m[2] },
+    { re: /(?:remember|save|note) (?:that )?(.+)/i, subj: "User", pred: "note", obj: m => m[1] },
+  ];
+  const chips = [];
+  for (const p of patterns) {
+    const m = text.match(p.re);
+    if (!m) continue;
+    const subj = typeof p.subj === "function" ? p.subj(m) : p.subj;
+    const pred = typeof p.pred === "function" ? p.pred(m) : p.pred;
+    const obj = typeof p.obj === "function" ? p.obj(m) : p.obj;
+    const objClean = String(obj || "").replace(/[.!?]+$/, "").trim().slice(0, 40);
+    if (objClean) {
+      chips.push(`<span class="context-chip context-chip-teach" title="Will store to memory">💾 ${escapeHtml(subj)}.${escapeHtml(pred)} = ${escapeHtml(objClean)}</span>`);
+    }
+    break; // first match wins for preview
+  }
+  if (!chips.length) { clearContextPreviewBar(); return; }
+  el.contextPreviewBar.innerHTML = `<span class="context-preview-label">Will store:</span>${chips.join("")}`;
+  el.contextPreviewBar.classList.remove("hidden");
 }
 
 function inferChatRequest(rawText) {
@@ -2508,6 +2646,9 @@ function renderMemoryChatFacts() {
     return;
   }
 
+  const liveScores = state._liveHighlightScores || {};
+  const hasHighlight = Object.keys(liveScores).length > 0;
+
   el.memoryChatFacts.innerHTML = filtered
     .slice()
     .reverse()
@@ -2515,8 +2656,13 @@ function renderMemoryChatFacts() {
       const key = `${String(fact.subject || "").toLowerCase()}::${String(fact.predicate || "").toLowerCase()}`;
       const conflict = conflictKeys.has(key);
       const aliases = Array.isArray(fact.aliases) ? fact.aliases.filter(Boolean) : [];
+      const score = liveScores[key] || 0;
+      let highlightClass = "";
+      if (hasHighlight) {
+        highlightClass = score >= 1 ? "fact-row-live-match" : "fact-row-dimmed";
+      }
       return `
-        <div class="memory-fact-row ${conflict ? "conflict" : ""}">
+        <div class="memory-fact-row ${conflict ? "conflict" : ""} ${highlightClass}">
           <div><span class="muted">Subject:</span> <code>${escapeHtml(fact.subject || "-")}</code></div>
           <div><span class="muted">Predicate:</span> <code>${escapeHtml(fact.predicate || "-")}</code></div>
           <div><span class="muted">Object:</span> ${escapeHtml(fact.object || "-")}</div>
@@ -5133,6 +5279,78 @@ async function ensureVoiceStream() {
   state.voice.vadBuffer = analyser ? new Uint8Array(analyser.fftSize) : null;
 }
 
+// ── WAV capture (ffmpeg-free transcription) ───────────────────────────────────
+// Runs alongside MediaRecorder. Captures raw 16kHz mono PCM via Web Audio API
+// and encodes to WAV so whisper can transcribe without needing ffmpeg.
+
+const _WAV_SAMPLE_RATE = 16000;
+let _wavPcmChunks = [];
+let _wavProcessor = null;
+let _wavAudioCtx = null;
+let _wavSource = null;
+
+function _wavEncodeBlob(chunks) {
+  if (!chunks.length) return null;
+  const totalLen = chunks.reduce((n, c) => n + c.length, 0);
+  const pcm = new Float32Array(totalLen);
+  let off = 0;
+  for (const c of chunks) { pcm.set(c, off); off += c.length; }
+  const byteCount = pcm.length * 2;
+  const buf = new ArrayBuffer(44 + byteCount);
+  const view = new DataView(buf);
+  const str = (pos, s) => { for (let i = 0; i < s.length; i++) view.setUint8(pos + i, s.charCodeAt(i)); };
+  str(0, "RIFF"); view.setUint32(4, 36 + byteCount, true);
+  str(8, "WAVE"); str(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);        // PCM
+  view.setUint16(22, 1, true);        // mono
+  view.setUint32(24, _WAV_SAMPLE_RATE, true);
+  view.setUint32(28, _WAV_SAMPLE_RATE * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  str(36, "data"); view.setUint32(40, byteCount, true);
+  const int16 = new Int16Array(buf, 44);
+  for (let i = 0; i < pcm.length; i++) {
+    const s = Math.max(-1, Math.min(1, pcm[i]));
+    int16[i] = s < 0 ? s * 32768 : s * 32767;
+  }
+  return new Blob([buf], { type: "audio/wav" });
+}
+
+function _wavCaptureStart(stream) {
+  _wavCaptureStop();
+  _wavPcmChunks = [];
+  try {
+    _wavAudioCtx = new AudioContext({ sampleRate: _WAV_SAMPLE_RATE });
+    _wavSource = _wavAudioCtx.createMediaStreamSource(stream);
+    // ScriptProcessorNode is deprecated but universally supported; AudioWorklet
+    // requires a separate Worker file. For compatibility we use ScriptProcessor.
+    _wavProcessor = _wavAudioCtx.createScriptProcessor(4096, 1, 1);
+    _wavProcessor.onaudioprocess = (e) => {
+      _wavPcmChunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+    };
+    _wavSource.connect(_wavProcessor);
+    _wavProcessor.connect(_wavAudioCtx.destination);
+  } catch (_) {
+    _wavCaptureStop();
+  }
+}
+
+function _wavCaptureStop() {
+  try { if (_wavProcessor) { _wavProcessor.disconnect(); } } catch (_) {}
+  try { if (_wavSource) { _wavSource.disconnect(); } } catch (_) {}
+  try { if (_wavAudioCtx) { _wavAudioCtx.close(); } } catch (_) {}
+  _wavProcessor = null; _wavSource = null; _wavAudioCtx = null;
+}
+
+function _wavCaptureGetBlob() {
+  const chunks = _wavPcmChunks.slice();
+  _wavPcmChunks = [];
+  _wavCaptureStop();
+  if (!chunks.length) return null;
+  return _wavEncodeBlob(chunks);
+}
+
 async function startVoiceRecording({ keepStream = false } = {}) {
   if (!state.voice.enabled) {
     showToast("Enable Voice Mode in Settings first.");
@@ -5172,18 +5390,24 @@ async function startVoiceRecording({ keepStream = false } = {}) {
     syncVoiceUiState();
     startVoiceWaveform();
 
+    // Start WAV capture alongside MediaRecorder so whisper gets WAV (no ffmpeg needed)
+    _wavCaptureStart(stream);
+
     recorder.ondataavailable = (event) => {
       if (event.data && event.data.size > 0) {
         state.voice.chunks.push(event.data);
       }
     };
     recorder.onerror = () => {
+      _wavCaptureStop();
       setCliOutput("Voice recording failed.");
       state.voice.listening = false;
       setVoiceTurnState(state.voice.vadActive ? "listening_armed" : "idle");
       syncVoiceUiState();
     };
     recorder.onstop = async () => {
+      // Prefer WAV blob (whisper-native, no ffmpeg) over MediaRecorder blob
+      const wavBlob = _wavCaptureGetBlob();
       const chunks = Array.isArray(state.voice.chunks) ? state.voice.chunks.slice() : [];
       const mimeType = String(recorder.mimeType || "audio/webm");
       state.voice.recorder = null;
@@ -5200,7 +5424,7 @@ async function startVoiceRecording({ keepStream = false } = {}) {
       }
       syncVoiceUiState();
       if (!state.voice.autoSubmitAfterStop) return;
-      const blob = new Blob(chunks, { type: mimeType });
+      const blob = wavBlob || new Blob(chunks, { type: mimeType });
       if (!blob.size) {
         setCliOutput("No speech captured from microphone.");
         setVoiceTranscriptPreview("No speech captured.");
@@ -5224,6 +5448,7 @@ async function startVoiceRecording({ keepStream = false } = {}) {
     };
     recorder.start(250);
   } catch (err) {
+    _wavCaptureStop();
     cleanupVoiceAudioResources();
     stopVoiceWaveform();
     state.voice.listening = false;
@@ -5819,19 +6044,75 @@ async function handleAdvancedChat(rawMessage) {
   const selectedIntent = state.selectedChatIntent || detected.intent || "chat";
   const confirmSave = selectedIntent === "teach" ? !!el.chatConfirmSave?.checked : false;
 
-  const result = await api("/api/chat", {
-    method: "POST",
-    body: JSON.stringify({
-      message: text,
-      intent: selectedIntent,
-      confirm_save: confirmSave,
-      parent_teaching_mode: (!!el.parentTeachingMode?.checked) || state.parentTeachingMode,
-      session_id: state.selectedChatSessionId || "",
-      actor: "web_ui",
-      include_vision_context: shouldIncludeVisionContext(),
-    }),
-  });
-  await applyAdvancedChatResult(result, text);
+  // Show typing indicator bubble immediately
+  const typingBubble = _insertChatTypingBubble();
+  clearContextPreviewBar();
+
+  let finalResult = null;
+  const streamController = new AbortController();
+  try {
+    await streamJsonSse(
+      "/api/chat/stream",
+      {
+        message: text,
+        intent: selectedIntent,
+        confirm_save: confirmSave,
+        parent_teaching_mode: (!!el.parentTeachingMode?.checked) || state.parentTeachingMode,
+        session_id: state.selectedChatSessionId || "",
+        actor: "web_ui",
+        include_vision_context: shouldIncludeVisionContext(),
+      },
+      async ({ event, data }) => {
+        if (event === "thinking") {
+          // typing indicator already shown — nothing extra needed
+        } else if (event === "chunk") {
+          _appendChatStreamChunk(typingBubble, String(data?.text || ""));
+        } else if (event === "done") {
+          finalResult = data?.result || null;
+        } else if (event === "error") {
+          throw new Error(String(data?.error || "Stream error"));
+        }
+      },
+      { signal: streamController.signal }
+    );
+  } finally {
+    _removeChatTypingBubble(typingBubble);
+  }
+  if (finalResult) {
+    await applyAdvancedChatResult(finalResult, text);
+  }
+}
+
+// ── Streaming chat helpers ────────────────────────────────────────────────────
+
+function _insertChatTypingBubble() {
+  if (!el.memoryChatHistory) return null;
+  const wrap = document.createElement("div");
+  wrap.className = "chat-row assistant chat-streaming-row";
+  wrap.innerHTML = `<div class="chat-bubble system chat-stream-bubble">
+    <span class="chat-typing-indicator"><span></span><span></span><span></span></span>
+    <span class="chat-stream-text"></span>
+  </div>`;
+  el.memoryChatHistory.appendChild(wrap);
+  el.memoryChatHistory.scrollTop = el.memoryChatHistory.scrollHeight;
+  return wrap;
+}
+
+function _appendChatStreamChunk(bubbleWrap, chunk) {
+  if (!bubbleWrap) return;
+  const indicator = bubbleWrap.querySelector(".chat-typing-indicator");
+  const textEl = bubbleWrap.querySelector(".chat-stream-text");
+  if (indicator) indicator.style.display = "none";
+  if (textEl) {
+    textEl.textContent = textEl.textContent ? `${textEl.textContent} ${chunk}` : chunk;
+    if (el.memoryChatHistory) el.memoryChatHistory.scrollTop = el.memoryChatHistory.scrollHeight;
+  }
+}
+
+function _removeChatTypingBubble(bubbleWrap) {
+  if (bubbleWrap && bubbleWrap.parentNode) {
+    bubbleWrap.parentNode.removeChild(bubbleWrap);
+  }
 }
 
 async function handleVoiceChatStream(rawMessage, options = {}) {
@@ -6771,7 +7052,32 @@ function wireActions() {
       pushChatMessage("system", err.message);
     }
   });
-  el.memoryChatInput?.addEventListener("input", () => updateIntentPreview());
+  el.memoryChatInput?.addEventListener("input", () => {
+    updateIntentPreview();
+    const raw = el.memoryChatInput?.value || "";
+
+    // Live memory highlight — 350ms debounce
+    clearTimeout(_liveHighlightTimer);
+    _liveHighlightTimer = setTimeout(() => liveMemoryHighlight(raw), 350);
+
+    // Context preview — 600ms debounce, intent-aware
+    clearTimeout(_contextPreviewTimer);
+    _contextPreviewTimer = setTimeout(() => {
+      const detected = classifyAdvancedIntent(raw);
+      if (detected.intent === "teach") {
+        previewTeachExtraction(raw);
+      } else if (detected.intent === "ask" && raw.length >= 4) {
+        fetchContextPreview(raw);
+      } else {
+        clearContextPreviewBar();
+      }
+    }, 600);
+  });
+
+  el.memoryChatInput?.addEventListener("blur", () => {
+    // Small delay so click on chips still registers
+    setTimeout(() => clearContextPreviewBar(), 200);
+  });
 
   el.voiceModePttBtn?.addEventListener("click", () => setVoiceInputMode("manual"));
   el.voiceModeVadBtn?.addEventListener("click", () => setVoiceInputMode("vad"));
