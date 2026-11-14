@@ -11,6 +11,16 @@ He is designed to act like a disciplined junior developer:
 
 David is **not** a shell bot. He works inside strict safety boundaries.
 
+## Documentation Map
+
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — project architecture overview and "where to look for X".
+- [`AGENTS.md`](AGENTS.md) — the internal agent roles (Planner/Coder/Safety/Executor/Critic/Memory), their models, and known reliability limits.
+- [`SKILLS.md`](SKILLS.md) — what David can actually do today, plus the longer-range roadmap.
+- [`RUNNING.md`](RUNNING.md) — environment-agnostic setup guide, including gotchas hit in practice (venv activation, shared-venv pollution, model config drift between `.env` and the web UI).
+- [`docs/APP_ARCHITECTURE_AND_CAPABILITIES.md`](docs/APP_ARCHITECTURE_AND_CAPABILITIES.md) — the full module-by-module architecture reference.
+- [`docs/WEB_UI.md`](docs/WEB_UI.md) — web Control Center reference.
+- [`docs/AGENTIC_WORKFLOW_ROADMAP.md`](docs/AGENTIC_WORKFLOW_ROADMAP.md) — milestones and guardrails for the agentic loop.
+
 ## What David Does
 
 For each goal, David runs this loop:

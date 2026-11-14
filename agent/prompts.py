@@ -69,6 +69,14 @@ Rules:
 - For `python -c` commands use only single-expression calls (e.g. `python -c "print(open('src/f.txt').read())"`).\
   Never combine multiple statements with semicolons in `python -c`; compound statements (`with`, `for`, `if`, `try`) cannot follow a semicolon in a single-line `-c` string.
 - When writing a file via an edit, do NOT also write it again via a `python -c` command; use commands only to read/verify.
+- Every command runs synchronously and is killed as a FAILURE if it does not exit on its own within the timeout.
+  Never propose a command that starts a persistent/blocking process, such as `app.run()`, `flask run`, `serve_forever()`,
+  or any dev server — it will hang until timeout and always be scored as failed. To verify a web app, write a pytest
+  test that uses the framework's in-process test client (e.g. Flask's `app.test_client()`) and assert on the response;
+  run it with `pytest`, which exits on its own.
+- Before installing a dependency, check whether it is already importable (e.g. via a quick `python -c "import X"`);
+  do not install or pin a version that differs from what is already satisfied unless the goal explicitly requires
+  that exact version, since this environment is shared and downgrading a package can break other tools.
 - No markdown.
 - No code fences.
 - No explanations outside JSON.
@@ -94,6 +102,12 @@ Rules:
 - If all validation commands pass and plan success criteria appear met, choose success.
 - If fixable failures exist, choose retry with concrete next_actions.
 - Choose abort only when unsafe or impossible under constraints.
+- Base analysis strictly on the provided coder edits and execution results. Never claim a file is missing code,
+  an import, or a construct unless you can point to its actual absence in the provided edit content — do not
+  guess or assume based on the command outcome alone.
+- If a command timed out because it looks like a blocking/server process (e.g. `app.run()`, `flask run`), say so
+  explicitly in next_actions and recommend replacing it with a pytest test using an in-process test client,
+  rather than inventing an unrelated code defect.
 - Keep lessons short and reusable.
 - No markdown.
 - No code fences.
