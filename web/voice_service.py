@@ -205,6 +205,13 @@ def synthesize_text_chunk(
 
 
 def _run_whisper_cli(input_path: Path, *, tmp_root: Path, config: VoiceRuntimeConfig) -> str:
+    # WAV files: try the Python API path first — it bypasses ffmpeg entirely.
+    if input_path.suffix.lower() == ".wav":
+        try:
+            return _run_whisper_python_api(input_path, tmp_root=tmp_root, config=config)
+        except ValueError:
+            pass  # fall through to CLI (which may fail without ffmpeg)
+
     cmd = [
         config.stt_command,
         str(input_path),
@@ -236,6 +243,43 @@ def _run_whisper_cli(input_path: Path, *, tmp_root: Path, config: VoiceRuntimeCo
         transcript = str(result.stdout or "").strip()
     if not transcript:
         raise ValueError("Whisper CLI returned no transcript text.")
+    return transcript
+
+
+def _run_whisper_python_api(input_path: Path, *, tmp_root: Path, config: VoiceRuntimeConfig) -> str:
+    """Transcribe a WAV file using the whisper Python API — no ffmpeg needed.
+
+    whisper.model.transcribe() accepts a numpy float32 array directly, skipping
+    load_audio() which is the only call that requires ffmpeg.  We read the WAV
+    with the stdlib `wave` module (zero extra deps) and hand the array over.
+    """
+    script = (
+        "import whisper, wave, numpy, sys\n"
+        "wav_path, model_name, lang = sys.argv[1], sys.argv[2], sys.argv[3]\n"
+        "with wave.open(wav_path, 'rb') as wf:\n"
+        "    n_ch = wf.getnchannels()\n"
+        "    raw = wf.readframes(wf.getnframes())\n"
+        "audio = numpy.frombuffer(raw, dtype=numpy.int16).astype(numpy.float32) / 32768.0\n"
+        "if n_ch > 1:\n"
+        "    audio = audio.reshape(-1, n_ch).mean(axis=1)\n"
+        "model = whisper.load_model(model_name)\n"
+        "result = model.transcribe(audio, fp16=False, language=lang or None)\n"
+        "print(result['text'])\n"
+    )
+    script_path = tmp_root / "_whisper_api.py"
+    script_path.write_text(script, encoding="utf-8")
+
+    lang = config.stt_language or ""
+    # py.exe (Windows Python Launcher) selects the correct interpreter that has whisper.
+    cmd = ["py", "-3.14", str(script_path), str(input_path), config.stt_model, lang]
+    result = _run_local_command(cmd, timeout_sec=300)
+    if result.returncode != 0:
+        raise ValueError(
+            f"Whisper Python API failed: {str(result.stderr or '').strip() or 'n/a'}"
+        )
+    transcript = str(result.stdout or "").strip()
+    if not transcript:
+        raise ValueError("Whisper Python API returned no transcript text.")
     return transcript
 
 

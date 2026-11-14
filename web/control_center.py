@@ -490,6 +490,7 @@ class DavidControlCenter:
         self.settings = self._load_settings()
         self._validate_role_models()
         ensure_workspace_layout(self.config.workspace_dir)
+        self._recover_orphaned_runs()
 
     def get_status(self) -> dict[str, Any]:
         demo_mode = self._demo_mode_enabled()
@@ -1416,6 +1417,37 @@ class DavidControlCenter:
             "conflicts": conflicts,
             "conflict_count": len(conflicts),
             "total": len(filtered),
+        }
+
+    def memory_context_preview(self, question: str) -> dict[str, Any]:
+        """Return the top memory facts and lessons that would inform an answer — no LLM call."""
+        question_tokens = set(self._tokenize_text(question))
+        if not question_tokens:
+            return {"facts": [], "lessons": []}
+        payload = self._read_memory_payload()
+        facts = payload.get("facts", []) if isinstance(payload.get("facts"), list) else []
+        lessons = [
+            row for row in (payload.get("lessons", []) or [])
+            if isinstance(row, dict) and "reflection" not in (row.get("tags") or [])
+        ]
+        matched_facts = self._match_facts_for_question(question_tokens, facts, limit=3)
+        matched_lessons = self._match_lessons_for_question(question_tokens, lessons, limit=2)
+        return {
+            "facts": [
+                {
+                    "subject": row.get("subject", ""),
+                    "predicate": row.get("predicate", ""),
+                    "object": row.get("object", ""),
+                }
+                for row in matched_facts
+            ],
+            "lessons": [
+                {
+                    "lesson": row.get("lesson", ""),
+                    "tags": row.get("tags", []),
+                }
+                for row in matched_lessons
+            ],
         }
 
     def memory_conversations(self, session_id: str = "", limit: int = 500) -> dict[str, Any]:
@@ -5031,9 +5063,31 @@ class DavidControlCenter:
     @staticmethod
     def _fact_memory_sentence(row: dict[str, Any]) -> str:
         subject = str(row.get("subject", "unknown")).strip() or "unknown"
-        predicate = str(row.get("predicate", "fact")).strip().replace("_", " ") or "fact"
-        object_value = str(row.get("object", "unknown")).strip() or "unknown"
-        return f"You once told me: {subject} {predicate} is {object_value}."
+        predicate_raw = str(row.get("predicate", "fact")).strip()
+        obj = str(row.get("object", "unknown")).strip() or "unknown"
+        subj_is_self = subject.lower() in ("user", "david")
+        possessive = "Your" if subj_is_self else f"{subject}'s"
+
+        if predicate_raw == "father_name":
+            return f"{obj} is {possessive.lower() if not subj_is_self else 'your'} father."
+        if predicate_raw == "mother_name":
+            return f"{obj} is {possessive.lower() if not subj_is_self else 'your'} mother."
+        if predicate_raw in ("sister_name", "brother_name", "wife_name", "husband_name",
+                              "son_name", "daughter_name", "spouse_name", "partner_name"):
+            relation = predicate_raw.replace("_name", "")
+            return f"{obj} is {possessive.lower() if not subj_is_self else 'your'} {relation}."
+        if predicate_raw == "name":
+            return f"{possessive} name is {obj}."
+        if predicate_raw == "birthday":
+            return f"{possessive} birthday is {obj}."
+        if predicate_raw in ("email", "phone", "address", "job", "occupation", "profession"):
+            return f"{possessive} {predicate_raw} is {obj}."
+        if predicate_raw == "identity":
+            return f"{subject} is {obj}."
+        if predicate_raw == "note":
+            return obj
+        predicate_human = predicate_raw.replace("_", " ")
+        return f"{possessive} {predicate_human} is {obj}."
 
     def _build_memory_citations(
         self,
@@ -5348,7 +5402,12 @@ class DavidControlCenter:
         if not parts:
             parts.append(MEMORY_UNKNOWN_ANSWER)
 
-        if personality_enabled and (include_extended or self._level_bucket(warmth) != "mid"):
+        # Only add personality/cheering lines when we don't have a direct factual answer,
+        # or when the question has an emotional context that warrants companion language.
+        has_direct_answer = bool(matched_facts or matched_projects)
+        sensitive_context = crisis_context or grief_context or growth_context
+
+        if personality_enabled and not has_direct_answer and (include_extended or self._level_bucket(warmth) != "mid"):
             parts.append(self._warmth_tone_line(warmth))
 
         if crisis_context:
@@ -5359,10 +5418,10 @@ class DavidControlCenter:
             parts.append(self._compose_growth_reference_line())
             parts.append(self._compose_growth_transparency_line())
 
-        if personality_enabled and not (crisis_context or grief_context):
+        if personality_enabled and not (crisis_context or grief_context) and not has_direct_answer:
             parts.extend(self._curiosity_follow_up_lines(curiosity, "Would you like a short next-step suggestion?"))
 
-        if force_transparency or family_context or grief_context or crisis_context:
+        if force_transparency or (family_context and has_direct_answer) or grief_context or crisis_context:
             parts.append(self._compose_ai_transparency_line())
 
         return " ".join(item for item in parts if item).strip()
@@ -8951,6 +9010,23 @@ class DavidControlCenter:
         path = self._run_dir(run_id) / "audit.jsonl"
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record) + "\n")
+
+    def _recover_orphaned_runs(self) -> None:
+        """Mark any run still showing 'running' or 'queued' as failed on startup."""
+        if not self.runs_root.exists():
+            return
+        import datetime as _dt
+        for meta_path in self.runs_root.glob("*/meta.json"):
+            try:
+                raw = json.loads(meta_path.read_text(encoding="utf-8"))
+                if raw.get("status") in ("running", "queued"):
+                    raw["status"] = "failed"
+                    raw["message"] = "Run was interrupted by a server restart."
+                    raw["ended_at"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
+                    meta_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+                    self._logger.warning("Recovered orphaned run %s → failed", raw.get("id", meta_path.parent.name))
+            except Exception:
+                pass
 
     def _save_settings(self) -> None:
         self._write_json(self.settings_file, asdict(self.settings))

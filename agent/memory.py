@@ -336,6 +336,59 @@ class LongTermMemory:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def add_web_research(
+        self,
+        url: str,
+        summary: str,
+        goal: str,
+        timestamp: str | None = None,
+    ) -> None:
+        """Store a summarized web research entry linked to a goal."""
+        url = str(url).strip()
+        summary = str(summary).strip()
+        goal = str(goal).strip()
+        if not url or not summary:
+            return
+        payload = self._read_payload()
+        entries = payload.setdefault("web_research", [])
+        entries.append(
+            {
+                "url": url,
+                "summary": summary,
+                "goal": goal,
+                "timestamp": timestamp or datetime.now(tz=timezone.utc).isoformat(),
+            }
+        )
+        if len(entries) > self._max_entries:
+            payload["web_research"] = entries[-self._max_entries :]
+        self._write_payload(payload)
+
+    def recent_web_research(self, goal: str, limit: int = 5) -> list[dict]:
+        """Return recent web research entries relevant to the given goal."""
+        payload = self._read_payload()
+        entries = payload.get("web_research", [])
+        if not entries:
+            return []
+
+        goal_tokens = set(self._tokenize(goal))
+        scored: list[tuple[int, dict]] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            entry_goal = str(entry.get("goal", ""))
+            summary = str(entry.get("summary", ""))
+            text = f"{entry_goal} {summary}"
+            entry_tokens = set(self._tokenize(text))
+            score = len(goal_tokens & entry_tokens) if goal_tokens else 0
+            if score > 0 or entry_goal == goal:
+                scored.append((score, entry))
+
+        if not scored:
+            return [e for e in entries[-limit:] if isinstance(e, dict)]
+
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        return [entry for _, entry in scored[:limit]]
+
     def _ensure_file(self) -> None:
         self._memory_file.parent.mkdir(parents=True, exist_ok=True)
         if not self._memory_file.exists():
@@ -347,6 +400,7 @@ class LongTermMemory:
                     "values": [],
                     "projects": [],
                     "session_hints": [],
+                    "web_research": [],
                 }
             )
             return
@@ -374,6 +428,8 @@ class LongTermMemory:
             data["projects"] = []
         if not isinstance(data.get("session_hints"), list):
             data["session_hints"] = []
+        if not isinstance(data.get("web_research"), list):
+            data["web_research"] = []
 
         return data
 

@@ -68,7 +68,7 @@ TDD guidance:
             return CoderOutput(
                 summary="Model response was invalid JSON; no file edits proposed.",
                 edits=[],
-                commands=["pytest -q"],
+                commands=[],
                 done=False,
                 done_reason="",
             )

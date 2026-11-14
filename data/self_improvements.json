@@ -552,9 +552,9 @@
       "title": "Autonomous Improvement: Run Reliability Gap",
       "summary": "Run Reliability Gap. This proposal was drafted autonomously from structured reflections and run evidence.",
       "rationale": "Trigger: conversation (conversation:68d7fb3cad3248bcbb8f84c33f3a94a8)\nRun context: run_20260223T160333_3e46d899 / status=failed\nReflection key: conversation:68d7fb3cad3248bcbb8f84c33f3a94a8\n\nWhy this change was drafted:\n- Run Reliability Gap.\n- Convert lessons into concrete planning and memory-indexing heuristics.\n- Keep core safety constraints immutable and require human approval before merge.",
-      "status": "pending",
+      "status": "merge_failed",
       "created_at": "2026-02-23T16:21:54.364671+00:00",
-      "updated_at": "2026-02-23T16:21:54.364671+00:00",
+      "updated_at": "2026-05-13T18:52:30.622623+00:00",
       "source": "self_improvement_engine",
       "actor": "david_autonomous",
       "sandbox_dir": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260223T162154_3c47f7eb",
@@ -600,17 +600,26 @@
         "trigger": "conversation",
         "trigger_id": "conversation:68d7fb3cad3248bcbb8f84c33f3a94a8"
       },
-      "decision": null,
-      "merge": null
+      "decision": {
+        "decision": "approve",
+        "actor": "web_ui",
+        "note": "",
+        "decided_at": "2026-05-13T18:52:30.616559+00:00"
+      },
+      "merge": {
+        "error": "Sandbox file escaped sandbox root: D:\\mnt\\d\\Tech Agent Labs\\David\\workspace\\agent_sandbox\\improve_20260223T162154_3c47f7eb\\prototype\\agent\\self_improvement\\autonomous_playbook.py",
+        "merged_at": "2026-05-13T18:52:30.622644+00:00",
+        "actor": "web_ui"
+      }
     },
     {
       "id": "improve_20260223T162238_b81092e0",
       "title": "Autonomous Improvement: Run Reliability Gap",
       "summary": "Run Reliability Gap. This proposal was drafted autonomously from structured reflections and run evidence.",
       "rationale": "Trigger: conversation (conversation:3abc44b9836d4f6392446f54ba9db78e)\nRun context: run_20260223T160333_3e46d899 / status=failed\nReflection key: conversation:3abc44b9836d4f6392446f54ba9db78e\n\nWhy this change was drafted:\n- Run Reliability Gap.\n- Convert lessons into concrete planning and memory-indexing heuristics.\n- Keep core safety constraints immutable and require human approval before merge.",
-      "status": "pending",
+      "status": "merge_failed",
       "created_at": "2026-02-23T16:22:38.556497+00:00",
-      "updated_at": "2026-02-23T16:22:38.556497+00:00",
+      "updated_at": "2026-05-13T18:52:27.251119+00:00",
       "source": "self_improvement_engine",
       "actor": "david_autonomous",
       "sandbox_dir": "/mnt/d/Tech Agent Labs/David/workspace/agent_sandbox/improve_20260223T162238_b81092e0",
@@ -655,6 +664,129 @@
         "signature": "e365cc501db0729db7",
         "trigger": "conversation",
         "trigger_id": "conversation:3abc44b9836d4f6392446f54ba9db78e"
+      },
+      "decision": {
+        "decision": "approve",
+        "actor": "web_ui",
+        "note": "",
+        "decided_at": "2026-05-13T18:52:27.247159+00:00"
+      },
+      "merge": {
+        "error": "Sandbox file escaped sandbox root: D:\\mnt\\d\\Tech Agent Labs\\David\\workspace\\agent_sandbox\\improve_20260223T162238_b81092e0\\prototype\\agent\\self_improvement\\autonomous_playbook.py",
+        "merged_at": "2026-05-13T18:52:27.251164+00:00",
+        "actor": "web_ui"
+      }
+    },
+    {
+      "id": "improve_20260513T185441_df85a5de",
+      "title": "Autonomous Improvement: Goal Reflection Loop",
+      "summary": "Goal Reflection Loop; Run Reliability Gap. This proposal was drafted autonomously from structured reflections and run evidence.",
+      "rationale": "Trigger: goal (run_20260513T185239_b6a49b69)\nRun context: run_20260513T185239_b6a49b69 / status=failed\nReflection key: run:run_20260513T185239_b6a49b69\n\nWhy this change was drafted:\n- Goal Reflection Loop; Run Reliability Gap.\n- Convert lessons into concrete planning and memory-indexing heuristics.\n- Keep core safety constraints immutable and require human approval before merge.",
+      "status": "pending",
+      "created_at": "2026-05-13T18:54:41.379354+00:00",
+      "updated_at": "2026-05-13T18:54:41.379354+00:00",
+      "source": "self_improvement_engine",
+      "actor": "david_autonomous",
+      "sandbox_dir": "D:\\Tech Agent Labs\\David\\workspace\\agent_sandbox\\improve_20260513T185441_df85a5de",
+      "proposal_doc": "D:\\Tech Agent Labs\\David\\workspace\\agent_sandbox\\improve_20260513T185441_df85a5de\\PROPOSAL.md",
+      "changes": [
+        {
+          "path": "agent/self_improvement/autonomous_playbook.py",
+          "change_type": "edited",
+          "sandbox_file": "D:\\Tech Agent Labs\\David\\workspace\\agent_sandbox\\improve_20260513T185441_df85a5de\\prototype\\agent\\self_improvement\\autonomous_playbook.py",
+          "added": 11,
+          "removed": 4,
+          "patch": "--- a/agent/self_improvement/autonomous_playbook.py\n+++ b/agent/self_improvement/autonomous_playbook.py\n@@ -6,12 +6,18 @@\n \n from __future__ import annotations\n \n-GENERATED_AT_UTC = \"2026-02-23T16:01:52.105345+00:00\"\n-TRIGGER = \"conversation\"\n-TRIGGER_ID = \"conversation:8791307afcbd41e8b7504f8f35953e5a\"\n-SIGNAL_CODES = [\"run_reliability\"]\n+GENERATED_AT_UTC = \"2026-05-13T18:54:41.369485+00:00\"\n+TRIGGER = \"goal\"\n+TRIGGER_ID = \"run_20260513T185239_b6a49b69\"\n+SIGNAL_CODES = [\"goal_reflection_loop\", \"run_reliability\"]\n \n SIGNALS = [\n+  {\n+    \"code\": \"goal_reflection_loop\",\n+    \"title\": \"Goal Reflection Loop\",\n+    \"evidence\": \"Goal run run_20260513T185239_b6a49b69 finished with status 'failed' and 1 iteration(s).\",\n+    \"upgrade\": \"Persist a structured reasoning playbook update so future plans reuse this execution pattern.\"\n+  },\n   {\n     \"code\": \"run_reliability\",\n     \"title\": \"Run Reliability Gap\",\n@@ -21,6 +27,7 @@\n ]\n \n RECOMMENDED_ACTIONS = [\n+    \"Persist a structured reasoning playbook update so future plans reuse this execution pattern.\",\n     \"Add stricter preflight checks and staged rollback planning before execution.\",\n ]\n ",
+          "size_bytes": 1360
+        },
+        {
+          "path": "agent/self_improvement/autonomous_state.json",
+          "change_type": "edited",
+          "sandbox_file": "D:\\Tech Agent Labs\\David\\workspace\\agent_sandbox\\improve_20260513T185441_df85a5de\\prototype\\agent\\self_improvement\\autonomous_state.json",
+          "added": 13,
+          "removed": 6,
+          "patch": "--- a/agent/self_improvement/autonomous_state.json\n+++ b/agent/self_improvement/autonomous_state.json\n@@ -1,12 +1,18 @@\n {\n-  \"generated_at_utc\": \"2026-02-23T16:01:52.105345+00:00\",\n-  \"trigger\": \"conversation\",\n-  \"trigger_id\": \"conversation:8791307afcbd41e8b7504f8f35953e5a\",\n-  \"run_id\": \"run_20260222T151748_a51c7807\",\n+  \"generated_at_utc\": \"2026-05-13T18:54:41.369485+00:00\",\n+  \"trigger\": \"goal\",\n+  \"trigger_id\": \"run_20260513T185239_b6a49b69\",\n+  \"run_id\": \"run_20260513T185239_b6a49b69\",\n   \"run_status\": \"failed\",\n-  \"reflection_key\": \"conversation:8791307afcbd41e8b7504f8f35953e5a\",\n-  \"analysis_summary\": \"Run Reliability Gap.\",\n+  \"reflection_key\": \"run:run_20260513T185239_b6a49b69\",\n+  \"analysis_summary\": \"Goal Reflection Loop; Run Reliability Gap.\",\n   \"signals\": [\n+    {\n+      \"code\": \"goal_reflection_loop\",\n+      \"title\": \"Goal Reflection Loop\",\n+      \"evidence\": \"Goal run run_20260513T185239_b6a49b69 finished with status 'failed' and 1 iteration(s).\",\n+      \"upgrade\": \"Persist a structured reasoning playbook update so future plans reuse this execution pattern.\"\n+    },\n     {\n       \"code\": \"run_reliability\",\n       \"title\": \"Run Reliability Gap\",\n@@ -15,6 +21,7 @@\n     }\n   ],\n   \"recommended_actions\": [\n+    \"Persist a structured reasoning playbook update so future plans reuse this execution pattern.\",\n     \"Add stricter preflight checks and staged rollback planning before execution.\"\n   ],\n   \"safety_boundary\": \"Core safety modules remain immutable: agent/safety.py and web/safety.py are blocked.\"",
+          "size_bytes": 1223
+        },
+        {
+          "path": "docs/self_improvement_change_history.md",
+          "change_type": "edited",
+          "sandbox_file": "D:\\Tech Agent Labs\\David\\workspace\\agent_sandbox\\improve_20260513T185441_df85a5de\\prototype\\docs\\self_improvement_change_history.md",
+          "added": 15,
+          "removed": 0,
+          "patch": "--- a/docs/self_improvement_change_history.md\n+++ b/docs/self_improvement_change_history.md\n@@ -40,3 +40,18 @@\n   - Add stricter preflight checks and staged rollback planning before execution.\n \n ---\n+\n+## 2026-05-13T18:54:41.369485+00:00\n+\n+- Trigger: `goal` (`run_20260513T185239_b6a49b69`)\n+- Run: `run_20260513T185239_b6a49b69` / status: `failed`\n+- Reflection: `run:run_20260513T185239_b6a49b69`\n+- Summary: Goal Reflection Loop; Run Reliability Gap.\n+- Signals:\n+  - `goal_reflection_loop`: Goal Reflection Loop | Goal run run_20260513T185239_b6a49b69 finished with status 'failed' and 1 iteration(s).\n+  - `run_reliability`: Run Reliability Gap | Latest goal run ended with status 'failed'.\n+- Proposed actions:\n+  - Persist a structured reasoning playbook update so future plans reuse this execution pattern.\n+  - Add stricter preflight checks and staged rollback planning before execution.\n+\n+---",
+          "size_bytes": 2166
+        }
+      ],
+      "metadata": {
+        "analysis_summary": "Goal Reflection Loop; Run Reliability Gap.",
+        "autonomous": true,
+        "reflection_key": "run:run_20260513T185239_b6a49b69",
+        "run_id": "run_20260513T185239_b6a49b69",
+        "signal_codes": [
+          "goal_reflection_loop",
+          "run_reliability"
+        ],
+        "signature": "d96bb8360b9d8ad098",
+        "trigger": "goal",
+        "trigger_id": "run_20260513T185239_b6a49b69"
+      },
+      "decision": null,
+      "merge": null
+    },
+    {
+      "id": "improve_20260513T195252_1f14794c",
+      "title": "Autonomous Improvement: Goal Reflection Loop",
+      "summary": "Goal Reflection Loop; Iteration Efficiency. This proposal was drafted autonomously from structured reflections and run evidence.",
+      "rationale": "Trigger: goal (run_20260513T194454_84f916f6)\nRun context: run_20260513T194454_84f916f6 / status=success\nReflection key: run:run_20260513T194454_84f916f6\n\nWhy this change was drafted:\n- Goal Reflection Loop; Iteration Efficiency.\n- Convert lessons into concrete planning and memory-indexing heuristics.\n- Keep core safety constraints immutable and require human approval before merge.",
+      "status": "pending",
+      "created_at": "2026-05-13T19:52:52.375251+00:00",
+      "updated_at": "2026-05-13T19:52:52.375251+00:00",
+      "source": "self_improvement_engine",
+      "actor": "david_autonomous",
+      "sandbox_dir": "D:\\Tech Agent Labs\\David\\workspace\\agent_sandbox\\improve_20260513T195252_1f14794c",
+      "proposal_doc": "D:\\Tech Agent Labs\\David\\workspace\\agent_sandbox\\improve_20260513T195252_1f14794c\\PROPOSAL.md",
+      "changes": [
+        {
+          "path": "agent/self_improvement/autonomous_playbook.py",
+          "change_type": "edited",
+          "sandbox_file": "D:\\Tech Agent Labs\\David\\workspace\\agent_sandbox\\improve_20260513T195252_1f14794c\\prototype\\agent\\self_improvement\\autonomous_playbook.py",
+          "added": 16,
+          "removed": 9,
+          "patch": "--- a/agent/self_improvement/autonomous_playbook.py\n+++ b/agent/self_improvement/autonomous_playbook.py\n@@ -6,22 +6,29 @@\n \n from __future__ import annotations\n \n-GENERATED_AT_UTC = \"2026-02-23T16:01:52.105345+00:00\"\n-TRIGGER = \"conversation\"\n-TRIGGER_ID = \"conversation:8791307afcbd41e8b7504f8f35953e5a\"\n-SIGNAL_CODES = [\"run_reliability\"]\n+GENERATED_AT_UTC = \"2026-05-13T19:52:52.374294+00:00\"\n+TRIGGER = \"goal\"\n+TRIGGER_ID = \"run_20260513T194454_84f916f6\"\n+SIGNAL_CODES = [\"goal_reflection_loop\", \"iteration_efficiency\"]\n \n SIGNALS = [\n   {\n-    \"code\": \"run_reliability\",\n-    \"title\": \"Run Reliability Gap\",\n-    \"evidence\": \"Latest goal run ended with status 'failed'.\",\n-    \"upgrade\": \"Add stricter preflight checks and staged rollback planning before execution.\"\n+    \"code\": \"goal_reflection_loop\",\n+    \"title\": \"Goal Reflection Loop\",\n+    \"evidence\": \"Goal run run_20260513T194454_84f916f6 finished with status 'success' and 3 iteration(s).\",\n+    \"upgrade\": \"Persist a structured reasoning playbook update so future plans reuse this execution pattern.\"\n+  },\n+  {\n+    \"code\": \"iteration_efficiency\",\n+    \"title\": \"Iteration Efficiency\",\n+    \"evidence\": \"Iterations until stable green were high (3).\",\n+    \"upgrade\": \"Break goals into smaller checkpoints and enforce narrower edit scopes per iteration.\"\n   }\n ]\n \n RECOMMENDED_ACTIONS = [\n-    \"Add stricter preflight checks and staged rollback planning before execution.\",\n+    \"Persist a structured reasoning playbook update so future plans reuse this execution pattern.\",\n+    \"Break goals into smaller checkpoints and enforce narrower edit scopes per iteration.\",\n ]\n \n def recommended_actions() -> list[str]:",
+          "size_bytes": 1389
+        },
+        {
+          "path": "agent/self_improvement/autonomous_state.json",
+          "change_type": "edited",
+          "sandbox_file": "D:\\Tech Agent Labs\\David\\workspace\\agent_sandbox\\improve_20260513T195252_1f14794c\\prototype\\agent\\self_improvement\\autonomous_state.json",
+          "added": 19,
+          "removed": 12,
+          "patch": "--- a/agent/self_improvement/autonomous_state.json\n+++ b/agent/self_improvement/autonomous_state.json\n@@ -1,21 +1,28 @@\n {\n-  \"generated_at_utc\": \"2026-02-23T16:01:52.105345+00:00\",\n-  \"trigger\": \"conversation\",\n-  \"trigger_id\": \"conversation:8791307afcbd41e8b7504f8f35953e5a\",\n-  \"run_id\": \"run_20260222T151748_a51c7807\",\n-  \"run_status\": \"failed\",\n-  \"reflection_key\": \"conversation:8791307afcbd41e8b7504f8f35953e5a\",\n-  \"analysis_summary\": \"Run Reliability Gap.\",\n+  \"generated_at_utc\": \"2026-05-13T19:52:52.374294+00:00\",\n+  \"trigger\": \"goal\",\n+  \"trigger_id\": \"run_20260513T194454_84f916f6\",\n+  \"run_id\": \"run_20260513T194454_84f916f6\",\n+  \"run_status\": \"success\",\n+  \"reflection_key\": \"run:run_20260513T194454_84f916f6\",\n+  \"analysis_summary\": \"Goal Reflection Loop; Iteration Efficiency.\",\n   \"signals\": [\n     {\n-      \"code\": \"run_reliability\",\n-      \"title\": \"Run Reliability Gap\",\n-      \"evidence\": \"Latest goal run ended with status 'failed'.\",\n-      \"upgrade\": \"Add stricter preflight checks and staged rollback planning before execution.\"\n+      \"code\": \"goal_reflection_loop\",\n+      \"title\": \"Goal Reflection Loop\",\n+      \"evidence\": \"Goal run run_20260513T194454_84f916f6 finished with status 'success' and 3 iteration(s).\",\n+      \"upgrade\": \"Persist a structured reasoning playbook update so future plans reuse this execution pattern.\"\n+    },\n+    {\n+      \"code\": \"iteration_efficiency\",\n+      \"title\": \"Iteration Efficiency\",\n+      \"evidence\": \"Iterations until stable green were high (3).\",\n+      \"upgrade\": \"Break goals into smaller checkpoints and enforce narrower edit scopes per iteration.\"\n     }\n   ],\n   \"recommended_actions\": [\n-    \"Add stricter preflight checks and staged rollback planning before execution.\"\n+    \"Persist a structured reasoning playbook update so future plans reuse this execution pattern.\",\n+    \"Break goals into smaller checkpoints and enforce narrower edit scopes per iteration.\"\n   ],\n   \"safety_boundary\": \"Core safety modules remain immutable: agent/safety.py and web/safety.py are blocked.\"\n }",
+          "size_bytes": 1249
+        },
+        {
+          "path": "docs/self_improvement_change_history.md",
+          "change_type": "edited",
+          "sandbox_file": "D:\\Tech Agent Labs\\David\\workspace\\agent_sandbox\\improve_20260513T195252_1f14794c\\prototype\\docs\\self_improvement_change_history.md",
+          "added": 15,
+          "removed": 0,
+          "patch": "--- a/docs/self_improvement_change_history.md\n+++ b/docs/self_improvement_change_history.md\n@@ -40,3 +40,18 @@\n   - Add stricter preflight checks and staged rollback planning before execution.\n \n ---\n+\n+## 2026-05-13T19:52:52.374294+00:00\n+\n+- Trigger: `goal` (`run_20260513T194454_84f916f6`)\n+- Run: `run_20260513T194454_84f916f6` / status: `success`\n+- Reflection: `run:run_20260513T194454_84f916f6`\n+- Summary: Goal Reflection Loop; Iteration Efficiency.\n+- Signals:\n+  - `goal_reflection_loop`: Goal Reflection Loop | Goal run run_20260513T194454_84f916f6 finished with status 'success' and 3 iteration(s).\n+  - `iteration_efficiency`: Iteration Efficiency | Iterations until stable green were high (3).\n+- Proposed actions:\n+  - Persist a structured reasoning playbook update so future plans reuse this execution pattern.\n+  - Break goals into smaller checkpoints and enforce narrower edit scopes per iteration.\n+\n+---",
+          "size_bytes": 2184
+        }
+      ],
+      "metadata": {
+        "analysis_summary": "Goal Reflection Loop; Iteration Efficiency.",
+        "autonomous": true,
+        "reflection_key": "run:run_20260513T194454_84f916f6",
+        "run_id": "run_20260513T194454_84f916f6",
+        "signal_codes": [
+          "goal_reflection_loop",
+          "iteration_efficiency"
+        ],
+        "signature": "58450d808e32552399",
+        "trigger": "goal",
+        "trigger_id": "run_20260513T194454_84f916f6"
       },
       "decision": null,
       "merge": null
